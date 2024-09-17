@@ -74,9 +74,12 @@ def install_from_source(language):
         repo_url = choice
 
     repo_name = repo_url.split('/')[-1].replace('.git', '')
-    os.makedirs(repo_name, exist_ok=True)
+    sources_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sources')
+    repo_home = sources_path+repo_name
+    os.makedirs(repo_home, exist_ok=True)
 
-    if not os.path.exists(os.path.join(repo_name, '.git')):
+    if not os.path.exists(os.path.join(repo_home, '.git')):
+        os.chdir(sources_path)
         subprocess.run([git_exe, "clone", repo_url, repo_name], check=True)
 
     venv_path = os.path.join(repo_name, "venv")
@@ -98,10 +101,16 @@ def install_from_source(language):
                 requirements = f.read()
         
         torch_packages = re.findall(r'(torch|torchvision|torchaudio)', requirements)
+        cuda_version = re.search(r'\+cu(\d+)', requirements)
+        cuda_version = cuda_version.group(1) if cuda_version else None
+        requirements = re.sub(r'(insightface).*\n', '', requirements)
         onnx_gpu = re.search(r'onnxruntime-gpu', requirements)
         
+        with open(requirements_file, 'w') as f:
+            f.write(requirements)
+
         if torch_packages:
-            torch_cmd = f'"{activate_script}" && "{python}" -m {uv_executable} pip install {" ".join(torch_packages)}'
+            torch_cmd = f'"{activate_script}" && "{python}" -m {uv_executable} pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/{cuda_version}'
             subprocess.run(torch_cmd, shell=True, check=True)
 
         if onnx_gpu:
@@ -109,7 +118,7 @@ def install_from_source(language):
             onnx_zip = os.path.join(repo_name, "onnxruntime-gpu.zip")
             venv_lib_path = os.path.join(repo_name, "venv", "Lib", "site-packages")
             http = urllib3.PoolManager()
-            
+
             with http.request('GET', onnx_url, preload_content=False) as resp, open(onnx_zip, 'wb') as out_file:
                 while True:
                     data = resp.read(1024)
@@ -123,8 +132,28 @@ def install_from_source(language):
         
         install_cmd = f'"{activate_script}" && "{python}" -m {uv_executable} pip install -r "{requirements_file}"'
         subprocess.run(install_cmd, shell=True, check=True)
-        
+        insightface_cmd = f'"{activate_script}" && "{python}" -m {uv_executable} pip install https://huggingface.co/hanamizuki-ai/insightface-releases/resolve/main/insightface-0.7.3-cp310-cp310-win_amd64.whl"'
+        subprocess.run(insightface_cmd, shell=True, check=True)
         open(installed_flag, 'w').close()
+
+    if repo_name == "Deep-Live-Cam":
+        models_dir = os.path.join(repo_name, "models")
+        os.makedirs(models_dir, exist_ok=True)
+        model_to_download_urls = [
+            "https://huggingface.co/hacksider/deep-live-cam/resolve/main/GFPGANv1.4.pth",
+            "https://github.com/facefusion/facefusion-assets/releases/download/models/inswapper_128_fp16.onnx"
+        ]
+        for url in model_to_download_urls:
+            filename = url.split('/')[-1]
+            local_path = os.path.join(models_dir, filename)
+            if not os.path.exists(local_path):
+                http = urllib3.PoolManager()
+                with http.request('GET', url, preload_content=False) as resp, open(local_path, 'wb') as out_file:
+                    while True:
+                        data = resp.read(1024)
+                        if not data:
+                            break
+                        out_file.write(data)
 
 def installed():
     file_path = 'lang.txt'

@@ -20,7 +20,8 @@ license      = "MIT"
 requires-python = "3.10.9"
 dependencies = [
     "tqdm",
-    "uv"
+    "uv",
+    "urllib3",
 ]
 
 [project.scripts]
