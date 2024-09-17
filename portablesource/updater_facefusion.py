@@ -1,23 +1,32 @@
 import os
 import subprocess
-from .install_from_source import get_uv_path
+import sys
 
-git = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'git', 'cmd', 'git.exe')
-ff_obs = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'sources', 'facefusion')
-p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python', 'python.exe')
+git = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'system', 'git', 'cmd', 'git.exe')
+ff_obs = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'facefusion')
+python = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'system', 'python', 'python.exe')
 
 files = [
     ff_obs + "\\next" + "\\facefusion\\content_analyser.py",
     ff_obs + "\\master" + "\\facefusion\\content_analyser.py",
 ]
 
+def get_uv_path():
+    if sys.platform.startswith('win'):
+        scripts_dir = os.path.join(os.path.dirname(python), 'Scripts')
+        uv_executable = os.path.join(scripts_dir, "uv.exe")
+    else:
+        scripts_dir = os.path.join(os.path.dirname(os.path.dirname(python)), 'bin')
+        uv_executable = os.path.join(scripts_dir, "uv")
+    return uv_executable
+
 uv_executable = get_uv_path()
 
 def gradio_version(branch):
     if branch=="master":
-        subprocess.run([p], ["-m", {uv_executable}, "pip", "install", "gradio==3.50.2"])
+        subprocess.run([python], ["-m", {uv_executable}, "pip", "install", "gradio==3.50.2"])
     if branch=="next":
-        subprocess.run([p], ["-m", {uv_executable}, "pip", "install", "gradio==4.40.0"])
+        subprocess.run([python], ["-m", {uv_executable}, "pip", "install", "gradio==4.40.0"])
     
 def process_file_master(file_path):
     with open(file_path, 'r') as f:
@@ -113,7 +122,7 @@ def start_ff(branch, webcam_mode=False):
         if branch=="master":
             args = ["--open-browser"]
 
-        subprocess.run([p, os.path.join(path_to_branch, second_file)] + args)
+        subprocess.run([python, os.path.join(path_to_branch, second_file)] + args)
 
 def get_localized_text(language, key):
     texts = {

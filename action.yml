@@ -1,0 +1,25 @@
+name: PortableSource Setup
+description: Checkout repositories, install common dependencies
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        repository: portablesource/portablesource
+        submodules: recursive
+
+    - name: Install Rye
+      uses: eifinger/setup-rye@v4
+
+    - name: Setup Rust
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+
+    - name: Sync dependencies
+      run: rye sync
+      shell: bash
+
+    - name: Get version
+      run: echo PORTABLESOURCE_VERSION=$(rye version) >> $GITHUB_ENV
+      shell: bash

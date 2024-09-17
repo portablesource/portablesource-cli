@@ -9,6 +9,8 @@ import shutil
 git_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'system', 'git', 'cmd', 'git.exe')
 python = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'system', 'python', 'python.exe')
 ffmpeg = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'system', 'ffmpeg')
+git_cmd = git_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'system', 'git', 'cmd')
+python_scripts = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'system', 'python', 'Scripts')
 
 repos = [
     "https://github.com/facefusion/facefusion",
@@ -38,7 +40,6 @@ def install_uv():
         return uv_executable
     else:
         subprocess.run([python, "-m", "pip", "install", "uv"], check=True)
-    
 
 def get_localized_text(language, key):
     texts = {
@@ -78,7 +79,7 @@ def install_from_source(language):
     repo_home = sources_path+repo_name
     os.makedirs(repo_home, exist_ok=True)
 
-    if not os.path.exists(os.path.join(repo_home, '.git')):
+    if not os.path.exists(os.path.join(repo_home)) and not repo_name=="facefusion":
         os.chdir(sources_path)
         subprocess.run([git_exe, "clone", repo_url, repo_name], check=True)
 
@@ -94,6 +95,65 @@ def install_from_source(language):
 
     requirements_file = os.path.join(repo_name, requirements_filename)
 
+    if repo_name == "facefusion":
+        os.chdir(repo_home)
+        tmp = repo_home + "tmp"
+        os.makedirs(tmp)
+        bat_content = '''@echo off
+setlocal enabledelayedexpansion
+for /d %%i in (tmp\\tmp*,tmp\\pip*) do rd /s /q "%%i" 2>nul || ("%%i" && exit /b 1) & del /q tmp\\tmp* > nul 2>&1 & rd /s /q pip\\cache 2>nul
+
+set "appdata={tmp}"
+set "userprofile={tmp}"
+set "temp={tmp}"
+set "PATH=%PATH%;{git_cmd};{python};{python_scripts};{ffmpeg}"
+
+set "CUDA_MODULE_LOADING=LAZY"
+
+call {activate_script} && {python} updater_facefusion.py
+pause
+
+REM by dony
+'''
+
+        with open('start_nvidia.bat', 'w') as bat_file:
+            bat_file.write(bat_content)
+        updater_facefusion_url = "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/updater_facefusion.py"
+        updater_facefusion_name = "updater_facefusion.py"
+        with http.request('GET', updater_facefusion_url, preload_content=False) as resp, open(updater_facefusion_name, 'wb') as out_file:
+            while True:
+                data = resp.read(1024)
+                if not data:
+                    break
+                out_file.write(data)
+
+    else:
+        os.chdir(repo_home)
+        tmp = repo_home + "tmp"
+        os.makedirs(tmp)
+        app_path = repo_home + "app.py"
+        if not os.path.exists(app_path):
+            print("not found app.py! please check correctly start_nvidia.bat! maybe he dont work.")
+        else:
+            bat_content = '''@echo off
+setlocal enabledelayedexpansion
+for /d %%i in (tmp\\tmp*,tmp\\pip*) do rd /s /q "%%i" 2>nul || ("%%i" && exit /b 1) & del /q tmp\\tmp* > nul 2>&1 & rd /s /q pip\\cache 2>nul
+
+set "appdata={tmp}"
+set "userprofile={tmp}"
+set "temp={tmp}"
+set "PATH=%PATH%;{git_cmd};{python};{python_scripts};{ffmpeg}"
+
+set "CUDA_MODULE_LOADING=LAZY"
+
+call {activate_script} && {python} app.py
+pause
+
+REM by dony
+'''
+            with open('start_nvidia.bat', 'w') as bat_file:
+                bat_file.write(bat_content)
+    
     if os.path.exists(requirements_file):
         installed_flag = os.path.join(venv_path, ".libraries_installed")
         if not os.path.exists(installed_flag):
@@ -154,6 +214,14 @@ def install_from_source(language):
                         if not data:
                             break
                         out_file.write(data)
+
+    if repo_name == "facefusion":
+        ff_path = sources_path+"facefusion"
+        if not os.path.exists(ff_path):
+            os.mkdir(ff_path)
+            os.chdir(ff_path)
+            subprocess.run([git_exe, "clone", repo_url, 'master', '-b', 'master'], check=True)
+            subprocess.run([git_exe, "clone", repo_url, 'next', '-b', 'next'], check=True)
 
 def installed():
     file_path = 'lang.txt'
