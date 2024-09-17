@@ -1,19 +1,23 @@
 import os
 import subprocess
+from .install_from_source import get_uv_path
 
 git = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'git', 'cmd', 'git.exe')
-ff_obs = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'p')
+ff_obs = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'sources', 'facefusion')
 p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python', 'python.exe')
+
 files = [
     ff_obs + "\\next" + "\\facefusion\\content_analyser.py",
     ff_obs + "\\master" + "\\facefusion\\content_analyser.py",
 ]
 
+uv_executable = get_uv_path()
+
 def gradio_version(branch):
     if branch=="master":
-        subprocess.run([p], ["-m", "pip", "install", "gradio==3.50.2"])
+        subprocess.run([p], ["-m", {uv_executable}, "pip", "install", "gradio==3.50.2"])
     if branch=="next":
-        subprocess.run([p], ["-m", "pip", "install", "gradio==4.40.0"])
+        subprocess.run([p], ["-m", {uv_executable}, "pip", "install", "gradio==4.40.0"])
     
 def process_file_master(file_path):
     with open(file_path, 'r') as f:
