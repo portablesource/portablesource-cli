@@ -1,14 +1,56 @@
 import os
 import subprocess
 import sys
+import locale
+import winreg
 
-git = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'system', 'git', 'cmd', 'git.exe')
-ff_obs = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'facefusion')
-python = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'system', 'python', 'python.exe')
+def get_path_for_install():
+    for drive in ['C:', 'D:', 'E:', 'F:']:
+        possible_path = os.path.join(drive, 'portablesource', 'installed.txt')
+        if os.path.exists(possible_path):
+            return os.path.dirname(os.path.dirname(possible_path))
+    language = get_system_language()
+    if not language:
+        language = input(get_localized_text("en", "choose_language")).strip().lower()
+        if language not in ["en", "ru"]:
+            language = "en"
 
+    default_path = "C:\\"
+    user_input = input(get_localized_text(language, "enter_install_path") + f" ({default_path}): ").strip()
+
+    install_path = user_input if user_input else default_path
+
+    full_path = os.path.join(install_path, 'portablesource')
+    if not os.path.exists(full_path):
+        try:
+            os.makedirs(full_path)
+        except OSError:
+            print(get_localized_text(language, "error_creating_directory"))
+            return get_path_for_install()
+    with open(os.path.join(full_path, 'installed.txt'), 'w') as f:
+        f.write('installed')
+
+    return install_path
+
+def get_install_path():
+    for drive in ['C:', 'D:', 'E:', 'F:']:
+        possible_path = os.path.join(drive, 'portablesource', 'installed.txt')
+        if os.path.exists(possible_path):
+            return os.path.dirname(os.path.dirname(possible_path))
+        else:
+            return get_path_for_install()
+
+abs_path = get_install_path()
+git = os.path.join(abs_path, "system", "git", "cmd", "git.exe")
+ff_obs = os.path.join(abs_path, "sources", "facefusion")
+python = os.path.join(abs_path, "system", "python", "python.exe")
+next = os.path.join(ff_obs, "next", "facefusion", "content_analyser.py")
+master = os.path.join(ff_obs, "master", "facefusion", "content_analyser.py")
+venv_path = venv_path = os.path.join(ff_obs, "venv")
+activate_script = os.path.join(venv_path, "Scripts", "activate.bat")
 files = [
-    ff_obs + "\\next" + "\\facefusion\\content_analyser.py",
-    ff_obs + "\\master" + "\\facefusion\\content_analyser.py",
+    next,
+    master,
 ]
 
 def get_uv_path():
@@ -24,9 +66,11 @@ uv_executable = get_uv_path()
 
 def gradio_version(branch):
     if branch=="master":
-        subprocess.run([python], ["-m", {uv_executable}, "pip", "install", "gradio==3.50.2"])
+        old_gradio_cmd = f'"{activate_script}" && "{python}" -m {uv_executable} pip install gradio==3.50.2'
+        subprocess.run(old_gradio_cmd,  shell=True, check=True)
     if branch=="next":
-        subprocess.run([python], ["-m", {uv_executable}, "pip", "install", "gradio==4.40.0"])
+        new_gradio_cmd = f'"{activate_script}" && "{python}" -m {uv_executable} pip install gradio==4.40.0'
+        subprocess.run(new_gradio_cmd, shell=True, check=True)
     
 def process_file_master(file_path):
     with open(file_path, 'r') as f:
@@ -149,31 +193,27 @@ def get_localized_text(language, key):
     }
     return texts[language].get(key, "")
 
-def read_language_from_file(file_path):
-    if os.path.exists(file_path):
-        with open(file_path, 'r', encoding='utf-8') as file:
-            language = file.read().strip().lower()
-            if language in ["en", "ru"]:
-                return language
-    return None
-
-def write_language_to_file(file_path, language):
-    with open(file_path, 'w', encoding='utf-8') as file:
-        file.write(language)
+def get_system_language():
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\International")
+        language = winreg.QueryValueEx(key, "LocaleName")[0]
+        winreg.CloseKey(key)
+        lang_code = language.split('-')[0].lower()
+        return "ru" if lang_code == "ru" else "en"
+    except WindowsError:
+        lang_code = locale.getdefaultlocale()[0].split('_')[0].lower()
+        return "ru" if lang_code == "ru" else "en"
 
 def ask_webcam_mode(language):
     webcam_choice = input(get_localized_text(language, "enable_webcam")).strip().lower()
     return webcam_choice == 'y'
 
 def facefusion():
-    file_path = 'lang.txt'
-    language = read_language_from_file(file_path)
+    language = get_system_language()
     if not language:
         language = input(get_localized_text("en", "choose_language")).strip().lower()
         if language not in ["en", "ru"]:
             language = "en"
-        write_language_to_file(file_path, language)
-
     while True:
         print(get_localized_text(language, "choose_action"))
         print(get_localized_text(language, "update_master"))

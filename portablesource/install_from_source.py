@@ -5,6 +5,9 @@ import urllib3
 import zipfile
 import sys
 import shutil
+import locale
+import winreg
+from .downloader import get_install_path
 
 git_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'system', 'git', 'cmd', 'git.exe')
 python = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'system', 'python', 'python.exe')
@@ -44,29 +47,36 @@ def install_uv():
 def get_localized_text(language, key):
     texts = {
         "en": {
-              "select_repo": "Select a repository number or enter your reference:",
-              "enter_requirements_filename": "Enter the name of the requirements file (press Enter for 'requirements.txt'): ",
+            "choose_language": "Choose a language (en/ru): ",
+            "select_repo": "Select a repository number or enter your reference:",
+            "enter_requirements_filename": "Enter the name of the requirements file (press Enter for 'requirements.txt'): ",
         },
         "ru": {
-             "select_repo": "Выберите номер репозитория или введите свою ссылку: ",
-             "enter_requirements_filename": "Введите имя файла с библиотеками (нажмите Enter для 'requirements.txt'): ",
+            "choose_language": "Выберите язык (en/ru): ",
+            "select_repo": "Выберите номер репозитория или введите свою ссылку: ",
+            "enter_requirements_filename": "Введите имя файла с библиотеками (нажмите Enter для 'requirements.txt'): ",
+             
         }
     }
     return texts[language].get(key, "")
 
-def read_language_from_file(file_path):
-    if os.path.exists(file_path):
-        with open(file_path, 'r', encoding='utf-8') as file:
-            language = file.read().strip().lower()
-            if language in ["en", "ru"]:
-                return language
-    return None
-
-def write_language_to_file(file_path, language):
-    with open(file_path, 'w', encoding='utf-8') as file:
-        file.write(language)
+def get_system_language():
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\International")
+        language = winreg.QueryValueEx(key, "LocaleName")[0]
+        winreg.CloseKey(key)
+        lang_code = language.split('-')[0].lower()
+        return "ru" if lang_code == "ru" else "en"
+    except WindowsError:
+        lang_code = locale.getdefaultlocale()[0].split('_')[0].lower()
+        return "ru" if lang_code == "ru" else "en"
 
 def install_from_source(language):
+    language = get_system_language()
+    if not language:
+        language = input(get_localized_text("en", "choose_language")).strip().lower()
+        if language not in ["en", "ru"]:
+            language = "en"
     choice = input(get_localized_text(language, "select_repo")).strip()
 
     if choice.isdigit() and 1 <= int(choice) <= len(repos):
@@ -75,7 +85,8 @@ def install_from_source(language):
         repo_url = choice
 
     repo_name = repo_url.split('/')[-1].replace('.git', '')
-    sources_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sources')
+    abs_path = get_install_path()
+    sources_path = abs_path+"sources"
     repo_home = sources_path+repo_name
     os.makedirs(repo_home, exist_ok=True)
 
@@ -224,12 +235,9 @@ REM by dony
             subprocess.run([git_exe, "clone", repo_url, 'next', '-b', 'next'], check=True)
 
 def installed():
-    file_path = 'lang.txt'
-    language = read_language_from_file(file_path)
+    language = get_system_language()
     if not language:
         language = input(get_localized_text("en", "choose_language")).strip().lower()
         if language not in ["en", "ru"]:
             language = "en"
-        write_language_to_file(file_path, language)
     install_from_source()
-
