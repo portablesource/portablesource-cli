@@ -1,5 +1,5 @@
 import os
-import urllib3
+import requests
 import subprocess
 from tqdm import tqdm
 from urllib.parse import urlparse
@@ -22,7 +22,7 @@ def get_localized_text(language, key):
         },
         "ru": {
             "choose_language": "Выберите язык (en/ru): ",
-            "which_path": "Выберите путь установки, по уполномачению C:\ :",
+            "which_path": "Выберите путь установки, дефолтный C:\ :",
             "error_creating_directory": "Ошибка создания директории!",
         }
     }
@@ -39,11 +39,15 @@ def get_system_language():
         lang_code = locale.getdefaultlocale()[0].split('_')[0].lower()
         return "ru" if lang_code == "ru" else "en"
 
+def get_available_drives():
+    drives = []
+    for drive in range(65, 91):  # ASCII коды от A (65) до Z (90)
+        drive_letter = f"{chr(drive)}:\\"
+        if os.path.exists(drive_letter):
+            drives.append(drive_letter)
+    return drives
+
 def get_path_for_install():
-    for drive in ['C:', 'D:', 'E:', 'F:']:
-        possible_path = os.path.join(drive, 'portablesource', 'installed.txt')
-        if os.path.exists(possible_path):
-            return os.path.dirname(os.path.dirname(possible_path))
     language = get_system_language()
     if not language:
         language = input(get_localized_text("en", "choose_language")).strip().lower()
@@ -51,7 +55,7 @@ def get_path_for_install():
             language = "en"
 
     default_path = "C:\\"
-    user_input = input(get_localized_text(language, "enter_install_path") + f" ({default_path}): ").strip()
+    user_input = input(get_localized_text(language, "which_path") + f" ({default_path}): ").strip()
 
     install_path = user_input if user_input else default_path
 
@@ -62,46 +66,51 @@ def get_path_for_install():
         except OSError:
             print(get_localized_text(language, "error_creating_directory"))
             return get_path_for_install()
+
     with open(os.path.join(full_path, 'installed.txt'), 'w') as f:
         f.write('installed')
 
-    return install_path
+    return full_path
 
 def get_install_path():
-    for drive in ['C:', 'D:', 'E:', 'F:']:
+    drives = get_available_drives()
+    install_path = None
+    for drive in drives:
         possible_path = os.path.join(drive, 'portablesource', 'installed.txt')
         if os.path.exists(possible_path):
-            return os.path.dirname(os.path.dirname(possible_path))
+            install_path = os.path.dirname(possible_path)
+            return install_path
         else:
-            return get_path_for_install()
+            install_path = get_path_for_install()
+            return install_path
+    return install_path
 
 def download_file(url, output_dir='system'):
     os.makedirs(output_dir, exist_ok=True)
     filename = os.path.basename(urlparse(url).path)
     output_path = os.path.join(output_dir, filename)
-    http = urllib3.PoolManager()
+    response = requests.get(url, stream=True)
+    file_size = int(response.headers.get('content-length', 0))
 
-    with http.request('HEAD', url, preload_content=False) as response:
-            file_size = int(response.headers.get('Content-Length', 0))
-
-    with http.request('GET', url, preload_content=False) as response, open(output_path, 'wb') as out_file:
-            with tqdm(total=file_size, unit='B', unit_scale=True, unit_divisor=1024) as pbar:
-                for chunk in response.stream(1024):
-                    out_file.write(chunk)
-                    pbar.update(len(chunk))
+    with open(output_path, 'wb') as out_file, tqdm(
+        desc=filename,
+        total=file_size,
+        unit='iB',
+        unit_scale=True,
+        unit_divisor=1024,
+    ) as pbar:
+        for data in response.iter_content(chunk_size=1024):
+            size = out_file.write(data)
+            pbar.update(size)
     return output_path
 
 def extract_7z(archive_path, output_dir, seven_zip_path):
-    archive_name = os.path.splitext(os.path.basename(archive_path))[0]
-    extract_dir = os.path.join(output_dir, archive_name)
-
-    command = [seven_zip_path, 'x', archive_path, f'-o{extract_dir}', '-y']
-
+    command = [seven_zip_path, 'x', archive_path, f'-o{output_dir}', '-y']
     try:
-            subprocess.run(command, check=True)
-            return True
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
     except subprocess.CalledProcessError as e:
-            return False
+        return False
 
 def download_extract_and_cleanup(links, output_dir='system'):
     required_folders = ['python', 'ffmpeg', 'git']
@@ -126,4 +135,7 @@ def download_extract_and_cleanup(links, output_dir='system'):
         if extract_7z(archive, output_dir, seven_zip_path):
             os.remove(archive)
 
-    os.remove(seven_zip_path)
+def download_for_main():
+    possible_path_20 = get_install_path()
+    system = os.path.join(possible_path_20, "system")
+    download_extract_and_cleanup(links, output_dir=system)
