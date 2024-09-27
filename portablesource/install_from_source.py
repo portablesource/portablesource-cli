@@ -6,7 +6,7 @@ import winreg
 from .downloader import get_install_path, download_for_main
 from tqdm import tqdm
 import requests
-import time
+import platform 
 
 install_path = get_install_path()
 git_exe = os.path.join(install_path, 'system', 'git', 'cmd', 'git.exe')
@@ -235,36 +235,68 @@ REM by dony
 
 
         if onnx_gpu or onnxruntime:
-            requirements = re.sub(r'onnxruntime(?!-gpu)', 'onnxruntime-gpu', requirements)
+            system = platform.system()
+            if system == "Windows":
+                try:
+                    output = subprocess.check_output(["wmic", "path", "win32_VideoController", "get", "name"]).decode("utf-8")
+                    gpus = [line.strip() for line in output.split('\n') if line.strip() != "" and line.strip() != "Name"]
+                except:
+                    gpus = []
+            elif system == "Linux":
+                try:
+                    output = subprocess.check_output(["lspci"]).decode("utf-8")
+                    gpus = [line for line in output.split('\n') if "VGA" in line or "3D" in line]
+                except:
+                    gpus = []
+            else:
+                gpus = []
+
+            if gpus:
+                for gpu in gpus:
+                    if "NVIDIA" in gpu.upper():
+                        ort_version = "onnxruntime-gpu"
+                        ort_dll_files = ["onnxruntime.dll", "onnxruntime_providers_cuda.dll", "onnxruntime_providers_shared.dll", "onnxruntime_providers_tensorrt.dll"]
+                    else:
+                        ort_version = "onnxruntime-directml"
+                        ort_dll_files = None
+            else:
+                ort_version = "onnxruntime"
+                ort_dll_files = None
+
             ort_lib_path = os.path.join(repo_path, "venv", "Lib", "site-packages", "onnxruntime")
-            for item in os.listdir(ort_lib_path):
-                if item.endswith('dll'):
-                    item_path = os.path.join(ort_lib_path, item)
+
+            if ort_dll_files is None:
+                if ort_version == "onnxruntime-directml":
+                    install_cmd = f'"{activate_script}" && "{uv_executable}" pip install -r "{ort_version}==1.19.2"'
+                    subprocess.run(install_cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                elif ort_version== "onnxruntime":
+                    install_cmd = f'"{activate_script}" && "{uv_executable}" pip install -r "{ort_version}==1.19.2"'
+                    subprocess.run(install_cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                install_cmd = f'"{activate_script}" && "{uv_executable}" pip install -r "{ort_version}==1.19.2"'
+                subprocess.run(install_cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                for item in os.listdir(ort_lib_path):
+                    if item.endswith('dll'):
+                        item_path = os.path.join(ort_lib_path, item)
                     if os.path.isfile(item_path):
                         os.remove(item_path)
-            
-            ort_dll_files = ["onnxruntime.dll", "onnxruntime_providers_cuda.dll", "onnxruntime_providers_shared.dll", "onnxruntime_providers_tensorrt.dll"]
 
-            for file_name in ort_dll_files:
-                file_url = f"https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/{file_name}"
-                file_path = os.path.join(ort_lib_path, file_name)
-    
-                response = requests.get(file_url, stream=True)
-                total_size = int(response.headers.get('content-length', 0))
+                for file_name in ort_dll_files:
+                    file_url = f"https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/{file_name}"
+                    file_path = os.path.join(ort_lib_path, file_name)
+                    response = requests.get(file_url, stream=True)
+                    total_size = int(response.headers.get('content-length', 0))
 
-                with open(file_path, 'wb') as file, tqdm(
-                desc=file_name,
-                total=total_size,
-                unit='kB',
-                unit_scale=True,
-                unit_divisor=1024,
-                ) as progress_bar:
-                    for data in response.iter_content(chunk_size=16384):
-                        size = file.write(data)
-                        progress_bar.update(size)
-    
-                        time.sleep(1)
-
+                    with open(file_path, 'wb') as file, tqdm(
+                    desc=file_name,
+                    total=total_size,
+                    unit='kB',
+                    unit_scale=True,
+                    unit_divisor=1024,
+                    ) as progress_bar:
+                        for data in response.iter_content(chunk_size=16384):
+                            size = file.write(data)
+                            progress_bar.update(size)
         open(installed_flag, 'w').close()
 
     if repo_name == "Deep-Live-Cam":
