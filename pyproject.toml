@@ -1,10 +1,8 @@
 [project.urls]
 GitHub    = "https://github.com/portablesource/portablesource"
 Changelog = "https://github.com/portablesource/portablesource/releases"
-Funding   = ""
 Contact   = "https://t.me/neuralchatik"
 Download  = "https://github.com/portablesource/portablesource/releases"
-Docs      = ""
 Homepage  = "https://github.com/portablesource/portablesource"
 
 [tool.hatch.version]
