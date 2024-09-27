@@ -55,13 +55,11 @@ def install_uv():
 def get_localized_text(language, key):
     texts = {
         "en": {
-            "choose_language": "Choose a language (en/ru): ",
             "installed" : "Installed! Try to use.",
             "select_repo": "Select a repository number or enter your reference:",
             "enter_requirements_filename": "Enter the name of the requirements file (press Enter for 'requirements.txt'): ",
         },
         "ru": {
-            "choose_language": "Выберите язык (en/ru): ",
             "installed" : "Установлено! Надеюсь вам понравится.",
             "select_repo": "Выберите номер репозитория или введите свою ссылку: ",
             "enter_requirements_filename": "Введите имя файла с библиотеками (нажмите Enter для 'requirements.txt'): ",
@@ -126,6 +124,7 @@ def install_from_source(language):
     repo_path = os.path.join(abs_path, "sources", repo_name)
     venv_path, activate_script = create_venv(repo_path, python)
     uv_executable = install_uv()
+
     if repo_name == "facefusion":
         requirements_file = os.path.join(repo_path, "master", "requirements.txt")
     else:
@@ -133,6 +132,19 @@ def install_from_source(language):
 
     python_venv = os.path.join(install_path, 'system', repo_name, 'venv', 'Scripts', 'python.exe')
     python_facefusion = os.path.join(install_path, 'system', 'facefusion', 'venv', 'Scripts', 'python.exe')
+
+    if repo_name == "facefusion":
+        app_name = "updater_facefusion.py"
+    elif repo_name == "Rope-Live":
+        app_name == "Rope.py"
+    elif repo_name == "LivePortrait":
+        app_name = "app.py"
+    elif repo_name == "ComfyUI":
+        app_name == "main.py"
+    elif repo_name == "Deep-Live-Cam":
+        app_name == "run.py"
+    elif repo_name == "stable-diffusion-webui-forge":
+        app_name == "webui.py"
 
     if repo_name == "facefusion":
         os.chdir(repo_home)
@@ -150,7 +162,7 @@ set "PATH=%PATH%;{git_cmd};{python_facefusion};{python_scripts};{ffmpeg};%PATH%"
 
 set "CUDA_MODULE_LOADING=LAZY"
 
-"{python_facefusion}" updater_facefusion.py
+"{python_facefusion}" {app_name}
 pause
 endlocal
 REM by dony
@@ -185,7 +197,7 @@ set "PATH=%PATH%;{git_cmd};{python_venv};{python_scripts};{ffmpeg};%PATH%"
 
 set "CUDA_MODULE_LOADING=LAZY"
 
-"{python_venv}" app.py
+"{python_venv}" {app_name}
 pause
 endlocal
 REM by dony
@@ -210,16 +222,17 @@ REM by dony
         with open(requirements_file, 'w') as f:
             f.write(requirements)
 
+        install_cmd = f'"{activate_script}" && "{uv_executable}" pip install -r "{requirements_file}"'
+        subprocess.run(install_cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        insightface_cmd = f'"{activate_script}" && "{uv_executable}" pip install https://huggingface.co/hanamizuki-ai/insightface-releases/resolve/main/insightface-0.7.3-cp310-cp310-win_amd64.whl"'
+        subprocess.run(insightface_cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if torch_packages:
             torch_cmd = f'"{activate_script}" && "{uv_executable}" pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/{cuda_version}'
             subprocess.run(torch_cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if onnx_fix and repo_name!="facefusion":
             onnx_cmd = f'"{activate_script}" && "{uv_executable}" pip install onnx==1.16.1'
             subprocess.run(onnx_cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        install_cmd = f'"{activate_script}" && "{uv_executable}" pip install -r "{requirements_file}"'
-        subprocess.run(install_cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        insightface_cmd = f'"{activate_script}" && "{uv_executable}" pip install https://huggingface.co/hanamizuki-ai/insightface-releases/resolve/main/insightface-0.7.3-cp310-cp310-win_amd64.whl"'
-        subprocess.run(insightface_cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
 
         if onnx_gpu or onnxruntime:
             requirements = re.sub(r'onnxruntime(?!-gpu)', 'onnxruntime-gpu', requirements)
@@ -273,8 +286,6 @@ REM by dony
 
 def installed():
     language = get_system_language()
-    if not language:
-        language = input(get_localized_text("en", "choose_language")).strip().lower()
-        if language not in ["en", "ru"]:
-            language = "en"
+    if language not in ["en", "ru"]:
+        language = "en"
     install_from_source(language)

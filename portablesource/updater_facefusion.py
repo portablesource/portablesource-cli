@@ -111,7 +111,7 @@ def get_system_language():
 
 def ask_webcam_mode(language):
     webcam_choice = input(get_localized_text(language, "enable_webcam")).strip().lower()
-    return webcam_choice == 'y'
+    return webcam_choice == 'n'
 
 def facefusion():
     language = get_system_language()
