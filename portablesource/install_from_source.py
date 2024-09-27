@@ -255,11 +255,11 @@ REM by dony
                 with open(file_path, 'wb') as file, tqdm(
                 desc=file_name,
                 total=total_size,
-                unit='iB',
+                unit='kB',
                 unit_scale=True,
                 unit_divisor=1024,
                 ) as progress_bar:
-                    for data in response.iter_content(chunk_size=1024):
+                    for data in response.iter_content(chunk_size=16384):
                         size = file.write(data)
                         progress_bar.update(size)
     
