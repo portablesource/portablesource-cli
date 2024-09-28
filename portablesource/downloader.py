@@ -5,19 +5,23 @@ from tqdm import tqdm
 from urllib.parse import urlparse
 import winreg
 import locale
+from .get_gpu import get_gpu
 
 links = [
     "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/python.7z",
     "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/ffmpeg.7z",
     "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/git.7z",
+    "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/CUDA.7z",
     "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/7z.exe",
 ]
+
+gpu = get_gpu()
 
 def get_localized_text(language, key):
     texts = {
         "en": {
             "choose_language": "Choose a language (en/ru): ",
-            "which_path": "Select a installation path or enter your reference, default C:\:",
+            "which_path": "Select a installation path or enter your reference, default C:\ :",
             "error_creating_directory": "Error creating directory!",
         },
         "ru": {
@@ -41,7 +45,7 @@ def get_system_language():
 
 def get_available_drives():
     drives = []
-    for drive in range(65, 91):  # ASCII коды от A (65) до Z (90)
+    for drive in range(65, 91):
         drive_letter = f"{chr(drive)}:\\"
         if os.path.exists(drive_letter):
             drives.append(drive_letter)
@@ -55,7 +59,7 @@ def get_path_for_install():
             language = "en"
 
     default_path = "C:\\"
-    user_input = input(get_localized_text(language, "which_path") + f" ({default_path}): ").strip()
+    user_input = input(get_localized_text(language, "which_path")).strip()
 
     install_path = user_input if user_input else default_path
 
@@ -99,7 +103,7 @@ def download_file(url, output_dir='system'):
         unit_scale=True,
         unit_divisor=1024,
     ) as pbar:
-        for data in response.iter_content(chunk_size=1024):
+        for data in response.iter_content(chunk_size=16384):
             size = out_file.write(data)
             pbar.update(size)
     return output_path
@@ -113,7 +117,11 @@ def extract_7z(archive_path, output_dir, seven_zip_path):
         return False
 
 def download_extract_and_cleanup(links, output_dir='system'):
-    required_folders = ['python', 'ffmpeg', 'git']
+    if gpu == "NVIDIA":
+        required_folders = ['python', 'ffmpeg', 'git', 'CUDA']
+    else:
+        required_folders = ['python', 'ffmpeg', 'git']
+
     missing_folders = [folder for folder in required_folders if not os.path.exists(os.path.join(output_dir, folder))]
 
     if not missing_folders:
