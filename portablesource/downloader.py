@@ -5,23 +5,35 @@ from tqdm import tqdm
 from urllib.parse import urlparse
 import winreg
 import locale
+from .get_gpu import get_gpu
 
 links = [
     "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/python.7z",
     "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/ffmpeg.7z",
     "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/git.7z",
+    "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/CUDA.7z",
     "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/7z.exe",
 ]
+
+gpu = get_gpu()
+
+def set_path(cuda_path):
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment", 0, winreg.KEY_ALL_ACCESS)
+        current_path = winreg.QueryValueEx(key, "Path")[0]
+        if cuda_path not in current_path:
+            new_path = current_path + ";" + cuda_path
+            winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, new_path)
+        winreg.CloseKey(key)
+        os.environ["PATH"] = new_path
+        return True
 
 def get_localized_text(language, key):
     texts = {
         "en": {
-            "choose_language": "Choose a language (en/ru): ",
-            "which_path": "Select a installation path or enter your reference, default C:\:",
+            "which_path": "Select a installation path or enter your reference, default C:\ :",
             "error_creating_directory": "Error creating directory!",
         },
         "ru": {
-            "choose_language": "Выберите язык (en/ru): ",
             "which_path": "Выберите путь установки, дефолтный C:\ :",
             "error_creating_directory": "Ошибка создания директории!",
         }
@@ -39,24 +51,45 @@ def get_system_language():
         lang_code = locale.getdefaultlocale()[0].split('_')[0].lower()
         return "ru" if lang_code == "ru" else "en"
 
-def get_available_drives():
-    drives = []
-    for drive in range(65, 91):  # ASCII коды от A (65) до Z (90)
-        drive_letter = f"{chr(drive)}:\\"
-        if os.path.exists(drive_letter):
-            drives.append(drive_letter)
-    return drives
+def add_to_user_path(path):
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_ALL_ACCESS)
+        current_path, _ = winreg.QueryValueEx(key, "Path")
+        if path not in current_path:
+            new_path = current_path + ";" + path if current_path else path
+            winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, new_path)
+        winreg.CloseKey(key)
+        os.environ['PATH'] = os.environ['PATH'] + ";" + path
+        return True
+    except Exception as e:
+        return False
+
+def get_installed_path():
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_READ)
+        path, _ = winreg.QueryValueEx(key, "Path")
+        winreg.CloseKey(key)
+        paths = path.split(';')
+        for p in paths:
+            if 'portablesource' in p:
+                if os.path.exists(os.path.join(p, 'installed.txt')):
+                    return p
+        env_path = os.environ.get('PATH', '')
+        env_paths = env_path.split(os.pathsep)
+        for p in env_paths:
+            if 'portablesource' in p:
+                if os.path.exists(os.path.join(p, 'installed.txt')):
+                    return p
+        return None
+    except Exception as e:
+        return None
 
 def get_path_for_install():
     language = get_system_language()
-    if not language:
-        language = input(get_localized_text("en", "choose_language")).strip().lower()
-        if language not in ["en", "ru"]:
-            language = "en"
-
+    if language not in ["en", "ru"]:
+        language = "en"
     default_path = "C:\\"
-    user_input = input(get_localized_text(language, "which_path") + f" ({default_path}): ").strip()
-
+    user_input = input(get_localized_text(language, "which_path")).strip()
     install_path = user_input if user_input else default_path
 
     full_path = os.path.join(install_path, 'portablesource')
@@ -73,16 +106,13 @@ def get_path_for_install():
     return full_path
 
 def get_install_path():
-    drives = get_available_drives()
-    install_path = None
-    for drive in drives:
-        possible_path = os.path.join(drive, 'portablesource', 'installed.txt')
-        if os.path.exists(possible_path):
-            install_path = os.path.dirname(possible_path)
-            return install_path
-        else:
-            install_path = get_path_for_install()
-            return install_path
+    tested_path = get_installed_path()
+    if tested_path is None:
+        full_path = get_path_for_install()
+        add_to_user_path(full_path)
+        install_path = full_path
+    else:
+        install_path = tested_path
     return install_path
 
 def download_file(url, output_dir='system'):
@@ -99,7 +129,7 @@ def download_file(url, output_dir='system'):
         unit_scale=True,
         unit_divisor=1024,
     ) as pbar:
-        for data in response.iter_content(chunk_size=1024):
+        for data in response.iter_content(chunk_size=16384):
             size = out_file.write(data)
             pbar.update(size)
     return output_path
@@ -113,7 +143,13 @@ def extract_7z(archive_path, output_dir, seven_zip_path):
         return False
 
 def download_extract_and_cleanup(links, output_dir='system'):
+    #if gpu == "NVIDIA": #maybe
+        #required_folders = ['python', 'ffmpeg', 'git', 'CUDA']
+    #else:
+        #required_folders = ['python', 'ffmpeg', 'git']
+
     required_folders = ['python', 'ffmpeg', 'git']
+
     missing_folders = [folder for folder in required_folders if not os.path.exists(os.path.join(output_dir, folder))]
 
     if not missing_folders:
@@ -136,6 +172,10 @@ def download_extract_and_cleanup(links, output_dir='system'):
             os.remove(archive)
 
 def download_for_main():
-    possible_path_20 = get_install_path()
-    system = os.path.join(possible_path_20, "system")
+    path = get_install_path()
+    system = os.path.join(path, "system")
     download_extract_and_cleanup(links, output_dir=system)
+    #if gpu == "NVIDIA":
+        #cuda_path = os.path.join(system, "CUDA")
+        #if os.path.exists(cuda_path):
+            #set_path(cuda_path)

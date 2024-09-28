@@ -4,9 +4,10 @@ import re
 import locale
 import winreg
 from .downloader import get_install_path, download_for_main
+import requests
+from .get_gpu import get_gpu
 from tqdm import tqdm
 import requests
-import time
 
 install_path = get_install_path()
 git_exe = os.path.join(install_path, 'system', 'git', 'cmd', 'git.exe')
@@ -81,10 +82,9 @@ def get_system_language():
 
 def install_from_source(language):
     language = get_system_language()
-    if not language:
-        language = input(get_localized_text("en", "choose_language")).strip().lower()
-        if language not in ["en", "ru"]:
-            language = "en"
+    if language not in ["en", "ru"]:
+        language = "en"
+    
     choice = input(get_localized_text(language, "select_repo")).strip()
 
     if choice.isdigit() and 1 <= int(choice) <= len(repos):
@@ -233,37 +233,44 @@ REM by dony
             onnx_cmd = f'"{activate_script}" && "{uv_executable}" pip install onnx==1.16.1'
             subprocess.run(onnx_cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-
         if onnx_gpu or onnxruntime:
-            requirements = re.sub(r'onnxruntime(?!-gpu)', 'onnxruntime-gpu', requirements)
-            ort_lib_path = os.path.join(repo_path, "venv", "Lib", "site-packages", "onnxruntime")
-            for item in os.listdir(ort_lib_path):
-                if item.endswith('dll'):
-                    item_path = os.path.join(ort_lib_path, item)
-                    if os.path.isfile(item_path):
-                        os.remove(item_path)
-            
-            ort_dll_files = ["onnxruntime.dll", "onnxruntime_providers_cuda.dll", "onnxruntime_providers_shared.dll", "onnxruntime_providers_tensorrt.dll"]
+            gpu = get_gpu()
+            if gpu == "NVIDIA":
+                ort_version = "onnxruntime-gpu"
+            elif gpu == "DIRECTML":
+                ort_version = "onnxruntime-directml"
+            elif gpu == None:
+                ort_version = "onnxruntime"
 
-            for file_name in ort_dll_files:
-                file_url = f"https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/{file_name}"
-                file_path = os.path.join(ort_lib_path, file_name)
-    
-                response = requests.get(file_url, stream=True)
-                total_size = int(response.headers.get('content-length', 0))
+            install_cmd = f'"{activate_script}" && "{uv_executable}" pip install -r "{ort_version}==1.18.1"'
+            subprocess.run(install_cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+            if gpu == "NVIDIA":
+                ort_dll_files = ["onnxruntime_providers_cuda.dll", "onnxruntime_providers_shared.dll", "onnxruntime_providers_tensorrt.dll"]
+                ort_lib_path = os.path.join(repo_path, "venv", "Lib", "site-packages", "onnxruntime")
 
-                with open(file_path, 'wb') as file, tqdm(
-                desc=file_name,
-                total=total_size,
-                unit='kB',
-                unit_scale=True,
-                unit_divisor=1024,
-                ) as progress_bar:
-                    for data in response.iter_content(chunk_size=16384):
-                        size = file.write(data)
-                        progress_bar.update(size)
-    
-                        time.sleep(1)
+                for item in os.listdir(ort_lib_path):
+                    if item.endswith('dll'):
+                        item_path = os.path.join(ort_lib_path, item)
+                        if os.path.isfile(item_path):
+                            os.remove(item_path)
+
+                for file_name in ort_dll_files:
+                    file_url = f"https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/{file_name}"
+                    file_path = os.path.join(ort_lib_path, file_name)
+                    response = requests.get(file_url, stream=True)
+                    total_size = int(response.headers.get('content-length', 0))
+
+                    with open(file_path, 'wb') as file, tqdm(
+                    desc=file_name,
+                    total=total_size,
+                    unit='kB',
+                    unit_scale=True,
+                    unit_divisor=1024,
+                    ) as progress_bar:
+                        for data in response.iter_content(chunk_size=16384):
+                            size = file.write(data)
+                            progress_bar.update(size)
 
         open(installed_flag, 'w').close()
 
@@ -280,7 +287,7 @@ REM by dony
             if not os.path.exists(local_path):
                 response = requests.get(url, stream=True)
                 with open(local_path, 'wb') as out_file:
-                    for chunk in response.iter_content(chunk_size=1024):
+                    for chunk in response.iter_content(chunk_size=16384):
                         if chunk:
                             out_file.write(chunk)
 
