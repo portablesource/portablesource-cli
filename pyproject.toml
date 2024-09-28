@@ -13,7 +13,7 @@ name         = "portablesource"
 dynamic      = ["version"]
 description  = "Library for portable source!"
 authors      = [{name="NeuroDonu", email="112660822+NeuroDonu@users.noreply.github.com"}]
-readme       = "README.md"
+readme       = "Readme.md"
 license      = "MIT"
 requires-python = ">=3.5"
 dependencies = [
