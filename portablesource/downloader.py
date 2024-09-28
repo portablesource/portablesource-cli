@@ -122,10 +122,12 @@ def extract_7z(archive_path, output_dir, seven_zip_path):
         return False
 
 def download_extract_and_cleanup(links, output_dir='system'):
-    if gpu == "NVIDIA":
-        required_folders = ['python', 'ffmpeg', 'git', 'CUDA']
-    else:
-        required_folders = ['python', 'ffmpeg', 'git']
+    #if gpu == "NVIDIA": #maybe
+        #required_folders = ['python', 'ffmpeg', 'git', 'CUDA']
+    #else:
+        #required_folders = ['python', 'ffmpeg', 'git']
+
+    required_folders = ['python', 'ffmpeg', 'git']
 
     missing_folders = [folder for folder in required_folders if not os.path.exists(os.path.join(output_dir, folder))]
 
@@ -152,7 +154,7 @@ def download_for_main():
     path = get_install_path()
     system = os.path.join(path, "system")
     download_extract_and_cleanup(links, output_dir=system)
-    if gpu == "NVIDIA":
-        cuda_path = os.path.join(system, "CUDA")
-        if os.path.exists(cuda_path):
-            set_path(cuda_path)
+    #if gpu == "NVIDIA":
+        #cuda_path = os.path.join(system, "CUDA")
+        #if os.path.exists(cuda_path):
+            #set_path(cuda_path)
