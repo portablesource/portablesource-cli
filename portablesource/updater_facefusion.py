@@ -1,12 +1,11 @@
 import os
 import subprocess
-import sys
 import locale
 import winreg
 
 def get_available_drives():
     drives = []
-    for drive in range(65, 91):  # ASCII коды от A (65) до Z (90)
+    for drive in range(65, 91):
         drive_letter = f"{chr(drive)}:\\"
         if os.path.exists(drive_letter):
             drives.append(drive_letter)
