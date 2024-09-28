@@ -3,24 +3,45 @@ import subprocess
 import locale
 import winreg
 
-def get_available_drives():
-    drives = []
-    for drive in range(65, 91):
-        drive_letter = f"{chr(drive)}:\\"
-        if os.path.exists(drive_letter):
-            drives.append(drive_letter)
-    return drives
+def add_to_user_path(path):
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_ALL_ACCESS)
+        current_path, _ = winreg.QueryValueEx(key, "Path")
+        if path not in current_path:
+            new_path = current_path + ";" + path if current_path else path
+            winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, new_path)
+        winreg.CloseKey(key)
+        os.environ['PATH'] = os.environ['PATH'] + ";" + path
+        return True
+    except Exception as e:
+        return False
+
+def get_installed_path():
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_READ)
+        path, _ = winreg.QueryValueEx(key, "Path")
+        winreg.CloseKey(key)
+        paths = path.split(';')
+        for p in paths:
+            if 'portablesource' in p:
+                if os.path.exists(os.path.join(p, 'installed.txt')):
+                    return p
+        env_path = os.environ.get('PATH', '')
+        env_paths = env_path.split(os.pathsep)
+        for p in env_paths:
+            if 'portablesource' in p:
+                if os.path.exists(os.path.join(p, 'installed.txt')):
+                    return p
+        return None
+    except Exception as e:
+        return None
 
 def get_path_for_install():
     language = get_system_language()
-    if not language:
-        language = input(get_localized_text("en", "choose_language")).strip().lower()
-        if language not in ["en", "ru"]:
-            language = "en"
-
+    if language not in ["en", "ru"]:
+        language = "en"
     default_path = "C:\\"
-    user_input = input(get_localized_text(language, "which_path") + f" ({default_path}): ").strip()
-
+    user_input = input(get_localized_text(language, "which_path")).strip()
     install_path = user_input if user_input else default_path
 
     full_path = os.path.join(install_path, 'portablesource')
@@ -37,16 +58,13 @@ def get_path_for_install():
     return full_path
 
 def get_install_path():
-    drives = get_available_drives()
-    install_path = None
-    for drive in drives:
-        possible_path = os.path.join(drive, 'portablesource', 'installed.txt')
-        if os.path.exists(possible_path):
-            install_path = os.path.dirname(possible_path)
-            return install_path
-        else:
-            install_path = get_path_for_install()
-            return install_path
+    tested_path = get_installed_path()
+    if tested_path is None:
+        full_path = get_path_for_install()
+        add_to_user_path(full_path)
+        install_path = full_path
+    else:
+        install_path = tested_path
     return install_path
 
 abs_path = get_install_path()
@@ -64,19 +82,17 @@ def update_branch(branch):
     run_git_command(['checkout', 'master'])
     run_git_command(['pull', 'origin', 'master', '--rebase'])
 
-def start_ff(branch, webcam_mode=False):
+def start_ff(webcam_mode=False):
     path_to_branch = master_path
     second_file = os.path.join(path_to_branch, "facefusion.py")
 
-    if webcam_mode:
+    if webcam_mode == True:
         args = ["run", "--open-browser", "--ui-layouts", "webcam"]
     else:
-        args = ["run"]
+        args = ["run", "--open-browser"]
 
     cmd = f'"{python}" "{second_file}" {" ".join(args)}'
-    
     subprocess.run(cmd, shell=True, check=True)
-
 
 def get_localized_text(language, key):
     texts = {
@@ -110,7 +126,14 @@ def get_system_language():
 
 def ask_webcam_mode(language):
     webcam_choice = input(get_localized_text(language, "enable_webcam")).strip().lower()
-    return webcam_choice == 'n'
+    if webcam_choice == "Y" or webcam_choice == "y":
+        webcam_mode = True
+    elif webcam_choice == "N" or webcam_choice == "n":
+        webcam_mode = False
+    else:
+        webcam_mode = None
+
+    return webcam_mode
 
 def facefusion():
     language = get_system_language()

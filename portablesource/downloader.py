@@ -51,13 +51,38 @@ def get_system_language():
         lang_code = locale.getdefaultlocale()[0].split('_')[0].lower()
         return "ru" if lang_code == "ru" else "en"
 
-def get_available_drives():
-    drives = []
-    for drive in range(65, 91):
-        drive_letter = f"{chr(drive)}:\\"
-        if os.path.exists(drive_letter):
-            drives.append(drive_letter)
-    return drives
+def add_to_user_path(path):
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_ALL_ACCESS)
+        current_path, _ = winreg.QueryValueEx(key, "Path")
+        if path not in current_path:
+            new_path = current_path + ";" + path if current_path else path
+            winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, new_path)
+        winreg.CloseKey(key)
+        os.environ['PATH'] = os.environ['PATH'] + ";" + path
+        return True
+    except Exception as e:
+        return False
+
+def get_installed_path():
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_READ)
+        path, _ = winreg.QueryValueEx(key, "Path")
+        winreg.CloseKey(key)
+        paths = path.split(';')
+        for p in paths:
+            if 'portablesource' in p:
+                if os.path.exists(os.path.join(p, 'installed.txt')):
+                    return p
+        env_path = os.environ.get('PATH', '')
+        env_paths = env_path.split(os.pathsep)
+        for p in env_paths:
+            if 'portablesource' in p:
+                if os.path.exists(os.path.join(p, 'installed.txt')):
+                    return p
+        return None
+    except Exception as e:
+        return None
 
 def get_path_for_install():
     language = get_system_language()
@@ -65,7 +90,6 @@ def get_path_for_install():
         language = "en"
     default_path = "C:\\"
     user_input = input(get_localized_text(language, "which_path")).strip()
-
     install_path = user_input if user_input else default_path
 
     full_path = os.path.join(install_path, 'portablesource')
@@ -82,16 +106,13 @@ def get_path_for_install():
     return full_path
 
 def get_install_path():
-    drives = get_available_drives()
-    install_path = None
-    for drive in drives:
-        possible_path = os.path.join(drive, 'portablesource', 'installed.txt')
-        if os.path.exists(possible_path):
-            install_path = os.path.dirname(possible_path)
-            return install_path
-        else:
-            install_path = get_path_for_install()
-            return install_path
+    tested_path = get_installed_path()
+    if tested_path is None:
+        full_path = get_path_for_install()
+        add_to_user_path(full_path)
+        install_path = full_path
+    else:
+        install_path = tested_path
     return install_path
 
 def download_file(url, output_dir='system'):

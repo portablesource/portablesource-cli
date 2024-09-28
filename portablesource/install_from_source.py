@@ -82,10 +82,9 @@ def get_system_language():
 
 def install_from_source(language):
     language = get_system_language()
-    if not language:
-        language = input(get_localized_text("en", "choose_language")).strip().lower()
-        if language not in ["en", "ru"]:
-            language = "en"
+    if language not in ["en", "ru"]:
+        language = "en"
+    
     choice = input(get_localized_text(language, "select_repo")).strip()
 
     if choice.isdigit() and 1 <= int(choice) <= len(repos):
