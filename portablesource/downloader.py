@@ -17,15 +17,23 @@ links = [
 
 gpu = get_gpu()
 
+def set_path(cuda_path):
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment", 0, winreg.KEY_ALL_ACCESS)
+        current_path = winreg.QueryValueEx(key, "Path")[0]
+        if cuda_path not in current_path:
+            new_path = current_path + ";" + cuda_path
+            winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, new_path)
+        winreg.CloseKey(key)
+        os.environ["PATH"] = new_path
+        return True
+
 def get_localized_text(language, key):
     texts = {
         "en": {
-            "choose_language": "Choose a language (en/ru): ",
             "which_path": "Select a installation path or enter your reference, default C:\ :",
             "error_creating_directory": "Error creating directory!",
         },
         "ru": {
-            "choose_language": "Выберите язык (en/ru): ",
             "which_path": "Выберите путь установки, дефолтный C:\ :",
             "error_creating_directory": "Ошибка создания директории!",
         }
@@ -53,11 +61,8 @@ def get_available_drives():
 
 def get_path_for_install():
     language = get_system_language()
-    if not language:
-        language = input(get_localized_text("en", "choose_language")).strip().lower()
-        if language not in ["en", "ru"]:
-            language = "en"
-
+    if language not in ["en", "ru"]:
+        language = "en"
     default_path = "C:\\"
     user_input = input(get_localized_text(language, "which_path")).strip()
 
@@ -144,6 +149,10 @@ def download_extract_and_cleanup(links, output_dir='system'):
             os.remove(archive)
 
 def download_for_main():
-    possible_path_20 = get_install_path()
-    system = os.path.join(possible_path_20, "system")
+    path = get_install_path()
+    system = os.path.join(path, "system")
     download_extract_and_cleanup(links, output_dir=system)
+    if gpu == "NVIDIA":
+        cuda_path = os.path.join(system, "CUDA")
+        if os.path.exists(cuda_path):
+            set_path(cuda_path)

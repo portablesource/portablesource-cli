@@ -232,7 +232,6 @@ REM by dony
             onnx_cmd = f'"{activate_script}" && "{uv_executable}" pip install onnx==1.16.1'
             subprocess.run(onnx_cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-
         if onnx_gpu or onnxruntime:
             gpu = get_gpu()
             if gpu == "NVIDIA":
