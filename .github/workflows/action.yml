@@ -54,7 +54,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
 
   binaries:
-    name: Build Nuitka binaries and create GitHub Release
+    name: Build Nuitka binaries
     needs: publish
     runs-on: ${{ matrix.os }}
     strategy:
@@ -89,26 +89,38 @@ jobs:
         run: |
           nuitka --standalone --onefile --output-filename=portablesource.app ${{ env.PROJECT_MAIN }}
 
+      - name: Archive Windows binary
+        if: matrix.os == 'windows-latest'
+        run: zip portablesource_windows.zip portablesource.exe
+
+      - name: Archive Linux binary
+        if: matrix.os == 'ubuntu-latest'
+        run: zip portablesource_linux.zip portablesource.bin
+
+      - name: Archive macOS binary
+        if: matrix.os == 'macos-latest'
+        run: zip portablesource_macos.zip portablesource.app
+
       - name: Upload executable artifact (Windows)
         if: matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
           name: portablesource-windows
-          path: portablesource.exe
+          path: portablesource_windows.zip
 
       - name: Upload executable artifact (Linux)
         if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v4
         with:
           name: portablesource-linux
-          path: portablesource.bin
+          path: portablesource_linux.zip
 
       - name: Upload executable artifact (macOS)
         if: matrix.os == 'macos-latest'
         uses: actions/upload-artifact@v4
         with:
           name: portablesource-macos
-          path: portablesource.app
+          path: portablesource_macos.zip
 
   release:
     name: Release compiled binaries
@@ -124,9 +136,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/portablesource-windows/portablesource.exe
-            artifacts/portablesource-linux/portablesource.bin
-            artifacts/portablesource-macos/portablesource.app
+            artifacts/portablesource-windows/portablesource_windows.zip
+            artifacts/portablesource-linux/portablesource_linux.zip
+            artifacts/portablesource-macos/portablesource_macos.zip
             artifacts/wheel-ubuntu-latest/*.whl
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
