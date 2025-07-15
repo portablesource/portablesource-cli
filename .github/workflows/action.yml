@@ -1,0 +1,115 @@
+name: Build, Publish and Release PortableSource
+
+env:
+  PROJECT_MAIN: portablesource_main.py
+  WHEEL_DIST: dist/*.whl
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build wheel and executables
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install build nuitka
+
+      - name: Build wheel
+        run: python -m build
+
+      - name: Build executable with Nuitka (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          nuitka --standalone --onefile --output-filename=portablesource.exe ${{ env.PROJECT_MAIN }}
+
+      - name: Build executable with Nuitka (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          nuitka --standalone --onefile --output-filename=portablesource.bin ${{ env.PROJECT_MAIN }}
+
+      - name: Build executable with Nuitka (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          nuitka --standalone --onefile --output-filename=portablesource.app ${{ env.PROJECT_MAIN }}
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}
+          path: ${{ env.WHEEL_DIST }}
+
+      - name: Upload executable artifact (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: portablesource-windows
+          path: portablesource.exe
+
+      - name: Upload executable artifact (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: portablesource-linux
+          path: portablesource.bin
+
+      - name: Upload executable artifact (macOS)
+        if: matrix.os == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: portablesource-macos
+          path: portablesource.app
+
+  publish:
+    name: Publish wheel to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: wheel-ubuntu-latest
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  release:
+    name: Release compiled binaries
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/portablesource-windows/portablesource.exe
+            artifacts/portablesource-linux/portablesource.bin
+            artifacts/portablesource-macos/portablesource.app
+            artifacts/wheel-ubuntu-latest/*.whl
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
