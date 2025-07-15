@@ -1,0 +1,70 @@
+name: Debug Nuitka Binaries
+
+on:
+  workflow_dispatch:
+
+jobs:
+  debug-binaries:
+    name: Debug Nuitka binaries (manual)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies from pyproject.toml
+        run: pip install .
+
+      - name: Build Executable with Nuitka
+        uses: Nuitka/Nuitka-Action@main
+        with:
+          nuitka-version: main
+          script-name: portablesource_main.py
+          mode: onefile
+
+      - name: Archive Windows binary
+        if: matrix.os == 'windows-latest'
+        run: |
+          cd build
+          7z a ../portablesource-windows.zip *.exe
+
+      - name: Archive Linux binary
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cd build
+          zip ../portablesource-linux.zip *.bin
+
+      - name: Archive macOS binary
+        if: matrix.os == 'macos-latest'
+        run: |
+          cd build
+          zip -r ../portablesource-macos.zip *.app
+
+      - name: Upload Windows artifact
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: portablesource-windows
+          path: portablesource-windows.zip
+
+      - name: Upload Linux artifact
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: portablesource-linux
+          path: portablesource-linux.zip
+
+      - name: Upload macOS artifact
+        if: matrix.os == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: portablesource-macos
+          path: portablesource-macos.zip 
