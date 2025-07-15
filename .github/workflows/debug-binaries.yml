@@ -28,7 +28,7 @@ jobs:
         with:
           nuitka-version: main
           script-name: portablesource_main.py
-        # Nuitka-Action автоматически подхватит nuitka-project: опции из pyproject.toml или .nuitkaproject
+          mode: onefile
 
       - name: Archive binary
         run: |
