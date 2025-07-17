@@ -319,15 +319,68 @@ class PortableSourceApp:
                 # Находим главный файл
                 main_file = self._find_main_file(repo_path, repo_name, repo_url_or_name)
                 if main_file:
+                    # Получаем информацию о репозитории из базы данных
+                    full_repo_info = self.repository_installer._get_repository_info(repo_name)
+                    program_args = full_repo_info.get('program_args', '') if full_repo_info else ''
+                    
                     # Создаем батник запуска в папке репозитория
-                    script_path = self.environment_manager.generate_launcher_script(
-                        repo_name, repo_path, main_file
-                    )
-                    logger.info(f"Создан скрипт запуска: {script_path}")
+                    repo_info = {
+                        'main_file': main_file,
+                        'url': repo_url_or_name,
+                        'program_args': program_args
+                    }
+                    success = self.repository_installer._generate_startup_script(repo_path, repo_info)
+                    if success:
+                        logger.info(f"Создан скрипт запуска для {repo_name}")
+                    else:
+                        logger.warning(f"Не удалось создать скрипт запуска для {repo_name}")
                 else:
                     logger.warning(f"Не удалось найти главный файл для {repo_name}")
             else:
                 logger.warning(f"Не удалось создать окружение для {repo_name}")
+        
+        return success
+    
+    def update_repository(self, repo_name: str) -> bool:
+        """Обновление репозитория"""
+        logger.info(f"Обновление репозитория: {repo_name}")
+        
+        if not self.repository_installer:
+            logger.error("Установщик репозиториев не инициализирован")
+            return False
+        
+        # Путь к репозиторию
+        if not self.install_path:
+            logger.error("Install path is not set")
+            return False
+            
+        repo_install_path = self.install_path / "repos"
+        repo_path = repo_install_path / repo_name
+        
+        # Проверяем, существует ли репозиторий
+        if not repo_path.exists():
+            logger.error(f"Репозиторий {repo_name} не найден в {repo_path}")
+            logger.info("Доступные репозитории:")
+            repos = self.list_installed_repositories()
+            for repo in repos:
+                logger.info(f"  - {repo['name']}")
+            return False
+        
+        # Проверяем, является ли это git репозиторием
+        if not (repo_path / ".git").exists():
+            logger.error(f"Папка {repo_path} не является git репозиторием")
+            return False
+        
+        # Обновляем репозиторий с помощью repository_installer
+        success = self.repository_installer._update_repository_with_fixes(
+            self.repository_installer._get_git_executable(), 
+            repo_path
+        )
+        
+        if success:
+            logger.info(f"✅ Репозиторий {repo_name} успешно обновлен")
+        else:
+            logger.error(f"❌ Не удалось обновить репозиторий {repo_name}")
         
         return success
     
@@ -529,6 +582,7 @@ def main():
     parser.add_argument("--setup-reg", action="store_true", help="Зарегистрировать путь установки в реестре")
     parser.add_argument("--change-path", action="store_true", help="Изменить путь установки")
     parser.add_argument("--install-repo", type=str, help="Установить репозиторий")
+    parser.add_argument("--update-repo", type=str, help="Обновить репозиторий")
     parser.add_argument("--list-repos", action="store_true", help="Показать установленные репозитории")
     parser.add_argument("--system-info", action="store_true", help="Показать информацию о системе")
     
@@ -555,6 +609,9 @@ def main():
     if args.install_repo:
         app.install_repository(args.install_repo)
     
+    if args.update_repo:
+        app.update_repository(args.update_repo)
+    
     if args.list_repos:
         app.list_installed_repositories()
     
@@ -570,6 +627,7 @@ def main():
         print("  --setup-reg             Зарегистрировать путь в реестре")
         print("  --change-path           Изменить путь установки")
         print("  --install-repo <url>    Установить репозиторий")
+        print("  --update-repo <name>    Обновить репозиторий")
         print("  --list-repos            Показать репозитории")
         print("  --system-info           Информация о системе")
         print("  --install-path <path>   Путь установки")
