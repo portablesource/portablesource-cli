@@ -14,13 +14,14 @@ import logging
 import shutil
 import requests
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Set
+from typing import Dict, List, Optional, Tuple, Set, Union
 from urllib.parse import urlparse
 from dataclasses import dataclass
 from enum import Enum
 
-from .config import ConfigManager, GPUGeneration, CUDAVersion
-from .get_gpu import GPUDetector, GPUType
+from tqdm import tqdm
+
+from portablesource.config import ConfigManager
 
 
 # Configure logging
@@ -34,13 +35,13 @@ class ServerAPIClient:
     def __init__(self, server_url: str = "http://localhost:5000"):
         self.server_url = server_url.rstrip('/')
         self.session = requests.Session()
-        self.session.timeout = 10
+        self.timeout = 10
     
     def get_repository_info(self, name: str) -> Optional[Dict]:
         """Get repository information from server"""
         try:
             url = f"{self.server_url}/api/repository/{name.lower()}"
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=self.timeout)
             
             if response.status_code == 200:
                 return response.json()
@@ -62,7 +63,7 @@ class ServerAPIClient:
         """Search repositories in server database"""
         try:
             url = f"{self.server_url}/api/search"
-            response = self.session.get(url, params={'q': query})
+            response = self.session.get(url, params={'q': query}, timeout=self.timeout)
             
             if response.status_code == 200:
                 data = response.json()
@@ -82,7 +83,7 @@ class ServerAPIClient:
         """Get repository dependencies from server"""
         try:
             url = f"{self.server_url}/api/repository/{name.lower()}/dependencies"
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=self.timeout)
             
             if response.status_code == 200:
                 return response.json()
@@ -104,7 +105,7 @@ class ServerAPIClient:
         """Get installation plan from server"""
         try:
             url = f"{self.server_url}/api/repository/{name.lower()}/dependencies/install_plan"
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=self.timeout)
             
             if response.status_code == 200:
                 return response.json()
@@ -126,7 +127,7 @@ class ServerAPIClient:
         """Check if server is available"""
         try:
             url = f"{self.server_url}/api/repositories"
-            response = self.session.get(url)
+            response = self.session.get(url, timeout=self.timeout)
             return response.status_code == 200
         except Exception:
             return False
@@ -269,12 +270,19 @@ class RequirementsAnalyzer:
         Returns:
             InstallationPlan object
         """
+        from portablesource.get_gpu import GPUDetector
+        
         plan = InstallationPlan(
             torch_packages=[],
             onnx_packages=[],
             tensorflow_packages=[],
             regular_packages=[]
         )
+        
+        # Get GPU information
+        gpu_detector = GPUDetector()
+        gpu_info_list = gpu_detector.get_gpu_info()
+        primary_gpu_type = gpu_detector.get_primary_gpu_type()
         
         # Categorize packages
         for package in packages:
@@ -289,41 +297,49 @@ class RequirementsAnalyzer:
         
         # Determine PyTorch index URL
         if plan.torch_packages:
-            plan.torch_index_url = self._get_torch_index_url(gpu_config)
+            plan.torch_index_url = self._get_torch_index_url(gpu_info_list, primary_gpu_type)
         
         # Determine ONNX Runtime package
         if plan.onnx_packages:
-            plan.onnx_package_name = self._get_onnx_package_name(gpu_config)
+            plan.onnx_package_name = self._get_onnx_package_name(primary_gpu_type)
         
         return plan
     
-    def _get_torch_index_url(self, gpu_config) -> str:
-        """Get PyTorch index URL based on GPU configuration"""
-        if not gpu_config or gpu_config.recommended_backend != "cuda":
+    def _get_torch_index_url(self, gpu_info_list, primary_gpu_type) -> str:
+        """Get PyTorch index URL based on GPU information"""
+        from portablesource.get_gpu import GPUType, CUDAVersion
+        
+        if not primary_gpu_type or primary_gpu_type != GPUType.NVIDIA:
             return "https://download.pytorch.org/whl/cpu"
         
+        # Find NVIDIA GPU and get CUDA version
+        cuda_version = None
+        for gpu_info in gpu_info_list:
+            if gpu_info.gpu_type == GPUType.NVIDIA and gpu_info.cuda_version:
+                cuda_version = gpu_info.cuda_version
+                break
+        
         # Determine CUDA version for PyTorch
-        if gpu_config.cuda_version == CUDAVersion.CUDA_128:
+        if cuda_version == CUDAVersion.CUDA_128:
             return "https://download.pytorch.org/whl/cu128"
-        elif gpu_config.cuda_version == CUDAVersion.CUDA_124:
+        elif cuda_version == CUDAVersion.CUDA_124:
             return "https://download.pytorch.org/whl/cu124"
-        elif gpu_config.cuda_version == CUDAVersion.CUDA_118:
+        elif cuda_version == CUDAVersion.CUDA_118:
             return "https://download.pytorch.org/whl/cu118"
         else:
-            return "https://download.pytorch.org/whl/cu118"  # Fallback
+            return "https://download.pytorch.org/whl/cpu"  # Fallback to CPU
     
-    def _get_onnx_package_name(self, gpu_config) -> str:
-        """Get ONNX Runtime package name based on GPU configuration"""
-        if not gpu_config:
+    def _get_onnx_package_name(self, gpu_type) -> str:
+        """Get ONNX Runtime package name based on GPU type"""
+        from portablesource.get_gpu import GPUType
+        
+        if not gpu_type or gpu_type == GPUType.UNKNOWN:
             return "onnxruntime"
         
-        if gpu_config.recommended_backend == "cuda":
+        if gpu_type == GPUType.NVIDIA:
             return "onnxruntime-gpu"
-        elif gpu_config.recommended_backend == "directml":
+        elif gpu_type in [GPUType.AMD, GPUType.INTEL, GPUType.DIRECTML]:
             return "onnxruntime-directml"
-        elif gpu_config.recommended_backend == "openvino":
-            # TODO: Add OpenVINO support for Linux
-            return "onnxruntime-openvino"
         else:
             return "onnxruntime"
     
@@ -369,9 +385,11 @@ class RequirementsAnalyzer:
             )
         else:
             # Auto-detect based on system
+            from portablesource.get_gpu import GPUDetector
             gpu_detector = GPUDetector()
-            gpu_config = gpu_detector.detect_gpu()
-            package_name = self._get_onnx_package_name(gpu_config)
+            gpu_info_list = gpu_detector.get_gpu_info()
+            primary_gpu_type = gpu_detector.get_primary_gpu_type()
+            package_name = self._get_onnx_package_name(primary_gpu_type)
             env_vars = {}
             
             if package_name == "onnxruntime-gpu":
@@ -537,7 +555,7 @@ class RepositoryInstaller:
             }
         }
     
-    def install_repository(self, repo_url_or_name: str, install_path: Optional[str] = None) -> bool:
+    def install_repository(self, repo_url_or_name: str, install_path: Optional[Union[str, Path]] = None) -> bool:
         """
         Install repository with intelligent dependency handling
         
@@ -560,7 +578,11 @@ class RepositoryInstaller:
                 logger.error("install_path is required in the new architecture")
                 return False
             
-            install_path = Path(install_path)
+            if isinstance(install_path, str):
+                install_path = Path(install_path)
+            elif not isinstance(install_path, Path):
+                logger.error("install_path must be a string or Path object")
+                return False
             
             # Используем новую структуру: install_path является корнем, repos - подпапка
             repo_name = self._extract_repo_name(repo_info["url"])
@@ -659,8 +681,7 @@ class RepositoryInstaller:
                 
                 # Check if it's a git repository
                 if (repo_path / ".git").exists():
-                    subprocess.run([git_exe, "pull"], check=True, 
-                                 capture_output=True, text=True)
+                    self._run_git_with_progress([git_exe, "pull"], f"Updating repository at {repo_path}")
                 else:
                     logger.warning(f"Directory exists but is not a git repository: {repo_path}")
                     return False
@@ -674,7 +695,7 @@ class RepositoryInstaller:
                     cmd.extend(["-b", repo_info["branch"]])
                 cmd.append(repo_path.name)
                 
-                subprocess.run(cmd, check=True, capture_output=True, text=True)
+                self._run_git_with_progress(cmd, f"Cloning {repo_info['url']}")
             
             return True
             
@@ -687,8 +708,8 @@ class RepositoryInstaller:
     
     def _get_git_executable(self) -> str:
         """Get git executable path from conda environment"""
-        if self.config_manager.config.system_paths:
-            install_path = Path(self.config_manager.config.system_paths.install_path)
+        if self.config_manager.config.install_path:
+            install_path = Path(self.config_manager.config.install_path)
             conda_env_path = install_path / "miniconda" / "envs" / "portablesource"
             git_path = conda_env_path / "Scripts" / "git.exe"
             if git_path.exists():
@@ -701,8 +722,8 @@ class RepositoryInstaller:
     
     def _get_python_executable(self) -> str:
         """Get Python executable path from conda environment"""
-        if self.config_manager.config.system_paths:
-            install_path = Path(self.config_manager.config.system_paths.install_path)
+        if self.config_manager.config.install_path:
+            install_path = Path(self.config_manager.config.install_path)
             conda_env_path = install_path / "miniconda" / "envs" / "portablesource"
             python_path = conda_env_path / "python.exe"
             if python_path.exists():
@@ -713,8 +734,8 @@ class RepositoryInstaller:
     
     def _get_pip_executable(self, repo_name: str) -> str:
         """Get pip executable path from repository's venv"""
-        if self.config_manager.config.system_paths:
-            install_path = Path(self.config_manager.config.system_paths.install_path)
+        if self.config_manager.config.install_path:
+            install_path = Path(self.config_manager.config.install_path)
             venv_path = install_path / "envs" / repo_name
             pip_path = venv_path / "Scripts" / "pip.exe"
             if pip_path.exists():
@@ -761,11 +782,11 @@ class RepositoryInstaller:
     def _create_venv_environment(self, repo_name: str) -> bool:
         """Create venv environment for repository"""
         try:
-            if not self.config_manager.config.system_paths:
-                logger.error("System paths not configured")
+            if not self.config_manager.config.install_path:
+                logger.error("Install path not configured")
                 return False
             
-            install_path = Path(self.config_manager.config.system_paths.install_path)
+            install_path = Path(self.config_manager.config.install_path)
             envs_path = install_path / "envs"
             venv_path = envs_path / repo_name
             
@@ -803,29 +824,24 @@ class RepositoryInstaller:
             pip_exe = self._get_pip_executable(repo_name)
             
             logger.info(f"Installing packages from {requirements_path}")
-            result = subprocess.run([
+            self._run_pip_with_progress([
                 pip_exe, "install", "-r", str(requirements_path)
-            ], capture_output=True, text=True)
+            ], f"Installing packages for {repo_name}")
             
-            if result.returncode == 0:
-                logger.info(f"✅ Successfully installed packages for {repo_name}")
-                return True
-            else:
-                logger.error(f"Failed to install packages: {result.stderr}")
-                return False
+            logger.info(f"✅ Successfully installed packages for {repo_name}")
+            return True
                 
         except Exception as e:
             logger.error(f"Error installing packages: {e}")
             return False
     
-    def _execute_server_installation_plan(self, server_plan: Dict, repo_path: Path) -> bool:
+    def _execute_server_installation_plan(self, server_plan: Dict, repo_path: Path, repo_name: str) -> bool:
         """Execute installation plan from server"""
         try:
-            pip_exe = self._get_pip_executable()
+            pip_exe = self._get_pip_executable(repo_name)
             
             # Upgrade pip first
-            subprocess.run([pip_exe, "install", "--upgrade", "pip"], 
-                         check=True, capture_output=True, text=True)
+            self._run_pip_with_progress([pip_exe, "install", "--upgrade", "pip"], "Upgrading pip")
             
             # Execute installation steps in order
             for step in server_plan.get('installation_order', []):
@@ -855,7 +871,7 @@ class RepositoryInstaller:
                             # Special handling for ONNX Runtime with specific providers
                             if step_type == 'onnxruntime' and gpu_support:
                                 onnx_provider = gpu_support
-                                onnx_pkg, onnx_flags, onnx_env = self._get_onnx_package_for_provider(gpu_support)
+                                onnx_pkg, onnx_flags, onnx_env = self.analyzer._get_onnx_package_for_provider(gpu_support)
                                 
                                 # Set environment variables for TensorRT
                                 if onnx_env:
@@ -893,9 +909,9 @@ class RepositoryInstaller:
                 if install_flags:
                     pip_cmd.extend(install_flags)
                 
-                # Execute pip command
+                # Execute pip command with progress
                 logger.info(f"📦 Installing: {' '.join(pip_cmd[2:])}")
-                subprocess.run(pip_cmd, check=True, capture_output=True, text=True)
+                self._run_pip_with_progress(pip_cmd, f"Installing {step.get('description', step_type)}")
             
             logger.info("✅ All server dependencies installed successfully")
             return True
@@ -907,14 +923,13 @@ class RepositoryInstaller:
             logger.error(f"❌ Error executing server installation plan: {e}")
             return False
     
-    def _execute_installation_plan(self, plan: InstallationPlan, original_requirements: Path) -> bool:
+    def _execute_installation_plan(self, plan: InstallationPlan, original_requirements: Path, repo_name: str) -> bool:
         """Execute the installation plan using base Python"""
         try:
-            pip_exe = self._get_pip_executable()
+            pip_exe = self._get_pip_executable(repo_name)
             
             # Upgrade pip first
-            subprocess.run([pip_exe, "install", "--upgrade", "pip"], 
-                         check=True, capture_output=True, text=True)
+            self._run_pip_with_progress([pip_exe, "install", "--upgrade", "pip"], "Upgrading pip")
             
             # Install PyTorch packages with specific index
             if plan.torch_packages:
@@ -927,20 +942,18 @@ class RepositoryInstaller:
                 if plan.torch_index_url:
                     torch_cmd.extend(["--index-url", plan.torch_index_url])
                 
-                subprocess.run(torch_cmd, check=True, capture_output=True, text=True)
+                self._run_pip_with_progress(torch_cmd, "Installing PyTorch packages")
             
             # Install ONNX Runtime with correct variant
             if plan.onnx_packages and plan.onnx_package_name:
                 logger.info(f"Installing ONNX Runtime: {plan.onnx_package_name}")
-                subprocess.run([pip_exe, "install", plan.onnx_package_name], 
-                             check=True, capture_output=True, text=True)
+                self._run_pip_with_progress([pip_exe, "install", plan.onnx_package_name], f"Installing ONNX Runtime: {plan.onnx_package_name}")
             
             # Install TensorFlow packages (if any)
             if plan.tensorflow_packages:
                 logger.info("Installing TensorFlow packages...")
                 for package in plan.tensorflow_packages:
-                    subprocess.run([pip_exe, "install", str(package)], 
-                                 check=True, capture_output=True, text=True)
+                    self._run_pip_with_progress([pip_exe, "install", str(package)], f"Installing TensorFlow package: {package}")
             
             # Create modified requirements.txt without special packages
             if plan.regular_packages:
@@ -952,8 +965,7 @@ class RepositoryInstaller:
                 # Install regular packages
                 if modified_requirements.stat().st_size > 0:
                     logger.info("Installing regular packages...")
-                    subprocess.run([pip_exe, "install", "-r", str(modified_requirements)], 
-                                 check=True, capture_output=True, text=True)
+                    self._run_pip_with_progress([pip_exe, "install", "-r", str(modified_requirements)], "Installing regular packages")
                 
                 # Clean up temporary file
                 try:
@@ -1004,11 +1016,11 @@ class RepositoryInstaller:
             # Create startup script with dual activation
             bat_file = repo_path / f"start_{repo_name}.bat"
             
-            if not self.config_manager.config.system_paths:
-                logger.error("System paths not configured")
+            if not self.config_manager.config.install_path:
+                logger.error("Install path not configured")
                 return False
             
-            install_path = Path(self.config_manager.config.system_paths.install_path)
+            install_path = Path(self.config_manager.config.install_path)
             conda_activate = install_path / "miniconda" / "Scripts" / "activate.bat"
             venv_activate = install_path / "envs" / repo_name / "Scripts" / "activate.bat"
             
@@ -1072,6 +1084,108 @@ if %errorlevel% neq 0 (
         except Exception as e:
             logger.debug(f"Error sending download statistics: {e}")
             # Don't fail installation if stats can't be sent
+    
+    def _run_pip_with_progress(self, pip_cmd: List[str], description: str):
+        """Run pip command with progress bar if tqdm is available"""
+        TQDM_AVAILABLE = True
+        try:
+            if TQDM_AVAILABLE:
+                # Run with progress bar
+                logger.info(f"🔄 {description}...")
+                
+                # Start the process
+                process = subprocess.Popen(
+                    pip_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    universal_newlines=True
+                )
+                
+                # Create progress bar
+                with tqdm(desc=description, unit="line", dynamic_ncols=True) as pbar:
+                    output_lines = []
+                    if process.stdout:
+                        for line in process.stdout:
+                            output_lines.append(line)
+                            pbar.update(1)
+                            
+                            # Show important messages
+                            if "Installing" in line or "Downloading" in line or "ERROR" in line:
+                                pbar.set_postfix_str(line.strip()[:50])
+                
+                # Wait for completion
+                process.wait()
+                
+                if process.returncode != 0:
+                    error_output = ''.join(output_lines)
+                    raise subprocess.CalledProcessError(process.returncode, pip_cmd, error_output)
+                    
+                logger.info(f"✅ {description} completed")
+            else:
+                # Fallback to regular subprocess without progress
+                logger.info(f"🔄 {description}...")
+                subprocess.run(pip_cmd, check=True, capture_output=True, text=True)
+                logger.info(f"✅ {description} completed")
+                
+        except subprocess.CalledProcessError as e:
+            logger.error(f"❌ {description} failed: {e}")
+            raise
+        except Exception as e:
+             logger.error(f"❌ Error during {description}: {e}")
+             raise
+     
+    def _run_git_with_progress(self, git_cmd: List[str], description: str):
+         """Run git command with progress bar if tqdm is available"""
+         TQDM_AVAILABLE = True
+         try:
+             if TQDM_AVAILABLE:
+                 # Run with progress bar
+                 logger.info(f"🔄 {description}...")
+                 
+                 # Start the process
+                 process = subprocess.Popen(
+                     git_cmd,
+                     stdout=subprocess.PIPE,
+                     stderr=subprocess.STDOUT,
+                     text=True,
+                     bufsize=1,
+                     universal_newlines=True
+                 )
+                 
+                 # Create progress bar
+                 with tqdm(desc=description, unit="line", dynamic_ncols=True) as pbar:
+                     output_lines = []
+                     if process.stdout:
+                         for line in process.stdout:
+                             output_lines.append(line)
+                             pbar.update(1)
+                             
+                             # Show important git messages
+                             if any(keyword in line.lower() for keyword in ["cloning", "receiving", "resolving", "updating", "error"]):
+                                 pbar.set_postfix_str(line.strip()[:50])
+                 
+                 # Wait for completion
+                 process.wait()
+                 
+                 if process.returncode != 0:
+                     error_output = ''.join(output_lines)
+                     raise subprocess.CalledProcessError(process.returncode, git_cmd, error_output)
+                     
+                 logger.info(f"✅ {description} completed")
+             else:
+                 # Fallback to regular subprocess without progress
+                 logger.info(f"🔄 {description}...")
+                 subprocess.run(git_cmd, check=True, capture_output=True, text=True)
+                 logger.info(f"✅ {description} completed")
+                 
+         except subprocess.CalledProcessError as e:
+             logger.error(f"❌ {description} failed: {e}")
+             raise
+         except Exception as e:
+             logger.error(f"❌ Error during {description}: {e}")
+             raise
 
 
 # Main execution for testing
@@ -1088,4 +1202,4 @@ if __name__ == "__main__":
     if success:
         print("✅ Installation successful!")
     else:
-        print("❌ Installation failed!") 
+        print("❌ Installation failed!")

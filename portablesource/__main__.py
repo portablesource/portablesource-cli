@@ -10,12 +10,13 @@ import logging
 import argparse
 from pathlib import Path
 from typing import Optional
+import winreg
 
 # Относительные импорты
-from .get_gpu import GPUDetector
-from .config import ConfigManager
-from .envs_manager import EnvironmentManager, EnvironmentSpec
-from .repository_installer import RepositoryInstaller
+from portablesource.get_gpu import GPUDetector
+from portablesource.config import ConfigManager
+from portablesource.envs_manager import EnvironmentManager, EnvironmentSpec
+from portablesource.repository_installer import RepositoryInstaller
 
 # Настройка логирования
 logging.basicConfig(
@@ -45,15 +46,8 @@ class PortableSourceApp:
         if install_path:
             self.install_path = Path(install_path).resolve()
         else:
-            # По умолчанию в папку рядом с исполняемым файлом
-            if getattr(sys, 'frozen', False):
-                # Если запущен из .exe
-                base_path = Path(sys.executable).parent
-            else:
-                # Если запущен из .py
-                base_path = Path(__file__).parent.parent
-            
-            self.install_path = base_path / "PortableSource_Installation"
+            # Запрашиваем путь у пользователя
+            self.install_path = self._get_installation_path()
         
         logger.info(f"Путь установки: {self.install_path}")
         
@@ -63,6 +57,9 @@ class PortableSourceApp:
         # Инициализируем менеджер окружений
         self._initialize_environment_manager()
         
+        # Проверяем целостность окружения при запуске
+        self._check_environment_on_startup()
+        
         # Инициализируем конфигурацию
         self._initialize_config()
         
@@ -71,8 +68,113 @@ class PortableSourceApp:
         
         logger.info("Инициализация завершена")
     
+    def _save_install_path_to_registry(self, install_path: Path) -> bool:
+        """Сохраняет путь установки в реестр Windows"""
+        try:
+            key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\PortableSource")
+            winreg.SetValueEx(key, "InstallPath", 0, winreg.REG_SZ, str(install_path))
+            winreg.CloseKey(key)
+            logger.info(f"Путь установки сохранен в реестр: {install_path}")
+            return True
+        except Exception as e:
+            logger.warning(f"Не удалось сохранить путь в реестр: {e}")
+            return False
+    
+    def _load_install_path_from_registry(self) -> Optional[Path]:
+        """Загружает путь установки из реестра Windows"""
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\PortableSource")
+            install_path_str, _ = winreg.QueryValueEx(key, "InstallPath")
+            winreg.CloseKey(key)
+            
+            install_path = Path(install_path_str)
+            if install_path.exists():
+                logger.info(f"Путь установки загружен из реестра: {install_path}")
+                return install_path
+            else:
+                logger.warning(f"Путь из реестра не существует: {install_path}")
+                return None
+        except FileNotFoundError:
+            logger.info("Путь установки не найден в реестре")
+            return None
+        except Exception as e:
+            logger.warning(f"Ошибка при загрузке пути из реестра: {e}")
+            return None
+
+    def _get_installation_path(self) -> Path:
+        """Запрашивает путь установки у пользователя"""
+        # Сначала пытаемся загрузить из реестра
+        registry_path = self._load_install_path_from_registry()
+        
+        if registry_path:
+            # Если путь найден в реестре и существует, используем его автоматически
+            logger.info(f"Используется путь из реестра: {registry_path}")
+            return registry_path
+        
+        # Если пути нет в реестре, запрашиваем у пользователя
+        print("\n" + "="*60)
+        print("НАСТРОЙКА ПУТИ УСТАНОВКИ PORTABLESOURCE")
+        print("="*60)
+        
+        # Предлагаем варианты
+        default_path = Path("C:/PortableSource")
+        
+        print(f"\nПо умолчанию будет использован путь: {default_path}")
+        print("\nВы можете:")
+        print("1. Нажать Enter для использования пути по умолчанию")
+        print("2. Ввести свой путь установки")
+        
+        user_input = input("\nВведите путь установки (или Enter для значения по умолчанию): ").strip()
+        
+        if not user_input:
+            chosen_path = default_path
+        else:
+            chosen_path = self._validate_and_get_path(user_input)
+        
+        print(f"\nВыбран путь установки: {chosen_path}")
+        
+        # Проверяем, существует ли путь и не пустой ли он
+        if chosen_path.exists() and any(chosen_path.iterdir()):
+            print(f"\nВнимание: Папка {chosen_path} уже существует и не пуста.")
+            while True:
+                confirm = input("Продолжить? (y/n): ").strip().lower()
+                if confirm in ['y', 'yes', 'д', 'да']:
+                    break
+                elif confirm in ['n', 'no', 'н', 'нет']:
+                    print("Установка отменена.")
+                    sys.exit(1)
+                else:
+                    print("Пожалуйста, введите 'y' или 'n'")
+        
+        # Сохраняем путь в реестр
+        self._save_install_path_to_registry(chosen_path)
+        
+        return chosen_path
+    
+    def _validate_and_get_path(self, user_input: str) -> Path:
+        """Валидирует и возвращает путь от пользователя"""
+        while True:
+            try:
+                chosen_path = Path(user_input).resolve()
+                
+                # Проверяем, что путь валидный
+                if chosen_path.is_absolute():
+                    return chosen_path
+                else:
+                    print(f"Ошибка: Путь должен быть абсолютным. Попробуйте еще раз.")
+                    user_input = input("Введите корректный путь: ").strip()
+                    continue
+                    
+            except Exception as e:
+                print(f"Ошибка: Неверный путь '{user_input}'. Попробуйте еще раз.")
+                user_input = input("Введите корректный путь: ").strip()
+                continue
+    
     def _create_directory_structure(self):
         """Создает структуру папок"""
+        if not self.install_path:
+            raise ValueError("Install path is not set")
+            
         directories = [
             self.install_path,
             self.install_path / "miniconda",       # Miniconda
@@ -86,12 +188,47 @@ class PortableSourceApp:
     
     def _initialize_environment_manager(self):
         """Инициализация менеджера окружений"""
+        if not self.install_path:
+            raise ValueError("Install path is not set")
         self.environment_manager = EnvironmentManager(self.install_path)
+    
+    def _check_environment_on_startup(self):
+        """Проверяет целостность окружения при запуске и переустанавливает при необходимости"""
+        if not self.environment_manager:
+            return
+        
+        # Проверяем наличие Miniconda
+        if not self.environment_manager.ensure_miniconda():
+            logger.warning("Miniconda не найдена или повреждена")
+            return
+        
+        # Проверяем целостность базового окружения
+        if not self.install_path is None:
+            conda_env_path = self.install_path / "miniconda" / "envs" / "portablesource"
+        if conda_env_path.exists():
+            if not self.environment_manager.check_base_environment_integrity():
+                logger.warning("Базовое окружение повреждено, выполняется автоматическая переустановка...")
+                if self.environment_manager.create_base_environment():
+                    logger.info("✅ Базовое окружение успешно переустановлено")
+                else:
+                    logger.error("❌ Не удалось переустановить базовое окружение")
+            else:
+                logger.info("✅ Базовое окружение работает корректно")
+        else:
+            logger.info("Базовое окружение не найдено (будет создано при необходимости)")
     
     def _initialize_config(self):
         """Инициализация конфигурации"""
+        if not self.install_path:
+            raise ValueError("Install path is not set")
+            
         # Для новой архитектуры конфигурация упрощена
-        self.config_manager = ConfigManager()
+        # Передаем правильный путь для конфигурации
+        config_path = self.install_path / "portablesource_config.json"
+        self.config_manager = ConfigManager(config_path)
+        
+        # Настройка пути установки (должно быть до configure_gpu)
+        self.config_manager.configure_install_path(str(self.install_path))
         
         # Автоматическое определение GPU
         gpu_info = self.gpu_detector.get_gpu_info()
@@ -101,9 +238,6 @@ class PortableSourceApp:
             self.config_manager.configure_gpu(primary_gpu.name)
         else:
             logger.warning("GPU не обнаружен, используется CPU режим")
-        
-        # Настройка системных путей
-        self.config_manager.configure_system_paths(str(self.install_path))
         
         # Не сохраняем конфигурацию - она генерируется динамически
     
@@ -115,9 +249,10 @@ class PortableSourceApp:
         )
     
     def check_miniconda_availability(self) -> bool:
-        """Проверка доступности Miniconda"""
-        if not self.environment_manager:
+        """Проверяет доступность Miniconda"""
+        if not self.install_path:
             return False
+        
         conda_exe = self.install_path / "miniconda" / "Scripts" / "conda.exe"
         return conda_exe.exists()
     
@@ -134,9 +269,14 @@ class PortableSourceApp:
             logger.error("Ошибка установки Miniconda")
             return False
         
-        # Создаем базовое окружение
+        # Создаем базовое окружение (с проверкой целостности)
         if not self.environment_manager.create_base_environment():
             logger.error("Ошибка создания базового окружения")
+            return False
+        
+        # Дополнительная проверка целостности после создания
+        if not self.environment_manager.check_base_environment_integrity():
+            logger.error("Базовое окружение создано, но проверка целостности не пройдена")
             return False
         
         logger.info("Окружение настроено успешно")
@@ -155,6 +295,10 @@ class PortableSourceApp:
             return False
         
         # Путь для установки репозитория
+        if not self.install_path:
+            logger.error("Install path is not set")
+            return False
+            
         repo_install_path = self.install_path / "repos"
         
         # Устанавливаем репозиторий
@@ -211,10 +355,14 @@ class PortableSourceApp:
                     main_file = name
                     break
         
-        return main_file
+        return str(main_file)
     
     def list_installed_repositories(self):
         """Список установленных репозиториев"""
+        if not self.install_path:
+            logger.error("Install path is not set")
+            return []
+            
         repos_path = self.install_path / "repos"
         if not repos_path.exists():
             logger.info("Папка репозиториев не найдена")
@@ -241,6 +389,83 @@ class PortableSourceApp:
             logger.info(f"  - {repo['name']} {launcher_status}")
         
         return repos
+    
+    def setup_registry(self):
+        """Регистрирует путь установки в реестре Windows"""
+        if not self.install_path:
+            logger.error("Путь установки не определен")
+            return False
+        
+        logger.info("Регистрация пути установки в реестре Windows...")
+        
+        success = self._save_install_path_to_registry(self.install_path)
+        
+        if success:
+            logger.info("✅ Путь установки успешно зарегистрирован в реестре")
+            logger.info(f"Путь: {self.install_path}")
+            logger.info("Теперь PortableSource будет автоматически использовать этот путь")
+        else:
+            logger.error("❌ Не удалось зарегистрировать путь в реестре")
+        
+        return success
+    
+    def change_installation_path(self):
+        """Изменяет путь установки"""
+        print("\n" + "="*60)
+        print("ИЗМЕНЕНИЕ ПУТИ УСТАНОВКИ PORTABLESOURCE")
+        print("="*60)
+        
+        # Показываем текущий путь
+        current_path = self._load_install_path_from_registry()
+        if current_path:
+            print(f"\nТекущий путь установки: {current_path}")
+        else:
+            print("\nТекущий путь установки не найден в реестре")
+        
+        # Предлагаем варианты
+        default_path = Path("C:/PortableSource")
+        
+        print(f"\nПо умолчанию будет использован путь: {default_path}")
+        print("\nВы можете:")
+        print("1. Нажать Enter для использования пути по умолчанию")
+        print("2. Ввести свой путь установки")
+        
+        user_input = input("\nВведите новый путь установки (или Enter для значения по умолчанию): ").strip()
+        
+        if not user_input:
+            new_path = default_path
+        else:
+            new_path = self._validate_and_get_path(user_input)
+        
+        print(f"\nНовый путь установки: {new_path}")
+        
+        # Проверяем, существует ли путь и не пустой ли он
+        if new_path.exists() and any(new_path.iterdir()):
+            print(f"\nВнимание: Папка {new_path} уже существует и не пуста.")
+            while True:
+                confirm = input("Продолжить? (y/n): ").strip().lower()
+                if confirm in ['y', 'yes', 'д', 'да']:
+                    break
+                elif confirm in ['n', 'no', 'н', 'нет']:
+                    print("Изменение пути отменено.")
+                    return False
+                else:
+                    print("Пожалуйста, введите 'y' или 'n'")
+        
+        # Сохраняем новый путь в реестр
+        success = self._save_install_path_to_registry(new_path)
+        
+        if success:
+            logger.info("✅ Путь установки успешно изменен")
+            logger.info(f"Новый путь: {new_path}")
+            logger.info("Перезапустите PortableSource для применения изменений")
+            
+            # Обновляем текущий путь в приложении
+            self.install_path = new_path
+        else:
+            logger.error("❌ Не удалось сохранить новый путь в реестре")
+        
+        return success
     
     def show_system_info(self):
         """Показать информацию о системе"""
@@ -301,6 +526,8 @@ def main():
     parser = argparse.ArgumentParser(description="PortableSource - Portable AI/ML Environment")
     parser.add_argument("--install-path", type=str, help="Путь для установки")
     parser.add_argument("--setup-env", action="store_true", help="Настроить окружение (Miniconda)")
+    parser.add_argument("--setup-reg", action="store_true", help="Зарегистрировать путь установки в реестре")
+    parser.add_argument("--change-path", action="store_true", help="Изменить путь установки")
     parser.add_argument("--install-repo", type=str, help="Установить репозиторий")
     parser.add_argument("--list-repos", action="store_true", help="Показать установленные репозитории")
     parser.add_argument("--system-info", action="store_true", help="Показать информацию о системе")
@@ -310,12 +537,20 @@ def main():
     # Создаем приложение
     app = PortableSourceApp()
     
-    # Инициализируем
+    # Для команды изменения пути не нужна полная инициализация
+    if args.change_path:
+        app.change_installation_path()
+        return
+    
+    # Инициализируем для остальных команд
     app.initialize(args.install_path)
     
     # Выполняем команды
     if args.setup_env:
         app.setup_environment()
+    
+    if args.setup_reg:
+        app.setup_registry()
     
     if args.install_repo:
         app.install_repository(args.install_repo)
@@ -332,6 +567,8 @@ def main():
         print("\n" + "="*50)
         print("Доступные команды:")
         print("  --setup-env             Настроить окружение")
+        print("  --setup-reg             Зарегистрировать путь в реестре")
+        print("  --change-path           Изменить путь установки")
         print("  --install-repo <url>    Установить репозиторий")
         print("  --list-repos            Показать репозитории")
         print("  --system-info           Информация о системе")

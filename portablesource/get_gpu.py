@@ -198,46 +198,32 @@ class GPUDetector:
         gpu_list = []
         
         try:
-            # First try wmic
+            # First try wmic with proper column order
             output = subprocess.check_output([
-                "wmic", "path", "win32_VideoController", "get", "name,AdapterRAM"
+                "wmic", "path", "win32_VideoController", "get", "Name,AdapterRAM", "/format:csv"
             ], stderr=subprocess.DEVNULL, timeout=10).decode("utf-8", errors="ignore")
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            # If wmic fails, try PowerShell
-            try:
-                powershell_cmd = [
-                    "powershell", "-Command",
-                    "Get-WmiObject -Class Win32_VideoController | Select-Object Name,AdapterRAM | Format-Table -AutoSize"
-                ]
-                output = subprocess.check_output(powershell_cmd, stderr=subprocess.DEVNULL, timeout=10).decode("utf-8", errors="ignore")
-            except Exception:
-                # If both fail, return empty list
-                logger.error("Both wmic and PowerShell GPU detection failed")
-                return gpu_list
-        
-        try:
             
             lines = [line.strip() for line in output.split('\n') if line.strip()]
             
-            # Skip header line
-            if lines and "Name" in lines[0]:
-                lines = lines[1:]
-            
-            for line in lines:
-                if not line or line.isspace():
+            # Skip header line and empty lines
+            for line in lines[1:]:
+                if not line or line.count(',') < 2:
                     continue
                 
-                # Parse line (format: AdapterRAM  Name)
-                parts = line.split(None, 1)
-                if len(parts) >= 2:
+                # CSV format: Node,AdapterRAM,Name
+                parts = line.split(',')
+                if len(parts) >= 3:
                     try:
-                        memory_str = parts[0]
-                        name = parts[1]
+                        adapter_ram = parts[1].strip()
+                        name = parts[2].strip()
+                        
+                        if not name or name == "":
+                            continue
                         
                         # Convert memory from bytes to MB
                         memory = None
-                        if memory_str.isdigit():
-                            memory = int(memory_str) // (1024 * 1024)
+                        if adapter_ram and adapter_ram.isdigit():
+                            memory = int(adapter_ram) // (1024 * 1024)
                         
                         gpu_type = self._classify_gpu(name)
                         cuda_version = self._get_cuda_version_for_gpu(name) if gpu_type == GPUType.NVIDIA else None
@@ -246,19 +232,50 @@ class GPUDetector:
                         
                     except (ValueError, IndexError):
                         continue
-                elif len(parts) == 1:
-                    # Only name available
-                    name = parts[0]
-                    gpu_type = self._classify_gpu(name)
-                    cuda_version = self._get_cuda_version_for_gpu(name) if gpu_type == GPUType.NVIDIA else None
-                    gpu_list.append(GPUInfo(name, gpu_type, cuda_version=cuda_version))
-            
-        except subprocess.TimeoutExpired:
-            logger.error("GPU detection timed out")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to get GPU info via wmic: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected error in Windows GPU detection: {e}")
+                        
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            # If wmic fails, try PowerShell
+            try:
+                powershell_cmd = [
+                    "powershell", "-Command",
+                    "Get-WmiObject -Class Win32_VideoController | Where-Object {$_.Name -ne $null} | Select-Object Name,AdapterRAM | ConvertTo-Csv -NoTypeInformation"
+                ]
+                output = subprocess.check_output(powershell_cmd, stderr=subprocess.DEVNULL, timeout=10).decode("utf-8", errors="ignore")
+                
+                lines = [line.strip() for line in output.split('\n') if line.strip()]
+                
+                # Skip header line
+                for line in lines[1:]:
+                    if not line or line.count(',') < 1:
+                        continue
+                    
+                    # CSV format: "Name","AdapterRAM"
+                    parts = [part.strip('"') for part in line.split(',')]
+                    if len(parts) >= 2:
+                        try:
+                            name = parts[0].strip()
+                            adapter_ram = parts[1].strip()
+                            
+                            if not name or name == "":
+                                continue
+                            
+                            # Convert memory from bytes to MB
+                            memory = None
+                            if adapter_ram and adapter_ram.isdigit():
+                                memory = int(adapter_ram) // (1024 * 1024)
+                            
+                            gpu_type = self._classify_gpu(name)
+                            cuda_version = self._get_cuda_version_for_gpu(name) if gpu_type == GPUType.NVIDIA else None
+                            
+                            gpu_list.append(GPUInfo(name, gpu_type, memory, cuda_version=cuda_version))
+                            
+                        except (ValueError, IndexError):
+                            continue
+                            
+            except Exception:
+                # If both fail, return empty list
+                logger.error("Both wmic and PowerShell GPU detection failed")
+                return gpu_list
         
         return gpu_list
     
