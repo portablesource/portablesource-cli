@@ -80,22 +80,23 @@ jobs:
           script-name: ${{ env.PROJECT_MAIN }}
           mode: onefile
 
-      - name: Archive binary (Linux/macOS)
-        if: runner.os != 'Windows'
+      - name: Archive binary
         run: |
-          cd build
-          zip -r ../portablesource-${{ runner.os }}.zip .
-
-      - name: Archive binary (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          Compress-Archive -Path build/* -DestinationPath portablesource-${{ runner.os }}.zip
+          if [ "${{ runner.os }}" == "Windows" ]; then
+            Compress-Archive -Path build/portablesource_main.exe -DestinationPath portablesource-Windows.zip
+          elif [ "${{ runner.os }}" == "Linux" ]; then
+            cd build
+            zip ../portablesource-Linux.zip portablesource_main
+          elif [ "${{ runner.os }}" == "macOS" ]; then
+            cd build
+            zip -r ../portablesource-macOS.zip portablesource_main.app
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: portablesource-${{ runner.os }}
-          path: portablesource-${{ runner.os }}.zip
+          path: portablesource-*.zip
 
   release:
     name: Release compiled binaries
