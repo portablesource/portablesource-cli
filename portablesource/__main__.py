@@ -14,7 +14,7 @@ import winreg
 
 # Относительные импорты
 from portablesource.get_gpu import GPUDetector
-from portablesource.config import ConfigManager
+from portablesource.config import ConfigManager, SERVER_DOMAIN
 from portablesource.envs_manager import EnvironmentManager, EnvironmentSpec
 from portablesource.repository_installer import RepositoryInstaller
 
@@ -246,7 +246,7 @@ class PortableSourceApp:
         """Инициализация установщика репозиториев"""
         self.repository_installer = RepositoryInstaller(
             config_manager=self.config_manager,
-            server_url="http://localhost:5000"
+            server_url=f"http://{SERVER_DOMAIN}"
         )
     
     def check_miniconda_availability(self) -> bool:

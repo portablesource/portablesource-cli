@@ -5,6 +5,8 @@ Configuration System for PortableSource
 This module manages configuration for GPU detection, CUDA versions, and system paths.
 """
 
+SERVER_DOMAIN = "localhost:5173"
+
 import os
 import json
 import logging
@@ -33,9 +35,6 @@ class CUDAVersion(Enum):
     CUDA_118 = "11.8"
     CUDA_124 = "12.4"
     CUDA_128 = "12.8"
-
-
-# CUDAPaths класс удален - пути управляются conda
 
 
 @dataclass
@@ -74,7 +73,7 @@ class PortableSourceConfig:
 
 class ConfigManager:
     """Configuration manager for PortableSource"""
-    
+
     def __init__(self, config_path: Optional[Path] = None):
         self.config_path = config_path or Path.cwd() / "portablesource_config.json"
         self.config = PortableSourceConfig()

@@ -21,7 +21,7 @@ from enum import Enum
 
 from tqdm import tqdm
 
-from portablesource.config import ConfigManager
+from portablesource.config import ConfigManager, SERVER_DOMAIN
 
 
 # Configure logging
@@ -31,8 +31,8 @@ logger = logging.getLogger(__name__)
 
 class ServerAPIClient:
     """Client for PortableSource server API"""
-    
-    def __init__(self, server_url: str = "http://localhost:5000"):
+
+    def __init__(self, server_url: str = f"http://{SERVER_DOMAIN}"):
         self.server_url = server_url.rstrip('/')
         self.session = requests.Session()
         self.timeout = 10
@@ -40,7 +40,7 @@ class ServerAPIClient:
     def get_repository_info(self, name: str) -> Optional[Dict]:
         """Get repository information from server"""
         try:
-            url = f"{self.server_url}/api/repository/{name.lower()}"
+            url = f"{self.server_url}/api/repositories/{name.lower()}"
             response = self.session.get(url, timeout=self.timeout)
             
             if response.status_code == 200:
@@ -82,7 +82,7 @@ class ServerAPIClient:
     def get_repository_dependencies(self, name: str) -> Optional[Dict]:
         """Get repository dependencies from server"""
         try:
-            url = f"{self.server_url}/api/repository/{name.lower()}/dependencies"
+            url = f"{self.server_url}/api/repositories/{name.lower()}/dependencies"
             response = self.session.get(url, timeout=self.timeout)
             
             if response.status_code == 200:
@@ -104,7 +104,7 @@ class ServerAPIClient:
     def get_installation_plan(self, name: str) -> Optional[Dict]:
         """Get installation plan from server"""
         try:
-            url = f"{self.server_url}/api/repository/{name.lower()}/dependencies/install_plan"
+            url = f"{self.server_url}/api/repositories/{name.lower()}/install-plan"
             logger.info(f"🌐 Requesting installation plan from: {url}")
             response = self.session.get(url, timeout=self.timeout)
             
@@ -301,8 +301,9 @@ class RequirementsAnalyzer:
         if plan.torch_packages:
             plan.torch_index_url = self._get_torch_index_url(gpu_info_list, primary_gpu_type)
         
-        # Note: ONNX Runtime packages are used as specified in requirements,
-        # no automatic GPU-based override to respect server configuration
+        # Auto-detect and set the correct ONNX Runtime package name
+        if plan.onnx_packages:
+            plan.onnx_package_name = self._get_onnx_package_name(primary_gpu_type)
         
         return plan
     
@@ -333,15 +334,18 @@ class RequirementsAnalyzer:
     def _get_onnx_package_name(self, gpu_type) -> str:
         """Get ONNX Runtime package name based on GPU type"""
         from portablesource.get_gpu import GPUType
-        
+        import os
+
         if not gpu_type or gpu_type == GPUType.UNKNOWN:
             return "onnxruntime"
-        
+
         if gpu_type == GPUType.NVIDIA:
             return "onnxruntime-gpu"
-        elif gpu_type in [GPUType.AMD, GPUType.INTEL, GPUType.DIRECTML]:
+        elif gpu_type in [GPUType.AMD, GPUType.INTEL] and os.name == 'nt':
             return "onnxruntime-directml"
         else:
+            # For AMD/Intel on other OS or other cases, default to standard onnxruntime
+            # Specific logic for ROCm on Linux can be handled during installation command construction
             return "onnxruntime"
     
     def _get_onnx_package_for_provider(self, provider: str) -> tuple[str, list[str], dict[str, str]]:
@@ -510,7 +514,7 @@ class MainFileFinder:
 class RepositoryInstaller:
     """Universal repository installer with intelligent dependency handling"""
     
-    def __init__(self, config_manager: Optional[ConfigManager] = None, server_url: str = "http://localhost:5000"):
+    def __init__(self, config_manager: Optional[ConfigManager] = None, server_url: str = f"http://{SERVER_DOMAIN}"):
         self.config_manager = config_manager or ConfigManager()
         self.analyzer = RequirementsAnalyzer()
         
@@ -518,7 +522,7 @@ class RepositoryInstaller:
         self.server_client = ServerAPIClient(server_url)
         self.main_file_finder = MainFileFinder(self.server_client)
         
-        # Check server availability
+
         if self.server_client.is_server_available():
             logger.info("✅ Connected to PortableSource server")
         else:
@@ -1042,46 +1046,19 @@ class RepositoryInstaller:
                 
                 self._run_pip_with_progress(torch_cmd, "Installing PyTorch packages")
             
-            # Install ONNX packages with pip (with GPU auto-detection for fallback)
+            # Install ONNX packages with pip
             if plan.onnx_packages:
                 logger.info("Installing ONNX packages with pip...")
-                from portablesource.get_gpu import GPUDetector, GPUType
-                gpu_detector = GPUDetector()
-                primary_gpu_type = gpu_detector.get_primary_gpu_type()
+                onnx_package_name = plan.onnx_package_name or "onnxruntime"
                 
-                for package in plan.onnx_packages:
-                    # Auto-detect GPU version for onnxruntime when falling back to local requirements
-                    package_str = str(package)
-                    if package.name == "onnxruntime" and primary_gpu_type == GPUType.NVIDIA:
-                        # Replace onnxruntime with onnxruntime-gpu for NVIDIA GPUs
-                        if package.version:
-                            package_str = f"onnxruntime-gpu=={package.version}"
-                        else:
-                            package_str = "onnxruntime-gpu"
-                        logger.info(f"🔄 Auto-detected NVIDIA GPU, using {package_str} instead of {package}")
-                    elif package.name == "onnxruntime" and primary_gpu_type == GPUType.AMD and os.name == "nt":
-                        # AMD GPU on Windows - use DirectML
-                        if package.version:
-                            package_str = f"onnxruntime-directml=={package.version}"
-                        else:
-                            package_str = "onnxruntime-directml"
-                        logger.info(f"🔄 Auto-detected AMD GPU on Windows, using {package_str} instead of {package}")
-                    elif package.name == "onnxruntime" and primary_gpu_type == GPUType.AMD and os.name == "posix":
-                        # AMD GPU on Linux - use ROCm (if available)
-                        if package.version:
-                            package_str = f"onnxruntime-rocm=={package.version}"
-                        else:
-                            package_str = "onnxruntime-rocm"
-                        logger.info(f"🔄 Auto-detected AMD GPU on Linux, using {package_str} instead of {package}")
-                    elif package.name == "onnxruntime" and primary_gpu_type == GPUType.INTEL:
-                        # Intel GPU - use DirectML
-                        if package.version:
-                            package_str = f"onnxruntime-directml=={package.version}"
-                        else:
-                            package_str = "onnxruntime-directml"
-                        logger.info(f"🔄 Auto-detected Intel GPU, using {package_str} instead of {package}")
-                    
-                    self._run_pip_with_progress([pip_exe, "install", package_str], f"Installing ONNX package: {package_str}")
+                # Find the onnxruntime package to get version if specified
+                onnxruntime_package = next((p for p in plan.onnx_packages if p.name == 'onnxruntime'), None)
+                if onnxruntime_package and onnxruntime_package.version:
+                    package_str = f"{onnx_package_name}=={onnxruntime_package.version}"
+                else:
+                    package_str = onnx_package_name
+
+                self._run_pip_with_progress([pip_exe, "install", package_str], f"Installing ONNX package: {package_str}")
             
             # Install TensorFlow packages with pip
             if plan.tensorflow_packages:
@@ -1089,8 +1066,17 @@ class RepositoryInstaller:
                 for package in plan.tensorflow_packages:
                     self._run_pip_with_progress([pip_exe, "install", str(package)], f"Installing TensorFlow package: {package}")
             
+            # Handle Triton package separately
+            triton_packages = [p for p in plan.regular_packages if 'triton' in p.name]
+            regular_packages_no_triton = [p for p in plan.regular_packages if 'triton' not in p.name]
+
+            if triton_packages:
+                logger.info("Handling Triton package...")
+                for package in triton_packages:
+                    self._handle_triton_package(package, pip_exe)
+
             # Install regular packages with uv
-            if plan.regular_packages:
+            if regular_packages_no_triton:
                 logger.info("Installing regular packages with uv...")
                 
                 # Create temporary requirements file for regular packages
@@ -1133,6 +1119,15 @@ class RepositoryInstaller:
         except Exception as e:
             logger.error(f"Error installing packages with pip: {e}")
             return False
+
+    def _handle_triton_package(self, package: PackageInfo, pip_exe: str):
+        """Handle Triton package installation based on OS."""
+        if sys.platform == "win32":
+            logger.info("Windows detected, installing triton-windows without version spec.")
+            # Install triton-windows without version
+            self._run_pip_with_progress([pip_exe, "install", "triton-windows"], "Installing triton-windows")
+        else:
+            logger.info("Skipping Triton installation on non-Windows OS.")
     
     def _execute_server_installation_plan(self, server_plan: Dict, repo_path: Path, repo_name: str) -> bool:
         """Execute installation plan from server"""
@@ -1190,35 +1185,9 @@ class RepositoryInstaller:
                         
                         if pkg_name:
                             # Special handling for ONNX Runtime with specific providers
-                            if step_type == 'onnxruntime' and gpu_support:
-                                onnx_provider = gpu_support
-                                onnx_pkg, onnx_flags, onnx_env = self.analyzer._get_onnx_package_for_provider(gpu_support)
-                                
-                                # Use the provider-specific package name
-                                pkg_name = onnx_pkg
-                                
-                                # Add provider-specific flags
-                                if onnx_flags:
-                                    install_cmd.extend(onnx_flags)
-                            elif step_type == 'onnxruntime' and pkg_name == 'onnxruntime':
-                                # Auto-detect GPU version for onnxruntime when no gpu_support specified
-                                import os
-                                from portablesource.get_gpu import GPUDetector, GPUType
-                                gpu_detector = GPUDetector()
-                                primary_gpu_type = gpu_detector.get_primary_gpu_type()
-                                
-                                if primary_gpu_type == GPUType.NVIDIA:
-                                    pkg_name = 'onnxruntime-gpu'
-                                    logger.info(f"🔄 Auto-detected NVIDIA GPU, using {pkg_name} instead of onnxruntime")
-                                elif primary_gpu_type == GPUType.AMD and os.name == "nt":
-                                    pkg_name = 'onnxruntime-directml'
-                                    logger.info(f"🔄 Auto-detected AMD GPU on Windows, using {pkg_name} instead of onnxruntime")
-                                elif primary_gpu_type == GPUType.AMD and os.name == "posix":
-                                    pkg_name = 'onnxruntime-rocm'
-                                    logger.info(f"🔄 Auto-detected AMD GPU on Linux, using {pkg_name} instead of onnxruntime")
-                                elif primary_gpu_type == GPUType.INTEL:
-                                    pkg_name = 'onnxruntime-directml'
-                                    logger.info(f"🔄 Auto-detected Intel GPU, using {pkg_name} instead of onnxruntime")
+                            if step_type == 'onnxruntime':
+                                onnx_package_name = server_plan.get('onnx_package_name') or 'onnxruntime'
+                                pkg_name = onnx_package_name
                             
                             if pkg_version:
                                 if pkg_version.startswith('>=') or pkg_version.startswith('=='):
@@ -1233,8 +1202,9 @@ class RepositoryInstaller:
                             # Add index URL if specified for this package
                             if index_url and '--index-url' not in install_cmd:
                                 install_cmd.extend(['--index-url', index_url])
-                    else:
-                        install_cmd.append(str(package))
+
+                if server_plan.get('torch_index_url') and '--index-url' not in install_cmd:
+                    install_cmd.extend(['--index-url', server_plan['torch_index_url']])
                 
                 # Add install flags
                 if install_flags:
