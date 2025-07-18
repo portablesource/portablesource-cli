@@ -1,2 +1,2 @@
 # portablesource
-Its my impletation of portable installer for popular local AI
+CLI for my GUI in future
