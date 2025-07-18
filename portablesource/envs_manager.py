@@ -132,7 +132,16 @@ class MinicondaInstaller:
         except Exception as e:
             logger.error(f"Ошибка при установке Miniconda: {e}")
             return False
+        finally:
+            # Удаляем установщик в любом случае
+            try:
+                if installer_path.exists():
+                    os.remove(installer_path)
+                    logger.info(f"Установщик удален: {installer_path}")
+            except Exception as e:
+                logger.warning(f"Не удалось удалить установщик {installer_path}: {e}")
 
+            
 class EnvironmentManager:
     """Менеджер окружений conda"""
     

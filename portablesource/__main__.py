@@ -45,6 +45,8 @@ class PortableSourceApp:
         # Определяем путь установки
         if install_path:
             self.install_path = Path(install_path).resolve()
+            # Сохраняем переданный путь в реестр
+            self._save_install_path_to_registry(self.install_path)
         else:
             # Запрашиваем путь у пользователя
             self.install_path = self._get_installation_path()
@@ -88,12 +90,11 @@ class PortableSourceApp:
             winreg.CloseKey(key)
             
             install_path = Path(install_path_str)
-            if install_path.exists():
-                logger.info(f"Путь установки загружен из реестра: {install_path}")
-                return install_path
-            else:
-                logger.warning(f"Путь из реестра не существует: {install_path}")
-                return None
+            logger.info(f"Путь установки загружен из реестра: {install_path}")
+            
+            # Возвращаем путь из реестра без проверки существования
+            # Папка может не существовать, но это нормально - она будет создана
+            return install_path
         except FileNotFoundError:
             logger.info("Путь установки не найден в реестре")
             return None
