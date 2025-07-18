@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-"""
-PortableSource - обертка для запуска главного модуля
-"""
-
 import sys
 import os
 from pathlib import Path
