@@ -1,9 +1,9 @@
 [project.urls]
-GitHub    = "https://github.com/portablesource/portablesource"
-Changelog = "https://github.com/portablesource/portablesource/releases"
+GitHub    = "https://github.com/portablesource/portablesource-cli"
+Changelog = "https://github.com/portablesource/portablesource-cli/releases"
 Contact   = "https://t.me/neuralchatik"
-Download  = "https://github.com/portablesource/portablesource/releases"
-Homepage  = "https://github.com/portablesource/portablesource"
+Download  = "https://github.com/portablesource/portablesource-cli/releases"
+Homepage  = "https://github.com/portablesource/portablesource-cli"
 
 [tool.hatch.version]
 path = "portablesource/Version.py"
