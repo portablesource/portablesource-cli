@@ -30,13 +30,19 @@ jobs:
           script-name: portablesource_main.py
           mode: onefile
 
-      - name: Archive binary
+      - name: Archive binary (Linux/macOS)
+        if: runner.os != 'Windows'
         run: |
           cd build
           zip -r ../portablesource-${{ runner.os }}.zip .
+
+      - name: Archive binary (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          Compress-Archive -Path build/* -DestinationPath portablesource-${{ runner.os }}.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: portablesource-${{ runner.os }}
-          path: portablesource-${{ runner.os }}.zip 
+          path: portablesource-${{ runner.os }}.zip
