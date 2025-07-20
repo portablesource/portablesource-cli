@@ -80,14 +80,15 @@ jobs:
           script-name: ${{ env.PROJECT_MAIN }}
           mode: onefile
 
-      - name: Archive binary
+      - name: Archive Linux binary
+        if: runner.os == 'Linux'
         run: |
-          if [ "${{ runner.os }}" == "Windows" ]; then
-            Compress-Archive -Path build/portablesource_main.exe -DestinationPath portablesource-Windows.zip
-          elif [ "${{ runner.os }}" == "Linux" ]; then
-            cd build
-            zip ../portablesource-Linux.zip portablesource_main.bin
-          fi
+          cd build
+          zip ../portablesource-Linux.zip portablesource_main.bin
+          
+      - name: Archive Windows binary
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path build/portablesource_main.exe -DestinationPath portablesource-Windows.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
