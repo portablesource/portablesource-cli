@@ -44,19 +44,29 @@ class ServerAPIClient:
             response = self.session.get(url, timeout=self.timeout)
             
             if response.status_code == 200:
-                return response.json()
+                data = response.json()
+                if self._validate_repository_info(data):
+                    return data
+                else:
+                    logger.error(f"Invalid repository info data received for '{name}'")
+                    return None
             elif response.status_code == 404:
-                logger.debug(f"Repository '{name}' not found in server database")
-                return None
+                return None  # Not found is expected, don't log
             else:
                 logger.warning(f"Server returned status {response.status_code} for repository '{name}'")
                 return None
                 
+        except requests.exceptions.Timeout:
+            logger.warning(f"Server timeout while getting repository info for '{name}'")
+            return None
+        except requests.exceptions.ConnectionError:
+            logger.warning(f"Could not connect to server for repository info '{name}'")
+            return None
         except requests.exceptions.RequestException as e:
-            logger.warning(f"Could not connect to server: {e}")
+            logger.warning(f"Network error getting repository info for '{name}': {e}")
             return None
         except Exception as e:
-            logger.error(f"Error getting repository info from server: {e}")
+            logger.error(f"Unexpected error getting repository info for '{name}': {e}")
             return None
     
     def search_repositories(self, query: str) -> List[Dict]:
@@ -67,16 +77,27 @@ class ServerAPIClient:
             
             if response.status_code == 200:
                 data = response.json()
-                return data.get('repositories', [])
+                repositories = data.get('repositories', [])
+                if isinstance(repositories, list):
+                    return repositories
+                else:
+                    logger.error(f"Invalid search results format for query '{query}'")
+                    return []
             else:
-                logger.warning(f"Server search returned status {response.status_code}")
+                logger.warning(f"Server search returned status {response.status_code} for query '{query}'")
                 return []
                 
+        except requests.exceptions.Timeout:
+            logger.warning(f"Server timeout while searching for '{query}'")
+            return []
+        except requests.exceptions.ConnectionError:
+            logger.warning(f"Could not connect to server for search '{query}'")
+            return []
         except requests.exceptions.RequestException as e:
-            logger.warning(f"Could not connect to server for search: {e}")
+            logger.warning(f"Network error searching for '{query}': {e}")
             return []
         except Exception as e:
-            logger.error(f"Error searching repositories: {e}")
+            logger.error(f"Unexpected error searching for '{query}': {e}")
             return []
     
     def get_repository_dependencies(self, name: str) -> Optional[Dict]:
@@ -86,48 +107,61 @@ class ServerAPIClient:
             response = self.session.get(url, timeout=self.timeout)
             
             if response.status_code == 200:
-                return response.json()
+                data = response.json()
+                if self._validate_dependencies_data(data):
+                    return data
+                else:
+                    logger.error(f"Invalid dependencies data received for '{name}'")
+                    return None
             elif response.status_code == 404:
-                logger.debug(f"No dependencies found for repository '{name}'")
-                return None
+                return None  # Not found is expected, don't log
             else:
                 logger.warning(f"Server returned status {response.status_code} for dependencies of '{name}'")
                 return None
                 
+        except requests.exceptions.Timeout:
+            logger.warning(f"Server timeout while getting dependencies for '{name}'")
+            return None
+        except requests.exceptions.ConnectionError:
+            logger.warning(f"Could not connect to server for dependencies '{name}'")
+            return None
         except requests.exceptions.RequestException as e:
-            logger.warning(f"Could not connect to server for dependencies: {e}")
+            logger.warning(f"Network error getting dependencies for '{name}': {e}")
             return None
         except Exception as e:
-            logger.error(f"Error getting dependencies from server: {e}")
+            logger.error(f"Unexpected error getting dependencies for '{name}': {e}")
             return None
     
     def get_installation_plan(self, name: str) -> Optional[Dict]:
         """Get installation plan from server"""
         try:
             url = f"{self.server_url}/api/repositories/{name.lower()}/install-plan"
-            logger.info(f"🌐 Requesting installation plan from: {url}")
             response = self.session.get(url, timeout=self.timeout)
-            
-            logger.info(f"📡 Server response status: {response.status_code}")
             
             if response.status_code == 200:
                 plan = response.json()
-                logger.info(f"✅ Successfully received installation plan for '{name}'")
-                return plan
+                if self._validate_installation_plan(plan):
+                    return plan
+                else:
+                    logger.error(f"Invalid installation plan data received for '{name}'")
+                    return None
             elif response.status_code == 404:
-                logger.warning(f"❌ No installation plan found for repository '{name}' (404)")
-                return None
+                return None  # Not found is expected, don't log
             else:
-                logger.warning(f"❌ Server returned status {response.status_code} for installation plan of '{name}'")
-                if hasattr(response, 'text'):
-                    logger.warning(f"Response content: {response.text[:200]}")
+                logger.warning(f"Server returned status {response.status_code} for installation plan of '{name}'")
                 return None
                 
+        except requests.exceptions.Timeout:
+            logger.warning(f"Server timeout while getting installation plan for '{name}'")
+            return None
+        except requests.exceptions.ConnectionError:
+            logger.warning(f"Could not connect to server for installation plan '{name}'")
+            return None
         except requests.exceptions.RequestException as e:
-            logger.error(f"❌ Could not connect to server for installation plan: {e}")
+            logger.warning(f"Network error getting installation plan for '{name}': {e}")
             return None
         except Exception as e:
-            logger.error(f"❌ Error getting installation plan from server: {e}")
+            logger.error(f"Unexpected error getting installation plan for '{name}': {e}")
             return None
     
     def is_server_available(self) -> bool:
@@ -138,13 +172,123 @@ class ServerAPIClient:
             return response.status_code == 200
         except Exception:
             return False
+    
+    def _validate_repository_info(self, data: Dict) -> bool:
+        """
+        Validate repository information data from server
+        
+        Args:
+            data: Repository info data from server
+            
+        Returns:
+            True if data is valid
+        """
+        if not data or not isinstance(data, dict):
+            return False
+        
+        # Check for basic structure - url is the minimum required field
+        if 'url' not in data:
+            return False
+        
+        # Validate URL format if present
+        url = data.get('url')
+        if url and not isinstance(url, str):
+            return False
+        
+        # Validate optional fields if present
+        optional_fields = ['main_file', 'program_args', 'description']
+        for field in optional_fields:
+            if field in data and not isinstance(data[field], str):
+                return False
+        
+        return True
+    
+    def _validate_installation_plan(self, plan: Dict) -> bool:
+        """
+        Validate installation plan data from server
+        
+        Args:
+            plan: Installation plan from server
+            
+        Returns:
+            True if plan is valid
+        """
+        if not plan or not isinstance(plan, dict):
+            return False
+        
+        # Check for required fields
+        required_fields = ['installation_order']
+        if not all(field in plan for field in required_fields):
+            return False
+        
+        # Validate installation_order structure
+        installation_order = plan.get('installation_order', [])
+        if not isinstance(installation_order, list):
+            return False
+        
+        # Validate each step in installation order
+        for step in installation_order:
+            if not isinstance(step, dict):
+                return False
+            if 'type' not in step or 'packages' not in step:
+                return False
+            if not isinstance(step['packages'], list):
+                return False
+            
+            # Validate step type
+            valid_types = ['torch', 'regular', 'onnxruntime', 'insightface']
+            if step['type'] not in valid_types:
+                return False
+            
+            # Validate packages structure
+            for package in step['packages']:
+                if isinstance(package, dict):
+                    if 'package_name' not in package:
+                        return False
+                elif not isinstance(package, str):
+                    return False
+        
+        # Validate optional fields
+        optional_fields = ['torch_index_url', 'onnx_package_name']
+        for field in optional_fields:
+            if field in plan and not isinstance(plan[field], str):
+                return False
+        
+        return True
+    
+    def _validate_dependencies_data(self, data: Dict) -> bool:
+        """
+        Validate dependencies data from server
+        
+        Args:
+            data: Dependencies data from server
+            
+        Returns:
+            True if data is valid
+        """
+        if not data or not isinstance(data, dict):
+            return False
+        
+        # Dependencies data should have at least one of these fields
+        expected_fields = ['requirements', 'packages', 'dependencies']
+        if not any(field in data for field in expected_fields):
+            return False
+        
+        # Validate structure of present fields
+        for field in expected_fields:
+            if field in data:
+                field_data = data[field]
+                if not isinstance(field_data, (list, dict, str)):
+                    return False
+        
+        return True
 
 
 class PackageType(Enum):
     """Types of special packages that need custom handling"""
     TORCH = "torch"
     ONNXRUNTIME = "onnxruntime"
-    TENSORFLOW = "tensorflow"
+    INSIGHTFACE = "insightface"
     REGULAR = "regular"
 
 
@@ -171,7 +315,7 @@ class InstallationPlan:
     """Plan for installing packages"""
     torch_packages: List[PackageInfo] = field(default_factory=list)
     onnx_packages: List[PackageInfo] = field(default_factory=list)
-    tensorflow_packages: List[PackageInfo] = field(default_factory=list)
+    insightface_packages: List[PackageInfo] = field(default_factory=list)
     regular_packages: List[PackageInfo] = field(default_factory=list)
     torch_index_url: Optional[str] = None
     onnx_package_name: Optional[str] = None
@@ -183,7 +327,7 @@ class RequirementsAnalyzer:
     def __init__(self):
         self.torch_packages = {"torch", "torchvision", "torchaudio", "torchtext", "torchdata"}
         self.onnx_packages = {"onnxruntime", "onnxruntime-gpu", "onnxruntime-directml", "onnxruntime-openvino"}
-        self.tensorflow_packages = {"tensorflow", "tensorflow-gpu", "tf-nightly", "tf-nightly-gpu"}
+        self.insightface_packages = {"insightface"}
     
     def parse_requirement_line(self, line: str) -> Optional[PackageInfo]:
         """
@@ -197,6 +341,11 @@ class RequirementsAnalyzer:
         """
         # Remove comments and whitespace
         line = line.split('#')[0].strip()
+        
+        # Ignore lines with --index-url
+        if '--index-url' in line:
+            return None
+            
         if not line or line.startswith('-'):
             return None
         
@@ -225,8 +374,8 @@ class RequirementsAnalyzer:
             package_type = PackageType.TORCH
         elif package_name in self.onnx_packages:
             package_type = PackageType.ONNXRUNTIME
-        elif package_name in self.tensorflow_packages:
-            package_type = PackageType.TENSORFLOW
+        elif package_name in self.insightface_packages:
+            package_type = PackageType.INSIGHTFACE
         
         return PackageInfo(
             name=package_name,
@@ -263,7 +412,6 @@ class RequirementsAnalyzer:
             logger.error(f"Error reading requirements file {requirements_path}: {e}")
             return []
         
-        logger.info(f"Analyzed {len(packages)} packages from {requirements_path}")
         return packages
     
     def create_installation_plan(self, packages: List[PackageInfo], gpu_config) -> InstallationPlan:
@@ -292,8 +440,8 @@ class RequirementsAnalyzer:
                 plan.torch_packages.append(package)
             elif package.package_type == PackageType.ONNXRUNTIME:
                 plan.onnx_packages.append(package)
-            elif package.package_type == PackageType.TENSORFLOW:
-                plan.tensorflow_packages.append(package)
+            elif package.package_type == PackageType.INSIGHTFACE:
+                plan.insightface_packages.append(package)
             else:
                 plan.regular_packages.append(package)
         
@@ -429,13 +577,11 @@ class MainFileFinder:
         """
         
         # Strategy 1: Try server API first
-        logger.info(f"Checking server database for repository: {repo_name}")
         server_info = self.server_client.get_repository_info(repo_name)
         
         if server_info:
             main_file = server_info.get('main_file')
             if main_file and self._validate_main_file(repo_path, main_file):
-                logger.info(f"Found main file from server: {main_file}")
                 return main_file
             else:
                 logger.warning(f"Server returned main file '{main_file}' but it doesn't exist in repository")
@@ -444,32 +590,25 @@ class MainFileFinder:
         if not server_info:
             url_repo_name = self._extract_repo_name_from_url(repo_url)
             if url_repo_name != repo_name:
-                logger.info(f"Trying URL-based lookup: {url_repo_name}")
                 server_info = self.server_client.get_repository_info(url_repo_name)
                 if server_info:
                     main_file = server_info.get('main_file')
                     if main_file and self._validate_main_file(repo_path, main_file):
-                        logger.info(f"Found main file from URL-based lookup: {main_file}")
                         return main_file
         
         # Strategy 3: Search server database for similar repositories
-        logger.info(f"Searching server database for similar repositories...")
         search_results = self.server_client.search_repositories(repo_name)
         for result in search_results:
             main_file = result.get('main_file')
             if main_file and self._validate_main_file(repo_path, main_file):
-                logger.info(f"Found main file from similar repository: {main_file}")
                 return main_file
         
         # Strategy 4: Common file fallbacks
-        logger.info("Trying common main file patterns...")
         for main_file in self.common_main_files:
             if self._validate_main_file(repo_path, main_file):
-                logger.info(f"Found main file using fallback: {main_file}")
                 return main_file
         
         # Strategy 5: Look for Python files in root directory
-        logger.info("Searching for Python files in root directory...")
         python_files = list(repo_path.glob("*.py"))
         
         # Filter out common non-main files
@@ -482,13 +621,11 @@ class MainFileFinder:
                 main_candidates.append(py_file.name)
         
         if len(main_candidates) == 1:
-            logger.info(f"Found single Python file candidate: {main_candidates[0]}")
             return main_candidates[0]
         elif len(main_candidates) > 1:
             # Try to find the most likely main file
             for candidate in main_candidates:
                 if any(pattern in candidate.lower() for pattern in ['main', 'run', 'start', 'app']):
-                    logger.info(f"Found likely main file: {candidate}")
                     return candidate
         
         # All strategies failed
@@ -523,10 +660,8 @@ class RepositoryInstaller:
         self.main_file_finder = MainFileFinder(self.server_client)
         
 
-        if self.server_client.is_server_available():
-            logger.info("✅ Connected to PortableSource server")
-        else:
-            logger.warning("⚠️  PortableSource server not available - using fallback methods only")
+        if not self.server_client.is_server_available():
+            logger.warning("PortableSource server not available - using fallback methods only")
         
         # Fallback repositories (will be used if server is not available)
         self.fallback_repositories = {
@@ -571,12 +706,6 @@ class RepositoryInstaller:
             True if installation successful
         """
         try:
-            # Determine repository info
-            repo_info = self._get_repository_info(repo_url_or_name)
-            if not repo_info:
-                logger.error(f"Could not determine repository info for: {repo_url_or_name}")
-                return False
-            
             # Set up installation paths  
             if not install_path:
                 logger.error("install_path is required in the new architecture")
@@ -588,15 +717,111 @@ class RepositoryInstaller:
                 logger.error("install_path must be a string or Path object")
                 return False
             
-            # Используем новую структуру: install_path является корнем, repos - подпапка
-            repo_name = self._extract_repo_name(repo_info["url"])
+            # Determine input type and route to appropriate handler
+            is_url = self._is_repository_url(repo_url_or_name)
+            
+            if is_url:
+                # Handle URL installation: extract name -> search server plan -> install dependencies or clone
+                return self._handle_url_installation(repo_url_or_name, install_path)
+            else:
+                # Handle name installation: use standard logic
+                return self._handle_name_installation(repo_url_or_name, install_path)
+            
+        except Exception as e:
+            logger.error(f"Error installing repository {repo_url_or_name}: {e}")
+            return False
+    
+    def _handle_url_installation(self, repo_url: str, install_path: Path) -> bool:
+        """
+        Handle installation from repository URL with automatic fallback to local installation
+        
+        Args:
+            repo_url: Repository URL
+            install_path: Installation path
+            
+        Returns:
+            True if installation successful
+        """
+        try:
+            # Extract repository name from URL
+            repo_name = self._extract_repo_name(repo_url)
+            
+            # Try to get installation plan from server
+            server_plan = self.server_client.get_installation_plan(repo_name)
+            
+            if server_plan:
+                # Install only dependencies from server plan without cloning
+                success = self._install_from_server_plan_only(server_plan, repo_name, install_path)
+                if success:
+                    return True
+                else:
+                    # Server plan failed, fallback to local installation
+                    logger.warning(f"Server plan installation failed for {repo_name}, falling back to local installation")
+                    return self._install_with_cloning(repo_url, install_path)
+            else:
+                # No server plan found, fallback to local installation
+                return self._install_with_cloning(repo_url, install_path)
+                
+        except Exception as e:
+            logger.error(f"Error handling URL installation for {repo_url}: {e}")
+            return False
+    
+    def _install_from_server_plan_only(self, server_plan: Dict, repo_name: str, install_path: Path) -> bool:
+        """
+        Install only dependencies from server plan without cloning repository
+        
+        Args:
+            server_plan: Installation plan from server
+            repo_name: Repository name
+            install_path: Installation path
+            
+        Returns:
+            True if installation successful
+        """
+        try:
+            # Validate server plan data
+            if not self._validate_server_plan(server_plan):
+                logger.error(f"Invalid server plan data for {repo_name}")
+                return False
+            
+            # Create venv environment for the repository
+            if not self._create_venv_environment(repo_name):
+                logger.error(f"Failed to create venv environment for {repo_name}")
+                return False
+            
+            # Execute server installation plan without local repository
+            return self._execute_server_installation_plan(server_plan, None, repo_name)
+            
+        except Exception as e:
+            logger.error(f"Error installing from server plan for {repo_name}: {e}")
+            return False
+    
+    def _handle_name_installation(self, repo_name: str, install_path: Path) -> bool:
+        """
+        Handle installation by repository name using standard logic
+        
+        Args:
+            repo_name: Repository name
+            install_path: Installation path
+            
+        Returns:
+            True if installation successful
+        """
+        try:
+            # Use standard logic - check server first, then fallback repositories
+            repo_info = self._get_repository_info(repo_name)
+            
+            if not repo_info:
+                logger.error(f"Repository '{repo_name}' not found")
+                return False
+            
             repo_path = install_path / repo_name
             
             # Clone or update repository
             if not self._clone_or_update_repository(repo_info, repo_path):
                 return False
             
-            # Analyze and install dependencies (using base Python)
+            # Analyze and install dependencies
             if not self._install_dependencies(repo_path):
                 return False
             
@@ -610,11 +835,127 @@ class RepositoryInstaller:
             # Send download statistics to server
             self._send_download_stats(repo_name)
 
-            logger.info(f"Successfully installed repository: {repo_name}")
             return True
             
         except Exception as e:
-            logger.error(f"Error installing repository {repo_url_or_name}: {e}")
+            logger.error(f"Error handling name installation for {repo_name}: {e}")
+            return False
+    
+    def _handle_name_installation(self, repo_name: str, install_path: Path) -> bool:
+        """
+        Handle installation from repository name using standard logic
+        
+        Args:
+            repo_name: Repository name
+            install_path: Installation path
+            
+        Returns:
+            True if installation successful
+        """
+        try:
+            # Use existing standard logic
+            repo_info = self._get_repository_info(repo_name)
+            if not repo_info:
+                logger.error(f"Could not determine repository info for: {repo_name}")
+                return False
+            
+            # Extract repo name and set up path
+            actual_repo_name = self._extract_repo_name(repo_info["url"])
+            repo_path = install_path / actual_repo_name
+            
+            # Clone or update repository
+            if not self._clone_or_update_repository(repo_info, repo_path):
+                return False
+            
+            # Analyze and install dependencies
+            if not self._install_dependencies(repo_path):
+                return False
+            
+            # Run special setup if needed
+            if repo_info.get("special_setup"):
+                repo_info["special_setup"](repo_path)
+            
+            # Generate startup script
+            self._generate_startup_script(repo_path, repo_info)
+            
+            # Send download statistics to server
+            self._send_download_stats(actual_repo_name)
+
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error in name installation for {repo_name}: {e}")
+            return False
+    
+    def _install_from_server_plan_only(self, server_plan: Dict, repo_name: str, install_path: Path) -> bool:
+        """
+        Install only dependencies from server plan without cloning repository
+        
+        Args:
+            server_plan: Installation plan from server
+            repo_name: Repository name
+            install_path: Installation path
+            
+        Returns:
+            True if installation successful
+        """
+        try:
+            # Create venv environment for the repository
+            if not self._create_venv_environment(repo_name):
+                logger.error(f"Failed to create venv environment for {repo_name}")
+                return False
+            
+            # Execute server installation plan without local repository
+            return self._execute_server_installation_plan(server_plan, None, repo_name)
+            
+        except Exception as e:
+            logger.error(f"Error installing from server plan for {repo_name}: {e}")
+            return False
+    
+    def _install_with_cloning(self, repo_url: str, install_path: Path) -> bool:
+        """
+        Install repository by cloning and using local requirements.txt
+        
+        Args:
+            repo_url: Repository URL
+            install_path: Installation path
+            
+        Returns:
+            True if installation successful
+        """
+        try:
+            # Create basic repo info for cloning
+            repo_name = self._extract_repo_name(repo_url)
+            repo_info = {
+                "url": repo_url,
+                "main_file": None,  # Will be determined later
+                "special_setup": self._get_special_setup(repo_name)
+            }
+            
+            repo_path = install_path / repo_name
+            
+            # Clone or update repository
+            if not self._clone_or_update_repository(repo_info, repo_path):
+                return False
+            
+            # Analyze and install dependencies
+            if not self._install_dependencies(repo_path):
+                return False
+            
+            # Run special setup if needed
+            if repo_info.get("special_setup"):
+                repo_info["special_setup"](repo_path)
+            
+            # Generate startup script
+            self._generate_startup_script(repo_path, repo_info)
+            
+            # Send download statistics to server
+            self._send_download_stats(repo_name)
+
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error installing with cloning for {repo_url}: {e}")
             return False
     
     def _get_repository_info(self, repo_url_or_name: str) -> Optional[Dict]:
@@ -658,7 +999,339 @@ class RepositoryInstaller:
         
         return None
     
+    def _is_repository_url(self, input_str: str) -> bool:
+        """Determine if input is a repository URL"""
+        return input_str.startswith(("http://", "https://", "git@"))
+    
+    def _extract_repo_name(self, repo_url: str) -> str:
+        """Extract repository name from URL"""
+        try:
+            parsed = urlparse(repo_url)
+            path = parsed.path.strip('/')
+            if path.endswith('.git'):
+                path = path[:-4]
+            return path.split('/')[-1].lower()
+        except Exception:
+            return ""
+    
+    def _handle_name_installation(self, repo_name: str, install_path: Path) -> bool:
+        """
+        Handle installation from repository name using standard logic
+        
+        Args:
+            repo_name: Repository name
+            install_path: Installation path
+            
+        Returns:
+            True if installation successful
+        """
+        try:
+            # Use existing standard logic
+            repo_info = self._get_repository_info(repo_name)
+            if not repo_info:
+                logger.error(f"Could not determine repository info for: {repo_name}")
+                return False
+            
+            # Extract repo name and set up path
+            actual_repo_name = self._extract_repo_name(repo_info["url"])
+            repo_path = install_path / actual_repo_name
+            
+            # Clone or update repository
+            if not self._clone_or_update_repository(repo_info, repo_path):
+                return False
+            
+            # Analyze and install dependencies
+            if not self._install_dependencies(repo_path):
+                return False
+            
+            # Run special setup if needed
+            if repo_info.get("special_setup"):
+                repo_info["special_setup"](repo_path)
+            
+            # Generate startup script
+            self._generate_startup_script(repo_path, repo_info)
+            
+            # Send download statistics to server
+            self._send_download_stats(actual_repo_name)
+
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error in name installation for {repo_name}: {e}")
+            return False
+    
+    def _install_from_server_plan_only(self, server_plan: Dict, repo_name: str, install_path: Path) -> bool:
+        """
+        Install only dependencies from server plan without cloning repository
+        
+        Args:
+            server_plan: Installation plan from server
+            repo_name: Repository name
+            install_path: Installation path
+            
+        Returns:
+            True if installation successful
+        """
+        try:
+            # Create venv environment for the repository
+            if not self._create_venv_environment(repo_name):
+                logger.error(f"Failed to create venv environment for {repo_name}")
+                return False
+            
+            # Execute server installation plan without local repository
+            return self._execute_server_installation_plan(server_plan, None, repo_name)
+            
+        except Exception as e:
+            logger.error(f"Error installing from server plan for {repo_name}: {e}")
+            return False
+    
+    def _install_with_cloning(self, repo_url: str, install_path: Path) -> bool:
+        """
+        Install repository by cloning and using local requirements.txt
+        
+        Args:
+            repo_url: Repository URL
+            install_path: Installation path
+            
+        Returns:
+            True if installation successful
+        """
+        try:
+            # Create basic repo info for cloning
+            repo_name = self._extract_repo_name(repo_url)
+            repo_info = {
+                "url": repo_url,
+                "main_file": None,  # Will be determined later
+                "special_setup": self._get_special_setup(repo_name)
+            }
+            
+            repo_path = install_path / repo_name
+            
+            # Clone or update repository
+            if not self._clone_or_update_repository(repo_info, repo_path):
+                return False
+            
+            # Analyze and install dependencies
+            if not self._install_dependencies(repo_path):
+                return False
+            
+            # Run special setup if needed
+            if repo_info.get("special_setup"):
+                repo_info["special_setup"](repo_path)
+            
+            # Generate startup script
+            self._generate_startup_script(repo_path, repo_info)
+            
+            # Send download statistics to server
+            self._send_download_stats(repo_name)
+
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error installing with cloning for {repo_url}: {e}")
+            return False
+    
+    def _validate_server_plan(self, plan: Dict) -> bool:
+        """
+        Validate server installation plan data
+        
+        Args:
+            plan: Installation plan from server
+            
+        Returns:
+            True if plan is valid
+        """
+        if not plan or not isinstance(plan, dict):
+            return False
+        
+        # Check for required fields
+        required_fields = ['installation_order']
+        if not all(field in plan for field in required_fields):
+            return False
+        
+        # Validate installation_order structure
+        installation_order = plan.get('installation_order', [])
+        if not isinstance(installation_order, list):
+            return False
+        
+        # Validate each step in installation order
+        for step in installation_order:
+            if not isinstance(step, dict):
+                return False
+            if 'type' not in step or 'packages' not in step:
+                return False
+            if not isinstance(step['packages'], list):
+                return False
+        
+        return True
+    
+    def _validate_repository_info(self, data: Dict) -> bool:
+        """
+        Validate repository information data from server
+        
+        Args:
+            data: Repository info data from server
+            
+        Returns:
+            True if data is valid
+        """
+        if not data or not isinstance(data, dict):
+            return False
+        
+        # Check for basic structure - url is the minimum required field
+        if 'url' not in data:
+            return False
+        
+        # Validate URL format if present
+        url = data.get('url')
+        if url and not isinstance(url, str):
+            return False
+        
+        # Validate optional fields if present
+        optional_fields = ['main_file', 'program_args', 'description']
+        for field in optional_fields:
+            if field in data and not isinstance(data[field], str):
+                return False
+        
+        return True
+    
+    def _validate_installation_plan(self, plan: Dict) -> bool:
+        """
+        Validate installation plan data from server
+        
+        Args:
+            plan: Installation plan from server
+            
+        Returns:
+            True if plan is valid
+        """
+        if not plan or not isinstance(plan, dict):
+            return False
+        
+        # Check for required fields
+        required_fields = ['installation_order']
+        if not all(field in plan for field in required_fields):
+            return False
+        
+        # Validate installation_order structure
+        installation_order = plan.get('installation_order', [])
+        if not isinstance(installation_order, list):
+            return False
+        
+        # Validate each step in installation order
+        for step in installation_order:
+            if not isinstance(step, dict):
+                return False
+            if 'type' not in step or 'packages' not in step:
+                return False
+            if not isinstance(step['packages'], list):
+                return False
+            
+            # Validate step type
+            valid_types = ['torch', 'regular', 'onnxruntime', 'insightface']
+            if step['type'] not in valid_types:
+                return False
+            
+            # Validate packages structure
+            for package in step['packages']:
+                if isinstance(package, dict):
+                    if 'package_name' not in package:
+                        return False
+                elif not isinstance(package, str):
+                    return False
+        
+        # Validate optional fields
+        optional_fields = ['torch_index_url', 'onnx_package_name']
+        for field in optional_fields:
+            if field in plan and not isinstance(plan[field], str):
+                return False
+        
+        return True
+    
+    def _validate_dependencies_data(self, data: Dict) -> bool:
+        """
+        Validate dependencies data from server
+        
+        Args:
+            data: Dependencies data from server
+            
+        Returns:
+            True if data is valid
+        """
+        if not data or not isinstance(data, dict):
+            return False
+        
+        # Dependencies data should have at least one of these fields
+        expected_fields = ['requirements', 'packages', 'dependencies']
+        if not any(field in data for field in expected_fields):
+            return False
+        
+        # Validate structure of present fields
+        for field in expected_fields:
+            if field in data:
+                field_data = data[field]
+                if not isinstance(field_data, (list, dict, str)):
+                    return False
+        
+        return True
+    
+    def _install_from_server_plan_only_enhanced(self, server_plan: Dict, repo_name: str, install_path: Path) -> bool:
+        """
+        Install only dependencies from server plan without cloning repository (enhanced version)
+        
+        Args:
+            server_plan: Installation plan from server
+            repo_name: Repository name
+            install_path: Installation path
+            
+        Returns:
+            True if installation successful
+        """
+        try:
+            # Validate server plan data
+            if not self._validate_server_plan(server_plan):
+                logger.error(f"Invalid server plan data for {repo_name}")
+                return False
+            
+            # Create venv environment for the repository
+            if not self._create_venv_environment(repo_name):
+                logger.error(f"Failed to create venv environment for {repo_name}")
+                return False
+            
+            # Execute server installation plan without local repository
+            return self._execute_server_installation_plan(server_plan, None, repo_name)
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error during server plan installation for {repo_name}: {e}")
+            return False
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Package installation failed for {repo_name}: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Error installing from server plan for {repo_name}: {e}")
+            return False
+
     def _get_special_setup(self, repo_name: str):
+        """Get special setup function for repository"""
+        special_setups = {
+            "facefusion": self._setup_facefusion
+        }
+        return special_setups.get(repo_name.lower(), None)
+    
+    def _setup_facefusion(self, repo_path: Path):
+        """Special setup for FaceFusion repository"""
+        # Placeholder for FaceFusion-specific setup
+        pass
+    
+    def _generate_startup_script(self, repo_path: Path, repo_info: Dict):
+        """Generate startup script for repository"""
+        # Placeholder for startup script generation
+        pass
+    
+    def _send_download_stats(self, repo_name: str):
+        """Send download statistics to server"""
+        # Placeholder for download statistics
+        pass
         """Get special setup function for known repositories"""
         special_setups = {
             "facefusion": self._setup_facefusion,
@@ -666,13 +1339,25 @@ class RepositoryInstaller:
         }
         return special_setups.get(repo_name.lower())
     
+    def _is_repository_url(self, input_str: str) -> bool:
+        """
+        Determine if input string is a repository URL
+        
+        Args:
+            input_str: Input string to check
+            
+        Returns:
+            True if input is a repository URL, False otherwise
+        """
+        return input_str.startswith(("http://", "https://", "git@"))
+    
     def _extract_repo_name(self, repo_url: str) -> str:
         """Extract repository name from URL"""
         parsed = urlparse(repo_url)
         path = parsed.path.strip('/')
         if path.endswith('.git'):
             path = path[:-4]
-        return path.split('/')[-1]
+        return path.split('/')[-1].lower()
     
     def _clone_or_update_repository(self, repo_info: Dict, repo_path: Path) -> bool:
         """Clone or update repository with automatic error fixing"""
@@ -681,7 +1366,6 @@ class RepositoryInstaller:
             
             if repo_path.exists():
                 # Update existing repository
-                logger.info(f"Updating repository at {repo_path}")
                 os.chdir(repo_path)
                 
                 # Check if it's a git repository
@@ -694,7 +1378,6 @@ class RepositoryInstaller:
                     return False
             else:
                 # Clone new repository
-                logger.info(f"Cloning repository to {repo_path}")
                 os.chdir(repo_path.parent)
                 
                 cmd = [git_exe, "clone", repo_info["url"]]
@@ -729,11 +1412,10 @@ class RepositoryInstaller:
                 # Try to fix common git issues
                 if attempt < max_attempts - 1:  # Don't try fixes on last attempt
                     if self._fix_git_issues(git_exe, repo_path, error_output):
-                        logger.info("Applied git fix, retrying...")
                         continue
                 
                 if attempt == max_attempts - 1:
-                    logger.error(f"❌ Failed to update repository after {max_attempts} attempts")
+                    logger.error(f"Failed to update repository after {max_attempts} attempts")
                     return False
         
         return False
@@ -743,20 +1425,17 @@ class RepositoryInstaller:
          try:
              # Fix 1: Diverged branches - reset to remote
              if "diverged" in error_output.lower() or "non-fast-forward" in error_output.lower():
-                 logger.info("🔧 Fixing diverged branches by resetting to remote...")
                  subprocess.run([git_exe, "fetch", "origin"], check=True, capture_output=True)
                  subprocess.run([git_exe, "reset", "--hard", "origin/main"], check=True, capture_output=True)
                  return True
              
              # Fix 2: Uncommitted changes - stash them
              if "uncommitted changes" in error_output.lower() or "would be overwritten" in error_output.lower():
-                 logger.info("🔧 Stashing uncommitted changes...")
                  subprocess.run([git_exe, "stash"], check=True, capture_output=True)
                  return True
              
              # Fix 3: Merge conflicts - abort and reset
              if "merge conflict" in error_output.lower() or "conflict" in error_output.lower():
-                 logger.info("🔧 Resolving merge conflicts by resetting...")
                  subprocess.run([git_exe, "merge", "--abort"], capture_output=True)  # Don't check=True as it might fail
                  subprocess.run([git_exe, "fetch", "origin"], check=True, capture_output=True)
                  subprocess.run([git_exe, "reset", "--hard", "origin/main"], check=True, capture_output=True)
@@ -764,7 +1443,6 @@ class RepositoryInstaller:
              
              # Fix 4: Detached HEAD - checkout main/master
              if "detached head" in error_output.lower():
-                 logger.info("🔧 Fixing detached HEAD by checking out main branch...")
                  try:
                      subprocess.run([git_exe, "checkout", "main"], check=True, capture_output=True)
                  except subprocess.CalledProcessError:
@@ -773,19 +1451,16 @@ class RepositoryInstaller:
              
              # Fix 5: Corrupted index - reset index
              if "index" in error_output.lower() and "corrupt" in error_output.lower():
-                 logger.info("🔧 Fixing corrupted index...")
                  subprocess.run([git_exe, "reset", "--mixed"], check=True, capture_output=True)
                  return True
              
              # Fix 6: Remote tracking branch issues
              if "no tracking information" in error_output.lower():
-                 logger.info("🔧 Setting up remote tracking branch...")
                  subprocess.run([git_exe, "branch", "--set-upstream-to=origin/main"], check=True, capture_output=True)
                  return True
              
              # Fix 7: Exit status 128 - generic git error, try comprehensive fix
              if "128" in error_output or "fatal:" in error_output.lower():
-                 logger.info("🔧 Fixing git error 128 with comprehensive reset...")
                  # First try to fetch and reset
                  try:
                      subprocess.run([git_exe, "fetch", "origin"], check=True, capture_output=True)
@@ -804,7 +1479,6 @@ class RepositoryInstaller:
              
              # Fix 8: Permission denied or file lock issues
              if "permission denied" in error_output.lower() or "unable to create" in error_output.lower():
-                 logger.info("🔧 Fixing permission/lock issues...")
                  import time
                  time.sleep(2)  # Wait a bit for locks to release
                  subprocess.run([git_exe, "gc", "--prune=now"], capture_output=True)  # Clean up
@@ -812,7 +1486,6 @@ class RepositoryInstaller:
              
              # Fix 9: Network/remote issues - retry with different approach
              if "network" in error_output.lower() or "remote" in error_output.lower() or "connection" in error_output.lower():
-                 logger.info("🔧 Fixing network issues by refreshing remote...")
                  subprocess.run([git_exe, "remote", "set-url", "origin", subprocess.run([git_exe, "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()], capture_output=True)
                  return True
                  
@@ -883,20 +1556,17 @@ class RepositoryInstaller:
             try:
                 result = subprocess.run(uv_cmd + ["--version"], capture_output=True, text=True, timeout=10)
                 if result.returncode == 0:
-                    logger.info(f"UV already available in venv for {repo_name}: {result.stdout.strip()}")
                     return True
             except Exception:
                 pass  # UV not available, continue with installation
             
             pip_exe = self._get_pip_executable(repo_name)
-            logger.info(f"Installing uv in venv for {repo_name}...")
             self._run_pip_with_progress([pip_exe, "install", "uv"], "Installing uv")
             
             # Verify installation
             try:
                 result = subprocess.run(uv_cmd + ["--version"], capture_output=True, text=True, timeout=10)
                 if result.returncode == 0:
-                    logger.info(f"UV successfully installed: {result.stdout.strip()}")
                     return True
                 else:
                     logger.error(f"UV installation verification failed: {result.stderr}")
@@ -912,31 +1582,20 @@ class RepositoryInstaller:
     def _get_installation_plan_from_server(self, repo_name: str) -> Optional[Dict]:
         """Get installation plan from server for the repository"""
         try:
-            logger.info(f"🔍 Checking server for installation plan for {repo_name}")
-            
             if not self.server_client.is_server_available():
-                logger.warning(f"❌ Server not available for {repo_name}")
                 return None
             
-            logger.info(f"🌐 Server is available, requesting installation plan for {repo_name}")
             plan = self.server_client.get_installation_plan(repo_name)
-            if plan:
-                logger.info(f"✅ Retrieved installation plan from server for {repo_name}")
-                logger.info(f"📋 Plan contains {len(plan.get('installation_order', []))} installation steps")
-                return plan
-            else:
-                logger.warning(f"❌ No installation plan available on server for {repo_name}")
-                return None
+            return plan
                 
         except Exception as e:
-            logger.error(f"❌ Failed to get installation plan from server for {repo_name}: {e}")
+            logger.error(f"Failed to get installation plan from server for {repo_name}: {e}")
             return None
     
     def _install_dependencies(self, repo_path: Path) -> bool:
         """Install dependencies in venv with new architecture - try server first, then local requirements"""
         try:
             repo_name = repo_path.name.lower()
-            logger.info(f"📦 Installing dependencies for {repo_name}")
             
             # Create venv environment for the repository
             if not self._create_venv_environment(repo_name):
@@ -946,14 +1605,10 @@ class RepositoryInstaller:
             # Try to get installation plan from server first
             server_plan = self._get_installation_plan_from_server(repo_name)
             if server_plan:
-                logger.info(f"🌐 Using server installation plan for {repo_name}")
                 if self._execute_server_installation_plan(server_plan, repo_path, repo_name):
-                    logger.info(f"✅ Successfully installed dependencies from server for {repo_name}")
                     return True
                 else:
-                    logger.warning(f"⚠️ Server installation failed for {repo_name}, falling back to local requirements")
-            else:
-                logger.info(f"📄 No server installation plan available for {repo_name}, using local requirements")
+                    logger.warning(f"Server installation failed for {repo_name}, falling back to local requirements")
             
             # Fallback to local requirements.txt
             requirements_files = [
@@ -995,20 +1650,17 @@ class RepositoryInstaller:
             
             # Remove existing venv if exists
             if venv_path.exists():
-                logger.info(f"Removing existing venv: {venv_path}")
                 import shutil
                 shutil.rmtree(venv_path)
             
             # Create new venv using conda python
             python_exe = self._get_python_executable()
             
-            logger.info(f"Creating venv environment: {venv_path}")
             result = subprocess.run([
                 python_exe, "-m", "venv", str(venv_path)
             ], capture_output=True, text=True)
             
             if result.returncode == 0:
-                logger.info(f"✅ Created venv environment: {venv_path}")
                 return True
             else:
                 logger.error(f"Failed to create venv: {result.stderr}")
@@ -1035,7 +1687,6 @@ class RepositoryInstaller:
             
             # Install torch packages with pip (they need special index URLs)
             if plan.torch_packages:
-                logger.info("Installing PyTorch packages with pip...")
                 torch_cmd = [pip_exe, "install"]
                 
                 for package in plan.torch_packages:
@@ -1048,7 +1699,6 @@ class RepositoryInstaller:
             
             # Install ONNX packages with pip
             if plan.onnx_packages:
-                logger.info("Installing ONNX packages with pip...")
                 onnx_package_name = plan.onnx_package_name or "onnxruntime"
                 
                 # Find the onnxruntime package to get version if specified
@@ -1060,11 +1710,10 @@ class RepositoryInstaller:
 
                 self._run_pip_with_progress([pip_exe, "install", package_str], f"Installing ONNX package: {package_str}")
             
-            # Install TensorFlow packages with pip
-            if plan.tensorflow_packages:
-                logger.info("Installing TensorFlow packages with pip...")
-                for package in plan.tensorflow_packages:
-                    self._run_pip_with_progress([pip_exe, "install", str(package)], f"Installing TensorFlow package: {package}")
+            # Install InsightFace packages with special handling
+            if plan.insightface_packages:
+                for package in plan.insightface_packages:
+                    self._handle_insightface_package(package, pip_exe)
             
             # Handle Triton package separately
             triton_packages = [p for p in plan.regular_packages if 'triton' in p.name]
@@ -1077,8 +1726,6 @@ class RepositoryInstaller:
 
             # Install regular packages with uv
             if regular_packages_no_triton:
-                logger.info("Installing regular packages with uv...")
-                
                 # Create temporary requirements file for regular packages
                 temp_requirements = requirements_path.parent / "requirements_regular_temp.txt"
                 with open(temp_requirements, 'w', encoding='utf-8') as f:
@@ -1096,7 +1743,6 @@ class RepositoryInstaller:
                     except Exception:
                         pass
             
-            logger.info(f"✅ Successfully installed packages for {repo_name}")
             return True
                 
         except Exception as e:
@@ -1108,12 +1754,10 @@ class RepositoryInstaller:
         try:
             pip_exe = self._get_pip_executable(repo_name)
             
-            logger.info(f"Installing packages from {requirements_path} with pip")
             self._run_pip_with_progress([
                 pip_exe, "install", "-r", str(requirements_path)
             ], f"Installing packages for {repo_name}")
             
-            logger.info(f"✅ Successfully installed packages for {repo_name}")
             return True
                 
         except Exception as e:
@@ -1123,45 +1767,68 @@ class RepositoryInstaller:
     def _handle_triton_package(self, package: PackageInfo, pip_exe: str):
         """Handle Triton package installation based on OS."""
         if sys.platform == "win32":
-            logger.info("Windows detected, installing triton-windows without version spec.")
             # Install triton-windows without version
             self._run_pip_with_progress([pip_exe, "install", "triton-windows"], "Installing triton-windows")
-        else:
-            logger.info("Skipping Triton installation on non-Windows OS.")
+    
+    def _handle_insightface_package(self, package: PackageInfo, pip_exe: str):
+        """Handle InsightFace package installation based on OS."""
+        if os.name == "nt":  # Windows
+            wheel_url = "https://huggingface.co/hanamizuki-ai/pypi-wheels/resolve/main/insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl"
+            self._run_pip_with_progress([pip_exe, "install", wheel_url], "Installing InsightFace from HuggingFace wheel")
+        else:  # Linux and other systems
+            package_str = str(package)
+            self._run_pip_with_progress([pip_exe, "install", package_str], f"Installing InsightFace package: {package_str}")
     
     def _execute_server_installation_plan(self, server_plan: Dict, repo_path: Path, repo_name: str) -> bool:
-        """Execute installation plan from server"""
+        """Execute installation plan from server with enhanced error handling"""
         try:
+            # Validate server plan before execution
+            if not self._validate_server_plan(server_plan):
+                logger.error(f"Invalid server plan structure for {repo_name}")
+                return False
+            
             pip_exe = self._get_pip_executable(repo_name)
             
-            # Skip pip upgrade to avoid permission issues
-            logger.info("⏭️  Skipping pip upgrade to avoid permission issues")
-            
             # Execute installation steps in order
-            for step in server_plan.get('installation_order', []):
+            installation_order = server_plan.get('installation_order', [])
+            if not installation_order:
+                logger.warning(f"No installation steps found in server plan for {repo_name}")
+                return True  # Empty plan is considered successful
+            
+            for step_index, step in enumerate(installation_order):
+                # Validate step structure
+                if not isinstance(step, dict):
+                    logger.error(f"Invalid step structure at index {step_index} for {repo_name}")
+                    return False
+                
                 step_type = step.get('type', '')
                 packages = step.get('packages', [])
                 install_flags = step.get('install_flags', [])
                 
-                if not packages:
-                    logger.info(f"⏭️  Skipping step {step['step']}: {step_type} (no packages)")
-                    continue
+                # Validate required fields
+                if not step_type:
+                    logger.error(f"Missing step type at index {step_index} for {repo_name}")
+                    return False
                 
-                logger.info(f"🔧 Step {step['step']}: {step.get('description', step_type)}")
+                if not isinstance(packages, list):
+                    logger.error(f"Invalid packages format at step {step_index} for {repo_name}")
+                    return False
+                
+                if not packages:
+                    logger.debug(f"Skipping empty package list at step {step_index} for {repo_name}")
+                    continue
                 
                 # Determine which tool to use based on step type
                 # First try uv, then fallback to pip for regular packages
-                if step_type in ['regular', 'onnxruntime', 'tensorflow']:
+                if step_type in ['regular', 'onnxruntime', 'insightface']:
                     # Always try to install uv for these packages (don't cache the result)
                     uv_available = self._install_uv_in_venv(repo_name)
-                    logger.info(f"UV availability check for {step_type}: {uv_available}")
                     
                     if uv_available:
                         uv_cmd = self._get_uv_executable(repo_name)
                         install_cmd = uv_cmd + ["pip", "install"]
                         use_uv = True
                         use_uv_first = True
-                        logger.info(f"Using UV for {step_type} packages")
                     else:
                         logger.warning(f"UV not available, using pip for {step_type} packages")
                         install_cmd = [pip_exe, "install"]
@@ -1172,7 +1839,6 @@ class RepositoryInstaller:
                     install_cmd = [pip_exe, "install"]
                     use_uv = False
                     use_uv_first = False
-                    logger.info(f"Using pip for {step_type} packages (torch packages need specific index URLs)")
                 
                 # Add packages with special handling for ONNX Runtime providers
                 onnx_provider = None
@@ -1188,6 +1854,11 @@ class RepositoryInstaller:
                             if step_type == 'onnxruntime':
                                 onnx_package_name = server_plan.get('onnx_package_name') or 'onnxruntime'
                                 pkg_name = onnx_package_name
+                            # Special handling for InsightFace on Windows
+                            elif step_type == 'insightface' and pkg_name == 'insightface' and os.name == "nt":
+                                pkg_str = "https://huggingface.co/hanamizuki-ai/pypi-wheels/resolve/main/insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl"
+                                install_cmd.append(pkg_str)
+                                continue
                             
                             if pkg_version:
                                 if pkg_version.startswith('>=') or pkg_version.startswith('=='):
@@ -1213,32 +1884,33 @@ class RepositoryInstaller:
                 # Execute command with progress and fallback logic
                 step_description = f"Installing {step.get('description', step_type)}"
                 
-                if step_type in ['regular', 'onnxruntime', 'tensorflow'] and use_uv_first:
+                if step_type in ['regular', 'onnxruntime', 'insightface'] and use_uv_first:
                     # Try uv first, then fallback to pip if it fails
                     try:
-                        logger.info(f"📦 Installing with uv: {' '.join(install_cmd[3:])}")
                         self._run_uv_with_progress(install_cmd, step_description)
                     except subprocess.CalledProcessError as e:
-                        logger.warning(f"⚠️ UV installation failed, trying pip fallback: {e}")
+                        logger.warning(f"UV installation failed, trying pip fallback: {e}")
                         # Try pip fallback
                         pip_install_cmd = [pip_exe, "install"] + install_cmd[3:]  # Copy packages and flags
-                        logger.info(f"📦 Installing with pip fallback: {' '.join(pip_install_cmd[2:])}")
                         self._run_pip_with_progress(pip_install_cmd, f"{step_description} (pip fallback)")
                 elif use_uv:
-                    logger.info(f"📦 Installing with uv: {' '.join(install_cmd[3:])}")
                     self._run_uv_with_progress(install_cmd, step_description)
                 else:
-                    logger.info(f"📦 Installing with pip: {' '.join(install_cmd[2:])}")
                     self._run_pip_with_progress(install_cmd, step_description)
             
-            logger.info("✅ All server dependencies installed successfully")
             return True
             
         except subprocess.CalledProcessError as e:
-            logger.error(f"❌ Package installation failed: {e}")
+            logger.error(f"Package installation failed for {repo_name}: {e}")
+            return False
+        except KeyError as e:
+            logger.error(f"Missing required field in server plan for {repo_name}: {e}")
+            return False
+        except ValueError as e:
+            logger.error(f"Invalid data in server plan for {repo_name}: {e}")
             return False
         except Exception as e:
-            logger.error(f"❌ Error executing server installation plan: {e}")
+            logger.error(f"Unexpected error executing server installation plan for {repo_name}: {e}")
             return False
     
     def _execute_installation_plan(self, plan: InstallationPlan, original_requirements: Path, repo_name: str) -> bool:
@@ -1246,12 +1918,8 @@ class RepositoryInstaller:
         try:
             pip_exe = self._get_pip_executable(repo_name)
             
-            # Skip pip upgrade to avoid permission issues
-            logger.info("⏭️  Skipping pip upgrade to avoid permission issues")
-            
             # Install PyTorch packages with specific index
             if plan.torch_packages:
-                logger.info("Installing PyTorch packages...")
                 torch_cmd = [pip_exe, "install"]
                 
                 for package in plan.torch_packages:
@@ -1264,7 +1932,6 @@ class RepositoryInstaller:
             
             # Install ONNX Runtime packages with GPU auto-detection for fallback
             if plan.onnx_packages:
-                logger.info("Installing ONNX Runtime packages...")
                 from portablesource.get_gpu import GPUDetector, GPUType
                 gpu_detector = GPUDetector()
                 primary_gpu_type = gpu_detector.get_primary_gpu_type()
@@ -1278,37 +1945,31 @@ class RepositoryInstaller:
                             package_str = f"onnxruntime-gpu=={package.version}"
                         else:
                             package_str = "onnxruntime-gpu"
-                        logger.info(f"🔄 Auto-detected NVIDIA GPU, using {package_str} instead of {package}")
                     elif package.name == "onnxruntime" and primary_gpu_type == GPUType.AMD and os.name == "nt":
                         # AMD GPU on Windows - use DirectML
                         if package.version:
                             package_str = f"onnxruntime-directml=={package.version}"
                         else:
                             package_str = "onnxruntime-directml"
-                        logger.info(f"🔄 Auto-detected AMD GPU on Windows, using {package_str} instead of {package}")
                     elif package.name == "onnxruntime" and primary_gpu_type == GPUType.AMD and os.name == "posix":
                         # AMD GPU on Linux - use ROCm (if available)
                         if package.version:
                             package_str = f"onnxruntime-rocm=={package.version}"
                         else:
                             package_str = "onnxruntime-rocm"
-                        logger.info(f"🔄 Auto-detected AMD GPU on Linux, using {package_str} instead of {package}")
                     elif package.name == "onnxruntime" and primary_gpu_type == GPUType.INTEL:
                         # Intel GPU - use DirectML
                         if package.version:
                             package_str = f"onnxruntime-directml=={package.version}"
                         else:
                             package_str = "onnxruntime-directml"
-                        logger.info(f"🔄 Auto-detected Intel GPU, using {package_str} instead of {package}")
 
-                    logger.info(f"Installing ONNX package: {package_str}")
                     self._run_pip_with_progress([pip_exe, "install", package_str], f"Installing ONNX package: {package_str}")
             
-            # Install TensorFlow packages (if any)
-            if plan.tensorflow_packages:
-                logger.info("Installing TensorFlow packages...")
-                for package in plan.tensorflow_packages:
-                    self._run_pip_with_progress([pip_exe, "install", str(package)], f"Installing TensorFlow package: {package}")
+            # Install InsightFace packages (if any)
+            if plan.insightface_packages:
+                for package in plan.insightface_packages:
+                    self._handle_insightface_package(package, pip_exe)
             
             # Install uv in venv for regular packages
             if plan.regular_packages:
@@ -1321,7 +1982,6 @@ class RepositoryInstaller:
                             f.write(package.original_line + '\n')
                     
                     if modified_requirements.stat().st_size > 0:
-                        logger.info("Installing regular packages with pip...")
                         self._run_pip_with_progress([pip_exe, "install", "-r", str(modified_requirements)], "Installing regular packages")
                     
                     try:
@@ -1337,7 +1997,6 @@ class RepositoryInstaller:
                             f.write(package.original_line + '\n')
                     
                     if modified_requirements.stat().st_size > 0:
-                        logger.info("Installing regular packages with uv...")
                         uv_install_cmd = uv_cmd + ["pip", "install", "-r", str(modified_requirements)]
                         self._run_uv_with_progress(uv_install_cmd, "Installing regular packages with uv")
                     
@@ -1346,7 +2005,6 @@ class RepositoryInstaller:
                     except Exception:
                         pass
             
-            logger.info("All dependencies installed successfully")
             return True
             
         except subprocess.CalledProcessError as e:
@@ -1358,15 +2016,9 @@ class RepositoryInstaller:
     
     def _setup_facefusion(self, repo_path: Path):
         """Special setup for FaceFusion"""
-        # FaceFusion-specific setup can be added here
-        logger.info("Applying FaceFusion-specific setup...")
-        
         # Create models directory
         models_dir = repo_path / "models"
         models_dir.mkdir(exist_ok=True)
-        
-        # Any other FaceFusion-specific setup
-        pass
     
     def _generate_startup_script(self, repo_path: Path, repo_info: Dict):
         """Generate startup script with dual activation (conda + venv)"""
@@ -1400,13 +2052,6 @@ class RepositoryInstaller:
             # Get program args from repo info
             program_args = repo_info.get('program_args', '')
             
-            # Debug output for program args
-            logger.info(f"🔧 Program args for {repo_name}: '{program_args}'")
-            if program_args:
-                logger.info(f"✅ Program args will be applied: {program_args}")
-            else:
-                logger.info(f"ℹ️ No program args specified for {repo_name}")
-            
             # Generate batch file content
             bat_content = f"""@echo off
 echo Launch {repo_name}...
@@ -1423,8 +2068,6 @@ pause
             with open(bat_file, 'w', encoding='utf-8') as f:
                 f.write(bat_content)
             
-            logger.info(f"✅ Startup script generated: {bat_file}")
-            logger.info(f"🚀 Main file: {main_file}")
             return True
                  
         except Exception as e:
@@ -1437,17 +2080,22 @@ pause
             if not self.server_client.is_server_available():
                 return  # Server not available, skip stats
             
-            import requests
-            
-            # Send download record to server
-            response = requests.post(
-                f"{self.server_client.server_url}/api/repository/{repo_name}/download",
-                json={'success': True},
-                timeout=5
+            # Send download record to server using the server client
+            url = f"{self.server_client.server_url}/api/repositories/{repo_name.lower()}/download"
+            response = self.server_client.session.post(
+                url,
+                json={
+                    'repository_name': repo_name.lower(),
+                    'success': True,
+                    'timestamp': None  # Server will set timestamp
+                },
+                timeout=self.server_client.timeout
             )
             
             if response.status_code == 200:
-                logger.info(f"📊 Download statistics sent for {repo_name}")
+                logger.debug(f"Successfully sent download statistics for {repo_name}")
+            elif response.status_code == 404:
+                logger.debug(f"Repository {repo_name} not found on server for stats")
             else:
                 logger.debug(f"Failed to send download statistics: {response.status_code}")
                 
@@ -1461,8 +2109,6 @@ pause
         try:
             if TQDM_AVAILABLE:
                 # Run with progress bar
-                logger.info(f"🔄 {description}...")
-                
                 # Start the process
                 process = subprocess.Popen(
                     pip_cmd,
@@ -1491,19 +2137,15 @@ pause
                 if process.returncode != 0:
                     error_output = ''.join(output_lines)
                     raise subprocess.CalledProcessError(process.returncode, pip_cmd, error_output)
-                    
-                logger.info(f"✅ {description} completed")
             else:
                 # Fallback to regular subprocess without progress
-                logger.info(f"🔄 {description}...")
                 subprocess.run(pip_cmd, check=True, capture_output=True, text=True)
-                logger.info(f"✅ {description} completed")
                 
         except subprocess.CalledProcessError as e:
-            logger.error(f"❌ {description} failed: {e}")
+            logger.error(f"{description} failed: {e}")
             raise
         except Exception as e:
-             logger.error(f"❌ Error during {description}: {e}")
+             logger.error(f"Error during {description}: {e}")
              raise
     
     def _run_uv_with_progress(self, uv_cmd: List[str], description: str):
@@ -1512,8 +2154,6 @@ pause
         try:
             if TQDM_AVAILABLE:
                 # Run with progress bar
-                logger.info(f"🔄 {description}...")
-                
                 # Start the process
                 process = subprocess.Popen(
                     uv_cmd,
@@ -1542,19 +2182,15 @@ pause
                 if process.returncode != 0:
                     error_output = ''.join(output_lines)
                     raise subprocess.CalledProcessError(process.returncode, uv_cmd, error_output)
-                    
-                logger.info(f"✅ {description} completed")
             else:
                 # Fallback to regular subprocess without progress
-                logger.info(f"🔄 {description}...")
                 subprocess.run(uv_cmd, check=True, capture_output=True, text=True)
-                logger.info(f"✅ {description} completed")
                 
         except subprocess.CalledProcessError as e:
-            logger.error(f"❌ {description} failed: {e}")
+            logger.error(f"{description} failed: {e}")
             raise
         except Exception as e:
-             logger.error(f"❌ Error during {description}: {e}")
+             logger.error(f"Error during {description}: {e}")
              raise
      
     def _run_git_with_progress(self, git_cmd: List[str], description: str):
@@ -1563,8 +2199,6 @@ pause
          try:
              if TQDM_AVAILABLE:
                  # Run with progress bar
-                 logger.info(f"🔄 {description}...")
-                 
                  # Start the process
                  process = subprocess.Popen(
                      git_cmd,
@@ -1596,34 +2230,184 @@ pause
                      error = subprocess.CalledProcessError(process.returncode, git_cmd, error_output)
                      error.output = error_output  # Ensure output is available
                      raise error
-                     
-                 logger.info(f"✅ {description} completed")
              else:
                  # Fallback to regular subprocess without progress
-                 logger.info(f"🔄 {description}...")
                  result = subprocess.run(git_cmd, check=True, capture_output=True, text=True)
-                 logger.info(f"✅ {description} completed")
                  
          except subprocess.CalledProcessError as e:
-             logger.error(f"❌ {description} failed: {e}")
+             logger.error(f"{description} failed: {e}")
              raise
          except Exception as e:
-             logger.error(f"❌ Error during {description}: {e}")
+             logger.error(f"Error during {description}: {e}")
              raise
+    
+    def _execute_server_plan_with_pip_only(self, server_plan: Dict, repo_name: str) -> bool:
+        """
+        Execute server installation plan using pip only (fallback when uv fails)
+        
+        Args:
+            server_plan: Installation plan from server
+            repo_name: Repository name
+            
+        Returns:
+            True if installation successful
+        """
+        try:
+            installation_order = server_plan.get('installation_order', [])
+            pip_exe = self._get_pip_executable(repo_name)
+            
+            for step in installation_order:
+                step_type = step.get('type', 'regular')
+                packages = step.get('packages', [])
+                
+                if not packages:
+                    continue
+                
+                if step_type == 'torch':
+                    # Install PyTorch packages with pip and special index URL
+                    torch_index_url = server_plan.get('torch_index_url') or self._get_default_torch_index_url()
+                    torch_cmd = [pip_exe, "install"] + packages
+                    if torch_index_url:
+                        torch_cmd.extend(["--index-url", torch_index_url])
+                    
+                    self._run_pip_with_progress(torch_cmd, f"Installing PyTorch packages: {', '.join(packages)}")
+                
+                elif step_type == 'onnxruntime':
+                    # Install ONNX Runtime with appropriate package name
+                    onnx_package_name = server_plan.get('onnx_package_name') or self._get_default_onnx_package()
+                    
+                    # Replace generic onnxruntime with specific package
+                    onnx_packages = []
+                    for package in packages:
+                        if isinstance(package, str) and package.startswith('onnxruntime'):
+                            # Extract version if present
+                            if '==' in package:
+                                version = package.split('==')[1]
+                                onnx_packages.append(f"{onnx_package_name}=={version}")
+                            else:
+                                onnx_packages.append(onnx_package_name)
+                        else:
+                            onnx_packages.append(package if isinstance(package, str) else package.get('package_name', str(package)))
+                    
+                    self._run_pip_with_progress([pip_exe, "install"] + onnx_packages, f"Installing ONNX packages: {', '.join(onnx_packages)}")
+                
+                else:  # regular and insightface packages
+                    # Install all other packages with pip
+                    regular_packages = []
+                    for package in packages:
+                        package_name = package if isinstance(package, str) else package.get('package_name', str(package))
+                        regular_packages.append(package_name)
+                    
+                    if regular_packages:
+                        self._run_pip_with_progress([pip_exe, "install"] + regular_packages, f"Installing packages: {', '.join(regular_packages)}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error executing server plan with pip only for {repo_name}: {e}")
+            return False
+    
+    def _get_default_torch_index_url(self) -> str:
+        """Get default PyTorch index URL based on GPU configuration"""
+        try:
+            from portablesource.get_gpu import GPUDetector
+            
+            gpu_detector = GPUDetector()
+            gpu_info_list = gpu_detector.get_gpu_info()
+            primary_gpu_type = gpu_detector.get_primary_gpu_type()
+            
+            return self.analyzer._get_torch_index_url(gpu_info_list, primary_gpu_type)
+        except Exception as e:
+            logger.warning(f"Error getting default torch index URL: {e}")
+            return "https://download.pytorch.org/whl/cpu"
+    
+    def _get_default_onnx_package(self) -> str:
+        """Get default ONNX Runtime package name based on GPU configuration"""
+        try:
+            from portablesource.get_gpu import GPUDetector
+            
+            gpu_detector = GPUDetector()
+            primary_gpu_type = gpu_detector.get_primary_gpu_type()
+            
+            return self.analyzer._get_onnx_package_name(primary_gpu_type)
+        except Exception as e:
+            logger.warning(f"Error getting default ONNX package: {e}")
+            return "onnxruntime"
+    
+    def _handle_insightface_package_from_name(self, package_name: str, pip_exe: str):
+        """Handle InsightFace package installation from package name"""
+        try:
+            # Create a temporary PackageInfo object for InsightFace handling
+            from dataclasses import dataclass
+            
+            @dataclass
+            class TempPackageInfo:
+                name: str
+                version: Optional[str] = None
+                extras: Optional[List[str]] = None
+                package_type: PackageType = PackageType.INSIGHTFACE
+                original_line: str = ""
+            
+            # Parse version if present
+            version = None
+            if '==' in package_name:
+                name, version = package_name.split('==', 1)
+            else:
+                name = package_name
+            
+            temp_package = TempPackageInfo(
+                name=name,
+                version=version,
+                original_line=package_name
+            )
+            
+            # Use existing InsightFace handling logic
+            self._handle_insightface_package(temp_package, pip_exe)
+            
+        except Exception as e:
+            logger.error(f"Error handling InsightFace package {package_name}: {e}")
+            # Fallback to simple pip install
+            self._run_pip_with_progress([pip_exe, "install", package_name], f"Installing InsightFace package: {package_name}")
+    
+    def _handle_insightface_package(self, package: PackageInfo, pip_exe: str):
+        """Handle InsightFace package installation with special requirements"""
+        try:
+            # InsightFace often requires specific versions and dependencies
+            package_str = str(package)
+            
+            # Install InsightFace with pip
+            self._run_pip_with_progress([pip_exe, "install", package_str], f"Installing InsightFace package: {package_str}")
+            
+        except Exception as e:
+            logger.error(f"Error installing InsightFace package {package}: {e}")
+            raise
+    
+    def _handle_triton_package(self, package: PackageInfo, pip_exe: str):
+        """Handle Triton package installation with special requirements"""
+        try:
+            # Triton has specific installation requirements
+            package_str = str(package)
+            
+            # Install Triton with pip
+            self._run_pip_with_progress([pip_exe, "install", package_str], f"Installing Triton package: {package_str}")
+            
+        except Exception as e:
+            logger.error(f"Error installing Triton package {package}: {e}")
+            raise
 
 
 # Main execution for testing
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+#if __name__ == "__main__":
+    #logging.basicConfig(level=logging.INFO)
     
     # Test the installer
-    installer = RepositoryInstaller()
+    #installer = RepositoryInstaller()
     
     # Test with FaceFusion
-    print("Testing repository installer with FaceFusion...")
-    success = installer.install_repository("facefusion")
+    #print("Testing repository installer with FaceFusion...")
+    #success = installer.install_repository("facefusion")
     
-    if success:
-        print("✅ Installation successful!")
-    else:
-        print("❌ Installation failed!")
+    #if success:
+        #print("✅ Installation successful!")
+    #else:
+        #print("❌ Installation failed!")

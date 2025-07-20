@@ -54,7 +54,6 @@ class GPUDetector:
     
     def __init__(self):
         self.system = platform.system()
-        logger.info(f"Initializing GPU detector for {self.system}")
     
     def get_gpu_info(self) -> List[GPUInfo]:
         """
@@ -87,24 +86,19 @@ class GPUDetector:
         # Prioritize NVIDIA for AI workloads
         for gpu in gpu_info_list:
             if gpu.gpu_type == GPUType.NVIDIA:
-                logger.info(f"Primary GPU: {gpu.name} (NVIDIA)")
                 return GPUType.NVIDIA
         
         # Then AMD
         for gpu in gpu_info_list:
             if gpu.gpu_type == GPUType.AMD:
-                logger.info(f"Primary GPU: {gpu.name} (AMD)")
                 return GPUType.AMD if self.system == "Linux" else GPUType.DIRECTML
         
         # Then Intel
         for gpu in gpu_info_list:
             if gpu.gpu_type == GPUType.INTEL:
-                logger.info(f"Primary GPU: {gpu.name} (Intel)")
                 return GPUType.INTEL if self.system == "Linux" else GPUType.DIRECTML
         
         # Fallback
-        primary_gpu = gpu_info_list[0]
-        logger.info(f"Primary GPU: {primary_gpu.name} (Unknown type)")
         return GPUType.UNKNOWN
     
     def get_recommended_cuda_version(self) -> Optional[CUDAVersion]:
@@ -126,7 +120,6 @@ class GPUDetector:
         nvidia_gpus.sort(key=lambda x: self._get_gpu_priority(x.name), reverse=True)
         primary_gpu = nvidia_gpus[0]
         
-        logger.info(f"Determining CUDA version for: {primary_gpu.name}")
         return primary_gpu.cuda_version
     
     def _get_windows_gpu_info(self) -> List[GPUInfo]:
@@ -183,11 +176,10 @@ class GPUDetector:
                     
                     cuda_version = self._get_cuda_version_for_gpu(name)
                     gpu_list.append(GPUInfo(name, GPUType.NVIDIA, memory_mb, cuda_version=cuda_version))
-                    logger.info(f"Detected NVIDIA GPU via nvidia-smi: {name}")
             
         except (subprocess.CalledProcessError, FileNotFoundError):
             # nvidia-smi not available or no NVIDIA GPUs
-            logger.info("nvidia-smi not available or no NVIDIA GPUs detected")
+            pass
         except Exception as e:
             logger.error(f"Error running nvidia-smi: {e}")
         
@@ -473,28 +465,28 @@ def get_gpu() -> Optional[str]:
 
 
 # Main execution for testing
-if __name__ == "__main__":
-    detector = GPUDetector()
+#if __name__ == "__main__":
+    #detector = GPUDetector()
     
-    print("=== GPU Detection Results ===")
-    gpu_info_list = detector.get_gpu_info()
+    #print("=== GPU Detection Results ===")
+    #gpu_info_list = detector.get_gpu_info()
     
-    if gpu_info_list:
-        for i, gpu in enumerate(gpu_info_list, 1):
-            print(f"{i}. {gpu}")
-    else:
-        print("No GPUs detected")
+    #if gpu_info_list:
+        #for i, gpu in enumerate(gpu_info_list, 1):
+            #print(f"{i}. {gpu}")
+    #else:
+        #print("No GPUs detected")
     
-    print(f"\nPrimary GPU Type: {detector.get_primary_gpu_type().value}")
-    print(f"AI Capable: {detector.is_ai_capable()}")
-    print(f"Recommended Backend: {detector.get_recommended_backend()}")
+    #print(f"\nPrimary GPU Type: {detector.get_primary_gpu_type().value}")
+    #print(f"AI Capable: {detector.is_ai_capable()}")
+    #print(f"Recommended Backend: {detector.get_recommended_backend()}")
     
     # CUDA version recommendation
-    cuda_version = detector.get_recommended_cuda_version()
-    if cuda_version:
-        print(f"Recommended CUDA Version: {cuda_version.value}")
-    else:
-        print("CUDA not applicable")
+    #cuda_version = detector.get_recommended_cuda_version()
+    #if cuda_version:
+        #print(f"Recommended CUDA Version: {cuda_version.value}")
+    #else:
+        #print("CUDA not applicable")
     
     # Test legacy function
-    print(f"Legacy get_gpu(): {get_gpu()}")
+    #print(f"Legacy get_gpu(): {get_gpu()}")

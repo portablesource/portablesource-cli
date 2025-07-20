@@ -39,7 +39,7 @@ jobs:
             zip ../portablesource-Linux.zip portablesource_main
           elif [ "${{ runner.os }}" == "macOS" ]; then
             cd build
-            zip -r ../portablesource-macOS.zip portablesource_main.app
+            zip ../portablesource-macOS.zip portablesource_main
           fi
 
       - name: Upload artifact
