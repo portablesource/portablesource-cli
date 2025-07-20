@@ -40,8 +40,6 @@ class PortableSourceApp:
         
     def initialize(self, install_path: Optional[str] = None):
         """Initialize the application"""
-        logger.info("Initializing PortableSource...")
-        
         # Determine installation path
         if install_path:
             self.install_path = Path(install_path).resolve()
@@ -50,8 +48,6 @@ class PortableSourceApp:
         else:
             # Request path from user
             self.install_path = self._get_installation_path()
-        
-        logger.info(f"Installation path: {self.install_path}")
         
         # Create directory structure
         self._create_directory_structure()
@@ -67,8 +63,6 @@ class PortableSourceApp:
         
         # Initialize repository installer
         self._initialize_repository_installer()
-        
-        logger.info("Initialization completed")
     
     def _save_install_path_to_registry(self, install_path: Path) -> bool:
         """Save installation path to Windows registry"""
@@ -76,10 +70,8 @@ class PortableSourceApp:
             key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\PortableSource")
             winreg.SetValueEx(key, "InstallPath", 0, winreg.REG_SZ, str(install_path))
             winreg.CloseKey(key)
-            logger.info(f"Installation path saved to registry: {install_path}")
             return True
         except Exception as e:
-            logger.warning(f"Failed to save path to registry: {e}")
             return False
     
     def _load_install_path_from_registry(self) -> Optional[Path]:
@@ -90,16 +82,13 @@ class PortableSourceApp:
             winreg.CloseKey(key)
             
             install_path = Path(install_path_str)
-            logger.info(f"Installation path loaded from registry: {install_path}")
             
             # Return path from registry without checking existence
             # Directory may not exist, but that's normal - it will be created
             return install_path
         except FileNotFoundError:
-            logger.info("Installation path not found in registry")
             return None
         except Exception as e:
-            logger.warning(f"Error loading path from registry: {e}")
             return None
 
     def _get_installation_path(self) -> Path:
@@ -109,7 +98,6 @@ class PortableSourceApp:
         
         if registry_path:
             # If path found in registry, use it automatically
-            logger.info(f"Using path from registry: {registry_path}")
             return registry_path
         
         # If no path in registry, request from user
@@ -185,7 +173,6 @@ class PortableSourceApp:
         
         for directory in directories:
             directory.mkdir(parents=True, exist_ok=True)
-            logger.info(f"Created directory: {directory}")
     
     def _initialize_environment_manager(self):
         """Initialize environment manager"""
@@ -235,7 +222,6 @@ class PortableSourceApp:
         gpu_info = self.gpu_detector.get_gpu_info()
         if gpu_info:
             primary_gpu = gpu_info[0]
-            logger.info(f"Detected GPU: {primary_gpu.name}")
             # Pass memory in GB if available
             memory_gb = primary_gpu.memory // 1024 if primary_gpu.memory else 0
             self.config_manager.configure_gpu(primary_gpu.name, memory_gb)
@@ -285,8 +271,6 @@ class PortableSourceApp:
     
     def install_repository(self, repo_url_or_name: str) -> bool:
         """Install repository"""
-        logger.info(f"Installing repository: {repo_url_or_name}")
-        
         if not self.repository_installer:
             logger.error("Repository installer not initialized")
             return False

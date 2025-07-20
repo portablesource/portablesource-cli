@@ -186,6 +186,33 @@ class ServerAPIClient:
         if not data or not isinstance(data, dict):
             return False
         
+        # Check for new server response format with success and repository fields
+        if 'success' in data and 'repository' in data:
+            if not data.get('success', False):
+                return False
+            
+            repository = data.get('repository')
+            if not repository or not isinstance(repository, dict):
+                return False
+            
+            # Check for repositoryUrl field in the new format
+            if 'repositoryUrl' not in repository:
+                return False
+            
+            # Validate URL format if present
+            url = repository.get('repositoryUrl')
+            if url and not isinstance(url, str):
+                return False
+            
+            # Validate optional fields if present
+            optional_fields = ['filePath', 'programArgs', 'description']
+            for field in optional_fields:
+                if field in repository and not isinstance(repository[field], str):
+                    return False
+            
+            return True
+        
+        # Fallback to old format validation for backward compatibility
         # Check for basic structure - url is the minimum required field
         if 'url' not in data:
             return False
@@ -216,18 +243,28 @@ class ServerAPIClient:
         if not plan or not isinstance(plan, dict):
             return False
         
-        # Check for required fields
-        required_fields = ['installation_order']
-        if not all(field in plan for field in required_fields):
+        # Check for success field
+        if not plan.get('success', False):
             return False
         
-        # Validate installation_order structure
-        installation_order = plan.get('installation_order', [])
-        if not isinstance(installation_order, list):
+        # Check for installation_plan field
+        if 'installation_plan' not in plan:
             return False
         
-        # Validate each step in installation order
-        for step in installation_order:
+        installation_plan = plan['installation_plan']
+        if not isinstance(installation_plan, dict):
+            return False
+        
+        # Check for steps field
+        if 'steps' not in installation_plan:
+            return False
+        
+        steps = installation_plan['steps']
+        if not isinstance(steps, list):
+            return False
+        
+        # Validate each step
+        for step in steps:
             if not isinstance(step, dict):
                 return False
             if 'type' not in step or 'packages' not in step:
@@ -242,17 +279,8 @@ class ServerAPIClient:
             
             # Validate packages structure
             for package in step['packages']:
-                if isinstance(package, dict):
-                    if 'package_name' not in package:
-                        return False
-                elif not isinstance(package, str):
+                if not isinstance(package, str):
                     return False
-        
-        # Validate optional fields
-        optional_fields = ['torch_index_url', 'onnx_package_name']
-        for field in optional_fields:
-            if field in plan and not isinstance(plan[field], str):
-                return False
         
         return True
     
@@ -580,7 +608,14 @@ class MainFileFinder:
         server_info = self.server_client.get_repository_info(repo_name)
         
         if server_info:
-            main_file = server_info.get('main_file')
+            # Handle new server response format
+            if 'success' in server_info and 'repository' in server_info:
+                repository = server_info['repository']
+                main_file = repository.get('filePath')
+            else:
+                # Handle old server response format for backward compatibility
+                main_file = server_info.get('main_file')
+            
             if main_file and self._validate_main_file(repo_path, main_file):
                 return main_file
             else:
@@ -592,7 +627,14 @@ class MainFileFinder:
             if url_repo_name != repo_name:
                 server_info = self.server_client.get_repository_info(url_repo_name)
                 if server_info:
-                    main_file = server_info.get('main_file')
+                    # Handle new server response format
+                    if 'success' in server_info and 'repository' in server_info:
+                        repository = server_info['repository']
+                        main_file = repository.get('filePath')
+                    else:
+                        # Handle old server response format for backward compatibility
+                        main_file = server_info.get('main_file')
+                    
                     if main_file and self._validate_main_file(repo_path, main_file):
                         return main_file
         
@@ -864,12 +906,23 @@ class RepositoryInstaller:
         # Try server API first
         server_info = self.server_client.get_repository_info(repo_name)
         if server_info:
-            return {
-                "url": server_info.get("url", repo_url),
-                "main_file": server_info.get("main_file", "main.py"),
-                "program_args": server_info.get("program_args", ""),
-                "special_setup": self._get_special_setup(repo_name)
-            }
+            # Handle new server response format
+            if 'success' in server_info and 'repository' in server_info:
+                repository = server_info['repository']
+                return {
+                    "url": repository.get("repositoryUrl", repo_url),
+                    "main_file": repository.get("filePath", "main.py"),
+                    "program_args": repository.get("programArgs", ""),
+                    "special_setup": self._get_special_setup(repo_name)
+                }
+            else:
+                # Handle old server response format for backward compatibility
+                return {
+                    "url": server_info.get("url", repo_url),
+                    "main_file": server_info.get("main_file", "main.py"),
+                    "program_args": server_info.get("program_args", ""),
+                    "special_setup": self._get_special_setup(repo_name)
+                }
         
         # Try fallback repositories
         if repo_name in self.fallback_repositories:
@@ -963,18 +1016,28 @@ class RepositoryInstaller:
         if not plan or not isinstance(plan, dict):
             return False
         
-        # Check for required fields
-        required_fields = ['installation_order']
-        if not all(field in plan for field in required_fields):
+        # Check for success field
+        if not plan.get('success', False):
             return False
         
-        # Validate installation_order structure
-        installation_order = plan.get('installation_order', [])
-        if not isinstance(installation_order, list):
+        # Check for installation_plan field
+        if 'installation_plan' not in plan:
             return False
         
-        # Validate each step in installation order
-        for step in installation_order:
+        installation_plan = plan['installation_plan']
+        if not isinstance(installation_plan, dict):
+            return False
+        
+        # Check for steps field
+        if 'steps' not in installation_plan:
+            return False
+        
+        steps = installation_plan['steps']
+        if not isinstance(steps, list):
+            return False
+        
+        # Validate each step
+        for step in steps:
             if not isinstance(step, dict):
                 return False
             if 'type' not in step or 'packages' not in step:
@@ -1014,58 +1077,7 @@ class RepositoryInstaller:
         
         return True
     
-    def _validate_installation_plan(self, plan: Dict) -> bool:
-        """
-        Validate installation plan data from server
-        
-        Args:
-            plan: Installation plan from server
-            
-        Returns:
-            True if plan is valid
-        """
-        if not plan or not isinstance(plan, dict):
-            return False
-        
-        # Check for required fields
-        required_fields = ['installation_order']
-        if not all(field in plan for field in required_fields):
-            return False
-        
-        # Validate installation_order structure
-        installation_order = plan.get('installation_order', [])
-        if not isinstance(installation_order, list):
-            return False
-        
-        # Validate each step in installation order
-        for step in installation_order:
-            if not isinstance(step, dict):
-                return False
-            if 'type' not in step or 'packages' not in step:
-                return False
-            if not isinstance(step['packages'], list):
-                return False
-            
-            # Validate step type
-            valid_types = ['torch', 'regular', 'onnxruntime', 'insightface']
-            if step['type'] not in valid_types:
-                return False
-            
-            # Validate packages structure
-            for package in step['packages']:
-                if isinstance(package, dict):
-                    if 'package_name' not in package:
-                        return False
-                elif not isinstance(package, str):
-                    return False
-        
-        # Validate optional fields
-        optional_fields = ['torch_index_url', 'onnx_package_name']
-        for field in optional_fields:
-            if field in plan and not isinstance(plan[field], str):
-                return False
-        
-        return True
+
     
     def _validate_dependencies_data(self, data: Dict) -> bool:
         """
@@ -1557,12 +1569,13 @@ class RepositoryInstaller:
             pip_exe = self._get_pip_executable(repo_name)
             
             # Execute installation steps in order
-            installation_order = server_plan.get('installation_order', [])
-            if not installation_order:
+            installation_plan = server_plan.get('installation_plan', {})
+            steps = installation_plan.get('steps', [])
+            if not steps:
                 logger.warning(f"No installation steps found in server plan for {repo_name}")
                 return True  # Empty plan is considered successful
             
-            for step_index, step in enumerate(installation_order):
+            for step_index, step in enumerate(steps):
                 # Validate step structure
                 if not isinstance(step, dict):
                     logger.error(f"Invalid step structure at index {step_index} for {repo_name}")
@@ -1609,7 +1622,7 @@ class RepositoryInstaller:
                 
                 # Add packages with special handling for ONNX Runtime providers
                 onnx_provider = None
-                for package in packages:
+                for package_index, package in enumerate(packages):
                     if isinstance(package, dict):
                         pkg_name = package.get('package_name', '')
                         pkg_version = package.get('version', '')
@@ -1636,10 +1649,18 @@ class RepositoryInstaller:
                                 pkg_str = pkg_name
                             
                             install_cmd.append(pkg_str)
+                        else:
+                            logger.warning(f"Step {step_index}, Package {package_index}: Empty pkg_name, skipping package")
                             
                             # Add index URL if specified for this package
                             if index_url and '--index-url' not in install_cmd:
                                 install_cmd.extend(['--index-url', index_url])
+                    else:
+                        # Handle string packages
+                        if isinstance(package, str) and package.strip():
+                            install_cmd.append(package.strip())
+                        else:
+                            logger.warning(f"Step {step_index}, Package {package_index}: Invalid package format or empty string: {package}")
 
                 if server_plan.get('torch_index_url') and '--index-url' not in install_cmd:
                     install_cmd.extend(['--index-url', server_plan['torch_index_url']])
@@ -1649,7 +1670,25 @@ class RepositoryInstaller:
                     install_cmd.extend(install_flags)
                 
                 # Execute command with progress and fallback logic
-                step_description = f"Installing {step.get('description', step_type)}"
+                description = step.get('description', step_type)
+                if description.startswith('Install '):
+                    step_description = description.replace('Install ', 'Installing ', 1)
+                else:
+                    step_description = f"Installing {description}"
+                
+                # Debug logging: show what command will be executed (removed for cleaner output)
+                
+                # Check if there are actual packages to install
+                # For uv commands: [uv_exe, "pip", "install", ...packages_and_flags]
+                # For pip commands: [pip_exe, "install", ...packages_and_flags]
+                if use_uv:
+                    has_packages = len(install_cmd) > 3  # More than just [uv_exe, "pip", "install"]
+                else:
+                    has_packages = len(install_cmd) > 2  # More than just [pip_exe, "install"]
+                
+                if not has_packages:
+                    logger.warning(f"No packages to install for step {step_index}, skipping. Command would be: {install_cmd}")
+                    continue
                 
                 if step_type in ['regular', 'onnxruntime', 'insightface'] and use_uv_first:
                     # Try uv first, then fallback to pip if it fails
@@ -1657,9 +1696,22 @@ class RepositoryInstaller:
                         self._run_uv_with_progress(install_cmd, step_description)
                     except subprocess.CalledProcessError as e:
                         logger.warning(f"UV installation failed, trying pip fallback: {e}")
-                        # Try pip fallback
-                        pip_install_cmd = [pip_exe, "install"] + install_cmd[3:]  # Copy packages and flags
-                        self._run_pip_with_progress(pip_install_cmd, f"{step_description} (pip fallback)")
+                        # Try pip fallback - extract packages and flags from uv command
+                        # uv command format: [uv_exe, "pip", "install", ...packages_and_flags]
+                        # pip command format: [pip_exe, "install", ...packages_and_flags]
+                        packages_and_flags = install_cmd[3:]  # Skip uv_exe, "pip", "install"
+                        
+                        # Safety check: ensure packages_and_flags doesn't contain "pip" or "install"
+                        # This can happen if the original command was malformed
+                        if packages_and_flags and ("pip" in packages_and_flags or "install" in packages_and_flags):
+                            logger.error(f"Malformed uv command detected, skipping pip fallback: {install_cmd}")
+                            continue
+                        
+                        if packages_and_flags:  # Only run if there are actual packages to install
+                            pip_install_cmd = [pip_exe, "install"] + packages_and_flags
+                            self._run_pip_with_progress(pip_install_cmd, f"{step_description} (pip fallback)")
+                        else:
+                            logger.warning(f"No packages to install in fallback for step {step_index}")
                 elif use_uv:
                     self._run_uv_with_progress(install_cmd, step_description)
                 else:
@@ -1819,10 +1871,19 @@ class RepositoryInstaller:
             # Get program args from repo info
             program_args = repo_info.get('program_args', '')
             
+            # Setup tmp directory path
+            tmp_path = install_path / "tmp"
+            
             # Generate batch file content
             bat_content = f"""@echo off
 echo Launch {repo_name}...
 cd /d "{repo_path}"
+
+REM Setup temporary directory
+set USERPROFILE={tmp_path}
+set TEMP={tmp_path}
+set TMP={tmp_path}
+
 call "{conda_activate}"
 call conda activate portablesource
 call "{venv_activate}"
@@ -2020,10 +2081,11 @@ pause
             True if installation successful
         """
         try:
-            installation_order = server_plan.get('installation_order', [])
+            installation_plan = server_plan.get('installation_plan', {})
+            steps = installation_plan.get('steps', [])
             pip_exe = self._get_pip_executable(repo_name)
             
-            for step in installation_order:
+            for step in steps:
                 step_type = step.get('type', 'regular')
                 packages = step.get('packages', [])
                 

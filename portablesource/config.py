@@ -132,7 +132,6 @@ class ConfigManager:
         
         for generation, patterns in self.gpu_patterns.items():
             if any(pattern.upper() in gpu_name_upper for pattern in patterns):
-                logger.info(f"Detected GPU generation: {generation.value} for {gpu_name}")
                 return generation
         
         logger.warning(f"Unknown GPU generation for: {gpu_name}")
@@ -208,7 +207,6 @@ class ConfigManager:
         )
         
         self.config.gpu_config = gpu_config
-        logger.info(f"Configured GPU: {gpu_config}")
         return gpu_config
     
     def configure_install_path(self, install_path: str) -> str:
@@ -224,7 +222,6 @@ class ConfigManager:
         install_path = str(Path(install_path))
         self.config.install_path = install_path
         
-        logger.info(f"Configured install path: {install_path}")
         return install_path
     
     def configure_environment_vars(self) -> Dict[str, str]:
@@ -244,7 +241,6 @@ class ConfigManager:
             env_vars["TMP"] = tmp_path
         
         self.config.environment_vars = env_vars
-        logger.info(f"Configured basic environment variables: {len(env_vars)} variables")
         return env_vars
     
     def _get_compute_capability(self, generation: GPUGeneration) -> str:

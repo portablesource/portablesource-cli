@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Environment Manager для PortableSource
-Управление окружениями на базе Miniconda
+Environment Manager for PortableSource
+Managing environments based on Miniconda
 """
 
 import os
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class EnvironmentSpec:
-    """Спецификация окружения"""
+    """Environment specification"""
     name: str
     python_version: str = "3.11"
     packages: Optional[List[str]] = None
@@ -34,7 +34,7 @@ class EnvironmentSpec:
             self.pip_packages = []
 
 class MinicondaInstaller:
-    """Установщик Miniconda"""
+    """Miniconda installer"""
     
     def __init__(self, install_path: Path):
         self.install_path = install_path
@@ -42,11 +42,11 @@ class MinicondaInstaller:
         self.conda_exe = self.miniconda_path / "Scripts" / "conda.exe" if os.name == 'nt' else self.miniconda_path / "bin" / "conda"
         
     def is_installed(self) -> bool:
-        """Проверяет, установлена ли Miniconda"""
+        """Checks if Miniconda is installed"""
         return self.conda_exe.exists()
     
     def get_installer_url(self) -> str:
-        """Получает URL для скачивания Miniconda"""
+        """Gets URL for downloading Miniconda"""
         if os.name == 'nt':
             # Windows
             return "https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe"
@@ -55,28 +55,28 @@ class MinicondaInstaller:
             return "https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh"
     
     def download_installer(self) -> Path:
-        """Скачивает установщик Miniconda"""
+        """Downloads Miniconda installer"""
         import urllib.request
         try:
             from tqdm import tqdm
         except ImportError:
-            logger.warning("tqdm не установлен, скачивание без прогресс-бара")
+            logger.warning("tqdm not installed, downloading without progress bar")
             tqdm = None
         
         url = self.get_installer_url()
         filename = Path(url).name
         installer_path = self.install_path / filename
         
-        logger.info(f"Скачивание Miniconda из {url}")
+        logger.info(f"Downloading Miniconda from {url}")
         
         try:
             if tqdm:
-                # Скачивание с прогресс-баром
+                # Download with progress bar
                 response = urllib.request.urlopen(url)
                 total_size = int(response.headers.get('Content-Length', 0))
                 
                 with open(installer_path, 'wb') as f:
-                    with tqdm(total=total_size, unit='B', unit_scale=True, desc="Скачивание Miniconda") as pbar:
+                    with tqdm(total=total_size, unit='B', unit_scale=True, desc="Downloading Miniconda") as pbar:
                         while True:
                             chunk = response.read(8192)
                             if not chunk:
@@ -84,19 +84,19 @@ class MinicondaInstaller:
                             f.write(chunk)
                             pbar.update(len(chunk))
             else:
-                # Обычное скачивание без прогресс-бара
+                # Regular download without progress bar
                 urllib.request.urlretrieve(url, installer_path)
             
-            logger.info(f"Miniconda скачана: {installer_path}")
+            logger.info(f"Miniconda downloaded: {installer_path}")
             return installer_path
         except Exception as e:
-            logger.error(f"Ошибка скачивания Miniconda: {e}")
+            logger.error(f"Error downloading Miniconda: {e}")
             raise
     
     def install(self) -> bool:
-        """Устанавливает Miniconda"""
+        """Installs Miniconda"""
         if self.is_installed():
-            logger.info("Miniconda уже установлена")
+            logger.info("Miniconda already installed")
             return True
         
         installer_path = self.download_installer()
@@ -107,7 +107,7 @@ class MinicondaInstaller:
                 cmd = [
                     str(installer_path),
                     "/InstallationType=JustMe",
-                    "/S",  # Тихая установка
+                    "/S",  # Silent installation
                     f"/D={self.miniconda_path}",
                 ]
             else:
@@ -119,31 +119,31 @@ class MinicondaInstaller:
                     "-p", str(self.miniconda_path),
                 ]
             
-            logger.info(f"Установка Miniconda в {self.miniconda_path}")
+            logger.info(f"Installing Miniconda to {self.miniconda_path}")
             result = subprocess.run(cmd, capture_output=True, text=True)
             
             if result.returncode == 0:
-                logger.info("Miniconda успешно установлена")
+                logger.info("Miniconda successfully installed")
                 return True
             else:
-                logger.error(f"Ошибка установки Miniconda: {result.stderr}")
+                logger.error(f"Error installing Miniconda: {result.stderr}")
                 return False
                 
         except Exception as e:
-            logger.error(f"Ошибка при установке Miniconda: {e}")
+            logger.error(f"Error during Miniconda installation: {e}")
             return False
         finally:
-            # Удаляем установщик в любом случае
+            # Remove installer in any case
             try:
                 if installer_path.exists():
                     os.remove(installer_path)
-                    logger.info(f"Установщик удален: {installer_path}")
+                    logger.info(f"Installer removed: {installer_path}")
             except Exception as e:
-                logger.warning(f"Не удалось удалить установщик {installer_path}: {e}")
+                logger.warning(f"Could not remove installer {installer_path}: {e}")
 
             
 class EnvironmentManager:
-    """Менеджер окружений conda"""
+    """Conda environment manager"""
     
     def __init__(self, install_path: Path):
         self.install_path = install_path
@@ -160,20 +160,20 @@ class EnvironmentManager:
         self.gpu_detector = GPUDetector()
         
     def ensure_miniconda(self) -> bool:
-        """Убеждается, что Miniconda установлена"""
+        """Ensures that Miniconda is installed"""
         if not self.installer.is_installed():
             return self.installer.install()
         return True
     
     def accept_conda_terms_of_service(self) -> bool:
-        """Принимает Terms of Service для conda каналов"""
+        """Accepts Terms of Service for conda channels"""
         channels = [
             "https://repo.anaconda.com/pkgs/main",
             "https://repo.anaconda.com/pkgs/r", 
             "https://repo.anaconda.com/pkgs/msys2"
         ]
         
-        logger.info("Принятие Terms of Service для conda каналов...")
+        logger.info("Accepting Terms of Service for conda channels...")
         
         for channel in channels:
             try:
@@ -181,21 +181,21 @@ class EnvironmentManager:
                 result = self.run_conda_command(cmd)
                 
                 if result.returncode == 0:
-                    logger.info(f"✅ Terms of Service принят для {channel}")
+                    logger.info(f"✅ Terms of Service accepted for {channel}")
                 else:
-                    logger.warning(f"⚠️ Не удалось принять ToS для {channel}: {result.stderr}")
+                    logger.warning(f"⚠️ Failed to accept ToS for {channel}: {result.stderr}")
                     
             except Exception as e:
-                logger.warning(f"Ошибка при принятии ToS для {channel}: {e}")
+                logger.warning(f"Error accepting ToS for {channel}: {e}")
         
         return True
     
     def run_conda_command(self, args: List[str], **kwargs) -> subprocess.CompletedProcess:
-        """Выполняет команду conda"""
+        """Executes conda command"""
         cmd = [str(self.conda_exe)] + args
-        logger.info(f"Выполнение команды: {' '.join(cmd)}")
+        logger.info(f"Executing command: {' '.join(cmd)}")
         
-        # Добавляем переменные окружения для conda
+        # Add environment variables for conda
         env = os.environ.copy()
         if os.name == 'nt':
             env['PATH'] = str(self.miniconda_path / "Scripts") + os.pathsep + env.get('PATH', '')
@@ -204,12 +204,12 @@ class EnvironmentManager:
         
         return subprocess.run(cmd, env=env, capture_output=True, text=True, **kwargs)
     
-    def run_conda_command_with_progress(self, args: List[str], description: str = "Выполнение команды conda", **kwargs) -> subprocess.CompletedProcess:
-        """Выполняет команду conda с прогресс-баром и захватом вывода"""
+    def run_conda_command_with_progress(self, args: List[str], description: str = "Executing conda command", **kwargs) -> subprocess.CompletedProcess:
+        """Executes conda command with progress bar and output capture"""
         cmd = [str(self.conda_exe)] + args
-        logger.info(f"Выполнение команды: {' '.join(cmd)}")
+        logger.info(f"Executing command: {' '.join(cmd)}")
         
-        # Добавляем переменные окружения для conda
+        # Add environment variables for conda
         env = os.environ.copy()
         if os.name == 'nt':
             env['PATH'] = str(self.miniconda_path / "Scripts") + os.pathsep + env.get('PATH', '')
@@ -221,13 +221,13 @@ class EnvironmentManager:
             TQDM_AVAILABLE = True
         except ImportError:
             TQDM_AVAILABLE = False
-            logger.warning("tqdm не установлен, выполнение без прогресс-бара")
+            logger.warning("tqdm not installed, executing without progress bar")
         
         if TQDM_AVAILABLE:
-            # Выполнение с прогресс-баром
+            # Execution with progress bar
             logger.info(f"🔄 {description}...")
             
-            # Запускаем процесс
+            # Start process
             process = subprocess.Popen(
                 cmd,
                 env=env,
@@ -238,31 +238,31 @@ class EnvironmentManager:
                 universal_newlines=True
             )
             
-            # Создаем прогресс-бар
-            with tqdm(desc=description, unit="операция", dynamic_ncols=True) as pbar:
+            # Create progress bar
+            with tqdm(desc=description, unit="operation", dynamic_ncols=True) as pbar:
                 output_lines = []
                 if process.stdout:
                     for line in process.stdout:
                         output_lines.append(line)
                         pbar.update(1)
                         
-                        # Показываем важные сообщения conda
+                        # Show important conda messages
                         line_lower = line.lower().strip()
                         if any(keyword in line_lower for keyword in [
                             "downloading", "extracting", "installing", "solving", 
                             "collecting", "preparing", "executing", "verifying",
                             "error", "failed", "warning"
                         ]):
-                            # Обрезаем длинные строки для отображения
+                            # Truncate long lines for display
                             display_text = line.strip()[:60]
                             if len(line.strip()) > 60:
                                 display_text += "..."
                             pbar.set_postfix_str(display_text)
             
-            # Ждем завершения
+            # Wait for completion
             process.wait()
             
-            # Создаем результат в формате CompletedProcess
+            # Create result in CompletedProcess format
             result = subprocess.CompletedProcess(
                 args=cmd,
                 returncode=process.returncode,
@@ -271,19 +271,19 @@ class EnvironmentManager:
             )
             
             if result.returncode == 0:
-                logger.info(f"✅ {description} завершено успешно")
+                logger.info(f"✅ {description} completed successfully")
             else:
-                logger.error(f"❌ {description} завершено с ошибкой (код: {result.returncode})")
+                logger.error(f"❌ {description} completed with error (code: {result.returncode})")
                 if result.stdout:
-                    logger.error(f"Вывод: {result.stdout[-500:]}")
+                    logger.error(f"Output: {result.stdout[-500:]}")
             
             return result
         else:
-            # Обычное выполнение без прогресс-бара
+            # Regular execution without progress bar
             return subprocess.run(cmd, env=env, capture_output=True, text=True, **kwargs)
     
     def list_environments(self) -> List[str]:
-        """Список всех venv окружений"""
+        """List of all venv environments"""
         if not self.envs_path.exists():
             return []
         
@@ -295,20 +295,20 @@ class EnvironmentManager:
         return envs
     
     def environment_exists(self, name: str) -> bool:
-        """Проверяет существование venv окружения"""
+        """Checks existence of venv environment"""
         repo_env_path = self.envs_path / name
         return repo_env_path.exists() and (repo_env_path / "pyvenv.cfg").exists()
     
     def check_base_environment_integrity(self) -> bool:
-        """Проверяет целостность базового окружения"""
+        """Checks integrity of base environment"""
         env_name = "portablesource"
         conda_env_path = self.miniconda_path / "envs" / env_name
         
         if not conda_env_path.exists():
-            logger.warning(f"Conda окружение {env_name} не найдено")
+            logger.warning(f"Conda environment {env_name} not found")
             return False
         
-        # Проверяем наличие основных исполняемых файлов
+        # Check for main executable files
         if os.name == 'nt':
             python_exe = conda_env_path / "python.exe"
             pip_exe = conda_env_path / "Scripts" / "pip.exe"
@@ -327,26 +327,26 @@ class EnvironmentManager:
             missing_tools.append("git")
         
         if missing_tools:
-            logger.warning(f"В окружении {env_name} отсутствуют инструменты: {', '.join(missing_tools)}")
+            logger.warning(f"Environment {env_name} is missing tools: {', '.join(missing_tools)}")
             return False
         
-        # Проверяем работоспособность Python
+        # Check Python functionality
         try:
             result = subprocess.run([str(python_exe), "--version"], 
                                   capture_output=True, text=True, timeout=10)
             if result.returncode != 0:
-                logger.warning(f"Python в окружении {env_name} не работает")
+                logger.warning(f"Python in environment {env_name} is not working")
                 return False
         except Exception as e:
-            logger.warning(f"Ошибка проверки Python в окружении {env_name}: {e}")
+            logger.warning(f"Error checking Python in environment {env_name}: {e}")
             return False
         
-        # Проверяем TensorRT для NVIDIA GPU
+        # Check TensorRT for NVIDIA GPU
         gpu_info = self.gpu_detector.get_gpu_info()
         nvidia_gpu = next((gpu for gpu in gpu_info if gpu.gpu_type == GPUType.NVIDIA), None)
         
         if nvidia_gpu:
-            # Используем ConfigManager для определения поддержки TensorRT
+            # Use ConfigManager to determine TensorRT support
             from .config import ConfigManager
             config_manager = ConfigManager()
             gpu_config = config_manager.configure_gpu(nvidia_gpu.name, nvidia_gpu.memory // 1024 if nvidia_gpu.memory else 0)
@@ -354,15 +354,14 @@ class EnvironmentManager:
             if gpu_config.supports_tensorrt:
                 tensorrt_status = self.check_tensorrt_installation()
                 if not tensorrt_status:
-                    logger.warning("TensorRT не установлен или не работает, будет выполнена переустановка")
+                    logger.warning("TensorRT not installed or not working, will reinstall")
                     if not self.reinstall_tensorrt():
-                        logger.warning("Не удалось переустановить TensorRT, но базовое окружение работает")
+                        logger.warning("Failed to reinstall TensorRT, but base environment is working")
         
-        logger.info(f"Базовое окружение {env_name} прошло проверку целостности")
         return True
     
     def check_tensorrt_installation(self) -> bool:
-        """Проверяет установку и работоспособность TensorRT"""
+        """Checks TensorRT installation and functionality"""
         env_name = "portablesource"
         conda_env_path = self.miniconda_path / "envs" / env_name
         
@@ -372,112 +371,112 @@ class EnvironmentManager:
             python_exe = conda_env_path / "bin" / "python"
         
         try:
-            # Проверяем импорт TensorRT
+            # Check TensorRT import
             result = subprocess.run([
                 str(python_exe), "-c", 
-                "import tensorrt; print(f'TensorRT {tensorrt.__version__} работает'); assert tensorrt.Builder(tensorrt.Logger())"
+                "import tensorrt; print(f'TensorRT {tensorrt.__version__} working'); assert tensorrt.Builder(tensorrt.Logger())"
             ], capture_output=True, text=True, timeout=30)
             
             if result.returncode == 0:
-                logger.info(f"✅ TensorRT проверка пройдена: {result.stdout.strip()}")
                 return True
             else:
-                logger.warning(f"❌ TensorRT проверка не пройдена: {result.stderr.strip()}")
+                logger.warning(f"❌ TensorRT check failed: {result.stderr.strip()}")
                 return False
         except Exception as e:
-            logger.warning(f"❌ Ошибка проверки TensorRT: {e}")
+            logger.warning(f"❌ TensorRT check error: {e}")
             return False
     
     def reinstall_tensorrt(self) -> bool:
-        """Переустанавливает TensorRT"""
+        """Reinstalls TensorRT"""
         env_name = "portablesource"
         
         try:
-            logger.info("Переустановка TensorRT...")
+            logger.info("Reinstalling TensorRT...")
             
-            # Удаляем существующий TensorRT
+            # Remove existing TensorRT
             uninstall_cmd = ["run", "-n", env_name, "pip", "uninstall", "-y", "tensorrt", "tensorrt-libs", "tensorrt-bindings"]
             uninstall_result = self.run_conda_command(uninstall_cmd)
             
-            # Обновляем pip, setuptools и wheel (игнорируем ошибки, если пакеты уже обновлены)
+            # Update pip, setuptools and wheel (ignore errors if packages are already updated)
             # update_cmd = ["run", "-n", env_name, "pip", "install", "--upgrade", "pip", "setuptools", "wheel"]
-            # update_result = self.run_conda_command_with_progress(update_cmd, "Обновление pip, setuptools и wheel")
+            # update_result = self.run_conda_command_with_progress(update_cmd, "Updating pip, setuptools and wheel")
             update_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
             
-            # Продолжаем установку TensorRT даже если обновление pip завершилось с ошибкой
-            # (часто pip уже обновлен, но возвращает код ошибки)
+            # Continue TensorRT installation even if pip update failed
+                    # (often pip is already updated but returns error code)
             if update_result.returncode == 0:
-                logger.info("✅ pip, setuptools и wheel обновлены")
+                pass
+                #logger.info("✅ pip, setuptools and wheel updated")
             else:
-                logger.warning("⚠️ Обновление pip завершилось с предупреждениями, продолжаем установку TensorRT")
+                logger.warning("⚠️ pip update completed with warnings, continuing TensorRT installation")
             
-            # Устанавливаем TensorRT заново
+            # Install TensorRT again
             tensorrt_cmd = ["run", "-n", env_name, "pip", "install", "--upgrade", "tensorrt"]
-            tensorrt_result = self.run_conda_command_with_progress(tensorrt_cmd, "Переустановка TensorRT")
+            tensorrt_result = self.run_conda_command_with_progress(tensorrt_cmd, "Reinstalling TensorRT")
             
             if tensorrt_result.returncode == 0:
-                # Проверяем установку
+                # Check installation
                 if self.check_tensorrt_installation():
-                    logger.info("✅ TensorRT успешно переустановлен")
+                    logger.info("✅ TensorRT successfully reinstalled")
                     return True
                 else:
-                    logger.warning("⚠️ TensorRT установлен, но проверка не пройдена")
+                    logger.warning("⚠️ TensorRT installed but check failed")
                     return False
             else:
-                logger.warning(f"⚠️ Ошибка переустановки TensorRT: {tensorrt_result.stderr}")
+                logger.warning(f"⚠️ TensorRT reinstallation error: {tensorrt_result.stderr}")
                 return False
                 
         except Exception as e:
-            logger.warning(f"⚠️ Ошибка переустановки TensorRT: {e}")
+            logger.warning(f"⚠️ TensorRT reinstallation error: {e}")
             return False
     
     def remove_base_environment(self) -> bool:
-        """Удаляет базовое conda окружение"""
+        """Removes base conda environment"""
         env_name = "portablesource"
         conda_env_path = self.miniconda_path / "envs" / env_name
         
         if not conda_env_path.exists():
-            logger.info(f"Conda окружение {env_name} уже отсутствует")
+            logger.info(f"Conda environment {env_name} already absent")
             return True
         
         try:
-            # Удаляем через conda
+            # Remove via conda
             cmd = ["env", "remove", "-n", env_name, "-y"]
             result = self.run_conda_command(cmd)
             
             if result.returncode == 0:
-                logger.info(f"Conda окружение {env_name} удалено")
+                logger.info(f"Conda environment {env_name} removed")
                 return True
             else:
-                logger.error(f"Ошибка удаления conda окружения: {result.stderr}")
-                # Пробуем удалить папку напрямую
+                logger.error(f"Error removing conda environment: {result.stderr}")
+                # Try to remove folder directly
                 shutil.rmtree(conda_env_path)
-                logger.info(f"Conda окружение {env_name} удалено принудительно")
+                logger.info(f"Conda environment {env_name} forcibly removed")
                 return True
         except Exception as e:
-            logger.error(f"Ошибка удаления conda окружения {env_name}: {e}")
+            logger.error(f"Error removing conda environment {env_name}: {e}")
             return False
     
     def create_base_environment(self) -> bool:
-        """Создает базовое окружение PortableSource"""
+        """Creates base PortableSource environment"""
         env_name = "portablesource"
         
-        # Проверяем существование и целостность окружения
+        # Check environment existence and integrity
         conda_env_path = self.miniconda_path / "envs" / env_name
         if conda_env_path.exists():
             if self.check_base_environment_integrity():
-                logger.info(f"Базовое окружение {env_name} уже существует и работает корректно")
+                logger.info(f"Base environment {env_name} already exists and works correctly")
                 return True
             else:
-                logger.warning(f"Базовое окружение {env_name} повреждено, выполняется переустановка...")
+                logger.warning(f"Base environment {env_name} is corrupted, reinstalling...")
                 if not self.remove_base_environment():
-                    logger.error("Не удалось удалить поврежденное окружение")
+                    logger.error("Failed to remove corrupted environment")
                     return False
         
-        # Принимаем Terms of Service перед созданием окружения
+        # Accept Terms of Service before creating environment
         self.accept_conda_terms_of_service()
         
-        # Определяем пакеты для установки
+        # Define packages for installation
         packages = [
             "python=3.11",
             "git",
@@ -487,13 +486,13 @@ class EnvironmentManager:
             "wheel"
         ]
         
-        # Добавляем CUDA пакеты если есть NVIDIA GPU
+        # Add CUDA packages if NVIDIA GPU is present
         gpu_info = self.gpu_detector.get_gpu_info()
         nvidia_gpu = next((gpu for gpu in gpu_info if gpu.gpu_type == GPUType.NVIDIA), None)
         
         if nvidia_gpu and nvidia_gpu.cuda_version:
             cuda_version = nvidia_gpu.cuda_version.value
-            logger.info(f"Добавление CUDA {cuda_version} toolkit + cuDNN")
+            logger.info(f"Adding CUDA {cuda_version} toolkit + cuDNN")
             
             if cuda_version == "11.8":
                 packages.extend([
@@ -511,74 +510,75 @@ class EnvironmentManager:
                     "cudnn"
                 ])
         
-        # Создаем окружение с прогресс-баром
+        # Create environment with progress bar
         cmd = ["create", "-n", env_name, "-y"] + packages
-        result = self.run_conda_command_with_progress(cmd, f"Создание окружения {env_name} с {len(packages)} пакетами")
+        result = self.run_conda_command_with_progress(cmd, "")
         
         if result.returncode == 0:
-            logger.info(f"Базовое окружение {env_name} создано")
+            #logger.info(f"Базовое окружение {env_name} создано")
             
-            # Устанавливаем дополнительные пакеты для NVIDIA GPU
+            # Install additional packages for NVIDIA GPU
             if nvidia_gpu:
-                logger.info("Установка дополнительных пакетов для NVIDIA GPU...")
+                #logger.info("Установка дополнительных пакетов для NVIDIA GPU...")
                 try:
                     # Skip pip upgrade to avoid permission issues
                     # update_cmd = ["run", "-n", env_name, "pip", "install", "--upgrade", "pip", "setuptools", "wheel"]
-                    # update_result = self.run_conda_command_with_progress(update_cmd, "Обновление pip, setuptools и wheel")
+                    # update_result = self.run_conda_command_with_progress(update_cmd, "Updating pip, setuptools and wheel")
                     update_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")  # Mock successful result
                     
-                    # Продолжаем установку TensorRT даже если обновление pip завершилось с ошибкой
+                    # Continue TensorRT installation even if pip update failed
                     if update_result.returncode == 0:
-                        logger.info("✅ pip, setuptools и wheel обновлены")
+                        logger.info("✅ pip, setuptools and wheel updated")
                     else:
-                        logger.warning("⚠️ Обновление pip завершилось с предупреждениями, продолжаем установку TensorRT")
+                        logger.warning("⚠️ pip update completed with warnings, continuing TensorRT installation")
                     
-                    # Устанавливаем TensorRT согласно официальной документации
-                    logger.info("Установка TensorRT (опционально)...")
+                    # Install TensorRT according to official documentation
+                    #logger.info("Installing TensorRT (optional)...")
                     tensorrt_cmd = ["run", "-n", env_name, "pip", "install", "--upgrade", "tensorrt"]
-                    tensorrt_result = self.run_conda_command_with_progress(tensorrt_cmd, "Установка TensorRT")
+                    tensorrt_result = self.run_conda_command_with_progress(tensorrt_cmd, "Installing TensorRT")
                     
                     if tensorrt_result.returncode == 0:
-                        logger.info("✅ TensorRT успешно установлен")
-                        logger.info("💡 Для проверки используйте: python -c 'import tensorrt; print(tensorrt.__version__)'")
+                        pass
+                        #logger.info("✅ TensorRT successfully installed")
+                        #logger.info("💡 For verification use: python -c 'import tensorrt; print(tensorrt.__version__)'")
                     else:
-                        logger.warning("⚠️ TensorRT не установился (возможно, несовместимая версия Python или CUDA)")
-                        logger.info("💡 TensorRT можно установить вручную позже при необходимости")
+                        logger.warning("⚠️ TensorRT failed to install (possibly incompatible Python or CUDA version)")
+                        logger.info("💡 TensorRT can be installed manually later if needed")
                 except Exception as e:
-                    logger.warning(f"⚠️ Ошибка установки дополнительных NVIDIA пакетов: {e}")
-                    logger.info("💡 Базовое окружение создано успешно, дополнительные пакеты можно установить позже")
+                    logger.warning(f"⚠️ Error installing additional NVIDIA packages: {e}")
+                    logger.info("💡 Base environment created successfully, additional packages can be installed later")
             
             return True
         else:
-            logger.error(f"Ошибка создания базового окружения: {result.stderr}")
+            logger.error(f"Error creating base environment: {result.stderr}")
             return False
     
     def create_repository_environment(self, repo_name: str, spec: EnvironmentSpec) -> bool:
-        """Создает venv окружение для репозитория"""
+        """Creates venv environment for repository"""
         repo_env_path = self.envs_path / repo_name
         
         if repo_env_path.exists():
-            logger.info(f"Venv окружение {repo_name} уже существует")
+            #logger.info(f"Venv environment {repo_name} already exists")
             return True
         
-        # Создаем папку для venv окружений
+        # Create folder for venv environments
         self.envs_path.mkdir(parents=True, exist_ok=True)
         
-        # Проверяем наличие базового conda окружения
+        # Check for base conda environment
         if not (self.miniconda_path / "envs" / "portablesource").exists():
-            logger.error("Базовое conda окружение portablesource не найдено!")
+            logger.error("Base conda environment portablesource not found!")
             return False
         
-        # Создаем venv используя Python из базового conda окружения
+        # Create venv using Python from base conda environment
         try:
             cmd = [str(self.python_exe), "-m", "venv", str(repo_env_path)]
             result = subprocess.run(cmd, capture_output=True, text=True)
             
             if result.returncode != 0:
-                logger.error(f"Ошибка создания venv: {result.stderr}")
+                logger.error(f"Error creating venv: {result.stderr}")
                 return False
             
-            # Определяем путь к pip в venv
+            # Define path to pip in venv
             if os.name == 'nt':
                 venv_pip = repo_env_path / "Scripts" / "pip.exe"
                 venv_python = repo_env_path / "Scripts" / "python.exe"
@@ -590,40 +590,40 @@ class EnvironmentManager:
             # subprocess.run([str(venv_python), "-m", "pip", "install", "--upgrade", "pip"], 
             #              capture_output=True, text=True)
             
-            # Устанавливаем дополнительные пакеты
+            # Install additional packages
             if spec.pip_packages:
                 for package in spec.pip_packages:
                     result = subprocess.run([str(venv_pip), "install", package], 
                                           capture_output=True, text=True)
                     if result.returncode != 0:
-                        logger.warning(f"Не удалось установить {package}: {result.stderr}")
+                        logger.warning(f"Failed to install {package}: {result.stderr}")
             
-            logger.info(f"Venv окружение {repo_name} создано в {repo_env_path}")
+            #logger.info(f"Venv environment {repo_name} created in {repo_env_path}")
             return True
             
         except Exception as e:
-            logger.error(f"Ошибка создания venv окружения: {e}")
+            logger.error(f"Error creating venv environment: {e}")
             return False
     
     def remove_environment(self, name: str) -> bool:
-        """Удаляет venv окружение"""
+        """Removes venv environment"""
         if not self.environment_exists(name):
-            logger.warning(f"Venv окружение {name} не существует")
+            logger.warning(f"Venv environment {name} does not exist")
             return True
         
         repo_env_path = self.envs_path / name
         
         try:
-            # Удаляем папку venv
+            # Remove venv folder
             shutil.rmtree(repo_env_path)
-            logger.info(f"Venv окружение {name} удалено")
+            logger.info(f"Venv environment {name} removed")
             return True
         except Exception as e:
-            logger.error(f"Ошибка удаления venv окружения {name}: {e}")
+            logger.error(f"Error removing venv environment {name}: {e}")
             return False
     
     def get_environment_python_path(self, env_name: str) -> Optional[Path]:
-        """Получает путь к Python в venv окружении"""
+        """Gets path to Python in venv environment"""
         repo_env_path = self.envs_path / env_name
         
         if os.name == 'nt':
@@ -632,18 +632,3 @@ class EnvironmentManager:
             python_path = repo_env_path / "bin" / "python"
         
         return python_path if python_path.exists() else None
-    
-    def activate_environment_script(self, env_name: str) -> str:
-        """Возвращает скрипт для активации conda базового окружения + venv репозитория"""
-        repo_env_path = self.envs_path / env_name
-        
-        if os.name == 'nt':
-            # Windows batch
-            conda_bat = self.miniconda_path / "Scripts" / "activate.bat"
-            venv_activate = repo_env_path / "Scripts" / "activate.bat"
-            return f'call "{conda_bat}" && conda activate portablesource && call "{venv_activate}"'
-        else:
-            # Linux bash
-            conda_sh = self.miniconda_path / "etc" / "profile.d" / "conda.sh"
-            venv_activate = repo_env_path / "bin" / "activate"
-            return f'source "{conda_sh}" && conda activate portablesource && source "{venv_activate}"'
