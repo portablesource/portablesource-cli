@@ -36,7 +36,7 @@ jobs:
             Compress-Archive -Path build/portablesource_main.exe -DestinationPath portablesource-Windows.zip
           elif [ "${{ runner.os }}" == "Linux" ]; then
             cd build
-            zip ../portablesource-Linux.zip portablesource_main
+            zip ../portablesource-Linux.zip portablesource_main.bin
           fi
 
       - name: Upload artifact
