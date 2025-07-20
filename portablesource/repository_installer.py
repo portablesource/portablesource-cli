@@ -841,122 +841,8 @@ class RepositoryInstaller:
             logger.error(f"Error handling name installation for {repo_name}: {e}")
             return False
     
-    def _handle_name_installation(self, repo_name: str, install_path: Path) -> bool:
-        """
-        Handle installation from repository name using standard logic
-        
-        Args:
-            repo_name: Repository name
-            install_path: Installation path
-            
-        Returns:
-            True if installation successful
-        """
-        try:
-            # Use existing standard logic
-            repo_info = self._get_repository_info(repo_name)
-            if not repo_info:
-                logger.error(f"Could not determine repository info for: {repo_name}")
-                return False
-            
-            # Extract repo name and set up path
-            actual_repo_name = self._extract_repo_name(repo_info["url"])
-            repo_path = install_path / actual_repo_name
-            
-            # Clone or update repository
-            if not self._clone_or_update_repository(repo_info, repo_path):
-                return False
-            
-            # Analyze and install dependencies
-            if not self._install_dependencies(repo_path):
-                return False
-            
-            # Run special setup if needed
-            if repo_info.get("special_setup"):
-                repo_info["special_setup"](repo_path)
-            
-            # Generate startup script
-            self._generate_startup_script(repo_path, repo_info)
-            
-            # Send download statistics to server
-            self._send_download_stats(actual_repo_name)
 
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error in name installation for {repo_name}: {e}")
-            return False
-    
-    def _install_from_server_plan_only(self, server_plan: Dict, repo_name: str, install_path: Path) -> bool:
-        """
-        Install only dependencies from server plan without cloning repository
-        
-        Args:
-            server_plan: Installation plan from server
-            repo_name: Repository name
-            install_path: Installation path
-            
-        Returns:
-            True if installation successful
-        """
-        try:
-            # Create venv environment for the repository
-            if not self._create_venv_environment(repo_name):
-                logger.error(f"Failed to create venv environment for {repo_name}")
-                return False
-            
-            # Execute server installation plan without local repository
-            return self._execute_server_installation_plan(server_plan, None, repo_name)
-            
-        except Exception as e:
-            logger.error(f"Error installing from server plan for {repo_name}: {e}")
-            return False
-    
-    def _install_with_cloning(self, repo_url: str, install_path: Path) -> bool:
-        """
-        Install repository by cloning and using local requirements.txt
-        
-        Args:
-            repo_url: Repository URL
-            install_path: Installation path
-            
-        Returns:
-            True if installation successful
-        """
-        try:
-            # Create basic repo info for cloning
-            repo_name = self._extract_repo_name(repo_url)
-            repo_info = {
-                "url": repo_url,
-                "main_file": None,  # Will be determined later
-                "special_setup": self._get_special_setup(repo_name)
-            }
-            
-            repo_path = install_path / repo_name
-            
-            # Clone or update repository
-            if not self._clone_or_update_repository(repo_info, repo_path):
-                return False
-            
-            # Analyze and install dependencies
-            if not self._install_dependencies(repo_path):
-                return False
-            
-            # Run special setup if needed
-            if repo_info.get("special_setup"):
-                repo_info["special_setup"](repo_path)
-            
-            # Generate startup script
-            self._generate_startup_script(repo_path, repo_info)
-            
-            # Send download statistics to server
-            self._send_download_stats(repo_name)
 
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error installing with cloning for {repo_url}: {e}")
-            return False
     
     def _get_repository_info(self, repo_url_or_name: str) -> Optional[Dict]:
         """Get repository information from server API or fallback methods"""
@@ -1014,76 +900,9 @@ class RepositoryInstaller:
         except Exception:
             return ""
     
-    def _handle_name_installation(self, repo_name: str, install_path: Path) -> bool:
-        """
-        Handle installation from repository name using standard logic
-        
-        Args:
-            repo_name: Repository name
-            install_path: Installation path
-            
-        Returns:
-            True if installation successful
-        """
-        try:
-            # Use existing standard logic
-            repo_info = self._get_repository_info(repo_name)
-            if not repo_info:
-                logger.error(f"Could not determine repository info for: {repo_name}")
-                return False
-            
-            # Extract repo name and set up path
-            actual_repo_name = self._extract_repo_name(repo_info["url"])
-            repo_path = install_path / actual_repo_name
-            
-            # Clone or update repository
-            if not self._clone_or_update_repository(repo_info, repo_path):
-                return False
-            
-            # Analyze and install dependencies
-            if not self._install_dependencies(repo_path):
-                return False
-            
-            # Run special setup if needed
-            if repo_info.get("special_setup"):
-                repo_info["special_setup"](repo_path)
-            
-            # Generate startup script
-            self._generate_startup_script(repo_path, repo_info)
-            
-            # Send download statistics to server
-            self._send_download_stats(actual_repo_name)
 
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error in name installation for {repo_name}: {e}")
-            return False
     
-    def _install_from_server_plan_only(self, server_plan: Dict, repo_name: str, install_path: Path) -> bool:
-        """
-        Install only dependencies from server plan without cloning repository
-        
-        Args:
-            server_plan: Installation plan from server
-            repo_name: Repository name
-            install_path: Installation path
-            
-        Returns:
-            True if installation successful
-        """
-        try:
-            # Create venv environment for the repository
-            if not self._create_venv_environment(repo_name):
-                logger.error(f"Failed to create venv environment for {repo_name}")
-                return False
-            
-            # Execute server installation plan without local repository
-            return self._execute_server_installation_plan(server_plan, None, repo_name)
-            
-        except Exception as e:
-            logger.error(f"Error installing from server plan for {repo_name}: {e}")
-            return False
+
     
     def _install_with_cloning(self, repo_url: str, install_path: Path) -> bool:
         """
@@ -1318,46 +1137,7 @@ class RepositoryInstaller:
         }
         return special_setups.get(repo_name.lower(), None)
     
-    def _setup_facefusion(self, repo_path: Path):
-        """Special setup for FaceFusion repository"""
-        # Placeholder for FaceFusion-specific setup
-        pass
-    
-    def _generate_startup_script(self, repo_path: Path, repo_info: Dict):
-        """Generate startup script for repository"""
-        # Placeholder for startup script generation
-        pass
-    
-    def _send_download_stats(self, repo_name: str):
-        """Send download statistics to server"""
-        # Placeholder for download statistics
-        pass
-        """Get special setup function for known repositories"""
-        special_setups = {
-            "facefusion": self._setup_facefusion,
-            # Add more special setups as needed
-        }
-        return special_setups.get(repo_name.lower())
-    
-    def _is_repository_url(self, input_str: str) -> bool:
-        """
-        Determine if input string is a repository URL
-        
-        Args:
-            input_str: Input string to check
-            
-        Returns:
-            True if input is a repository URL, False otherwise
-        """
-        return input_str.startswith(("http://", "https://", "git@"))
-    
-    def _extract_repo_name(self, repo_url: str) -> str:
-        """Extract repository name from URL"""
-        parsed = urlparse(repo_url)
-        path = parsed.path.strip('/')
-        if path.endswith('.git'):
-            path = path[:-4]
-        return path.split('/')[-1].lower()
+
     
     def _clone_or_update_repository(self, repo_info: Dict, repo_path: Path) -> bool:
         """Clone or update repository with automatic error fixing"""
@@ -1764,22 +1544,9 @@ class RepositoryInstaller:
             logger.error(f"Error installing packages with pip: {e}")
             return False
 
-    def _handle_triton_package(self, package: PackageInfo, pip_exe: str):
-        """Handle Triton package installation based on OS."""
-        if sys.platform == "win32":
-            # Install triton-windows without version
-            self._run_pip_with_progress([pip_exe, "install", "triton-windows"], "Installing triton-windows")
+
     
-    def _handle_insightface_package(self, package: PackageInfo, pip_exe: str):
-        """Handle InsightFace package installation based on OS."""
-        if os.name == "nt":  # Windows
-            wheel_url = "https://huggingface.co/hanamizuki-ai/pypi-wheels/resolve/main/insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl"
-            self._run_pip_with_progress([pip_exe, "install", wheel_url], "Installing InsightFace from HuggingFace wheel")
-        else:  # Linux and other systems
-            package_str = str(package)
-            self._run_pip_with_progress([pip_exe, "install", package_str], f"Installing InsightFace package: {package_str}")
-    
-    def _execute_server_installation_plan(self, server_plan: Dict, repo_path: Path, repo_name: str) -> bool:
+    def _execute_server_installation_plan(self, server_plan: Dict, repo_path: Optional[Path], repo_name: str) -> bool:
         """Execute installation plan from server with enhanced error handling"""
         try:
             # Validate server plan before execution
@@ -2337,17 +2104,6 @@ pause
     def _handle_insightface_package_from_name(self, package_name: str, pip_exe: str):
         """Handle InsightFace package installation from package name"""
         try:
-            # Create a temporary PackageInfo object for InsightFace handling
-            from dataclasses import dataclass
-            
-            @dataclass
-            class TempPackageInfo:
-                name: str
-                version: Optional[str] = None
-                extras: Optional[List[str]] = None
-                package_type: PackageType = PackageType.INSIGHTFACE
-                original_line: str = ""
-            
             # Parse version if present
             version = None
             if '==' in package_name:
@@ -2355,9 +2111,11 @@ pause
             else:
                 name = package_name
             
-            temp_package = TempPackageInfo(
+            # Create a PackageInfo object for InsightFace handling
+            temp_package = PackageInfo(
                 name=name,
                 version=version,
+                package_type=PackageType.INSIGHTFACE,
                 original_line=package_name
             )
             

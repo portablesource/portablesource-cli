@@ -402,7 +402,7 @@ class EnvironmentManager:
             # Обновляем pip, setuptools и wheel (игнорируем ошибки, если пакеты уже обновлены)
             # update_cmd = ["run", "-n", env_name, "pip", "install", "--upgrade", "pip", "setuptools", "wheel"]
             # update_result = self.run_conda_command_with_progress(update_cmd, "Обновление pip, setuptools и wheel")
-            update_result = type('obj', (object,), {'returncode': 0})()
+            update_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
             
             # Продолжаем установку TensorRT даже если обновление pip завершилось с ошибкой
             # (часто pip уже обновлен, но возвращает код ошибки)
@@ -525,7 +525,7 @@ class EnvironmentManager:
                     # Skip pip upgrade to avoid permission issues
                     # update_cmd = ["run", "-n", env_name, "pip", "install", "--upgrade", "pip", "setuptools", "wheel"]
                     # update_result = self.run_conda_command_with_progress(update_cmd, "Обновление pip, setuptools и wheel")
-                    update_result = type('obj', (object,), {'returncode': 0})()  # Mock successful result
+                    update_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")  # Mock successful result
                     
                     # Продолжаем установку TensorRT даже если обновление pip завершилось с ошибкой
                     if update_result.returncode == 0:

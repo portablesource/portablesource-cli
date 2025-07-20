@@ -350,11 +350,17 @@ class PortableSourceApp:
     def _extract_repo_name(self, repo_url_or_name: str) -> str:
         """Extract repository name from URL or name"""
         # Use method from repository_installer
+        if self.repository_installer is None:
+            logger.error("Repository installer not initialized")
+            return ""
         return self.repository_installer._extract_repo_name(repo_url_or_name)
     
     def _find_main_file(self, repo_path, repo_name, repo_url) -> Optional[str]:
         """Find main file of repository"""
         # Use MainFileFinder from repository_installer
+        if self.repository_installer is None:
+            logger.error("Repository installer not initialized")
+            return None
         main_file = self.repository_installer.main_file_finder.find_main_file(repo_name, repo_path, repo_url)
         return main_file
     

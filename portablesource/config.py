@@ -47,7 +47,7 @@ class GPUConfig:
     memory_gb: int = 0
     recommended_backend: str = "cpu"
     supports_tensorrt: bool = False
-    conda_packages: List[str] = None
+    conda_packages: Optional[List[str]] = None
     
     def __post_init__(self):
         if self.conda_packages is None:
@@ -61,8 +61,8 @@ class PortableSourceConfig:
     """Main configuration class"""
     version: str = ver
     install_path: str = ""
-    gpu_config: GPUConfig = None
-    environment_vars: Dict[str, str] = None
+    gpu_config: Optional[GPUConfig] = None
+    environment_vars: Optional[Dict[str, str]] = None
     
     def __post_init__(self):
         if self.gpu_config is None:
@@ -293,7 +293,7 @@ class ConfigManager:
                     "recommended_backend": self.config.gpu_config.recommended_backend,
                     "supports_tensorrt": self.config.gpu_config.supports_tensorrt,
                     "conda_packages": self.config.gpu_config.conda_packages
-                },
+                } if self.config.gpu_config else None,
                 "environment_vars": self.config.environment_vars
             }
             
@@ -374,24 +374,43 @@ class ConfigManager:
         Returns:
             Configuration summary string
         """
-        conda_packages = ", ".join(self.config.gpu_config.conda_packages) if self.config.gpu_config.conda_packages else "None"
+        if self.config.gpu_config:
+            conda_packages = ", ".join(self.config.gpu_config.conda_packages) if self.config.gpu_config.conda_packages else "None"
+            gpu_name = self.config.gpu_config.name
+            gpu_generation = self.config.gpu_config.generation.value
+            cuda_version = self.config.gpu_config.cuda_version.value if self.config.gpu_config.cuda_version else 'None'
+            compute_capability = self.config.gpu_config.compute_capability
+            memory_gb = self.config.gpu_config.memory_gb
+            backend = self.config.gpu_config.recommended_backend
+            tensorrt_support = self.config.gpu_config.supports_tensorrt
+        else:
+            conda_packages = "None"
+            gpu_name = "Not configured"
+            gpu_generation = "Unknown"
+            cuda_version = "None"
+            compute_capability = "Unknown"
+            memory_gb = 0
+            backend = "cpu"
+            tensorrt_support = False
+        
+        env_vars_count = len(self.config.environment_vars) if self.config.environment_vars else 0
         
         summary = f"""
 PortableSource Configuration Summary
 ====================================
 
 GPU Configuration:
-  Name: {self.config.gpu_config.name}
-  Generation: {self.config.gpu_config.generation.value}
-  CUDA Version: {self.config.gpu_config.cuda_version.value if self.config.gpu_config.cuda_version else 'None'}
-  Compute Capability: {self.config.gpu_config.compute_capability}
-  Memory: {self.config.gpu_config.memory_gb}GB
-  Backend: {self.config.gpu_config.recommended_backend}
-  TensorRT Support: {self.config.gpu_config.supports_tensorrt}
+  Name: {gpu_name}
+  Generation: {gpu_generation}
+  CUDA Version: {cuda_version}
+  Compute Capability: {compute_capability}
+  Memory: {memory_gb}GB
+  Backend: {backend}
+  TensorRT Support: {tensorrt_support}
   Conda Packages: {conda_packages}
 
 Install Path: {self.config.install_path}
 
-Environment Variables: {len(self.config.environment_vars)} configured
+Environment Variables: {env_vars_count} configured
 """
         return summary.strip()
