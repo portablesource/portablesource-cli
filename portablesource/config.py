@@ -5,7 +5,7 @@ Configuration System for PortableSource
 This module manages configuration for GPU detection, CUDA versions, and system paths.
 """
 
-SERVER_DOMAIN = "localhost:5173"
+SERVER_DOMAIN = "portables.dev"
 
 import os
 import json
