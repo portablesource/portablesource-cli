@@ -5,16 +5,14 @@ Managing environments based on Miniconda
 """
 
 import os
-import sys
 import logging
 import subprocess
-import json
 import shutil
 from pathlib import Path
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List
 from dataclasses import dataclass
 
-from portablesource.get_gpu import GPUDetector, CUDAVersion, GPUType
+from portablesource.get_gpu import GPUDetector, GPUType
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +97,17 @@ class MinicondaInstaller:
             logger.info("Miniconda already installed")
             return True
         
+        # Check if miniconda directory exists and is not empty
+        if self.miniconda_path.exists():
+            if any(self.miniconda_path.iterdir()):
+                logger.warning(f"Directory {self.miniconda_path} is not empty, removing it...")
+                try:
+                    shutil.rmtree(self.miniconda_path)
+                    logger.info(f"Directory {self.miniconda_path} removed")
+                except Exception as e:
+                    logger.error(f"Failed to remove directory {self.miniconda_path}: {e}")
+                    return False
+        
         installer_path = self.download_installer()
         
         try:
@@ -126,11 +135,21 @@ class MinicondaInstaller:
                 logger.info("Miniconda successfully installed")
                 return True
             else:
-                logger.error(f"Error installing Miniconda: {result.stderr}")
+                logger.error(f"Error installing Miniconda:")
+                logger.error(f"Return code: {result.returncode}")
+                if result.stdout:
+                    logger.error(f"STDOUT: {result.stdout}")
+                if result.stderr:
+                    logger.error(f"STDERR: {result.stderr}")
+                logger.error(f"Command: {' '.join(cmd)}")
                 return False
                 
         except Exception as e:
             logger.error(f"Error during Miniconda installation: {e}")
+            logger.error(f"Exception type: {type(e).__name__}")
+            logger.error(f"Command that failed: {' '.join(cmd)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return False
         finally:
             # Remove installer in any case

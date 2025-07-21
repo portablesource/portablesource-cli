@@ -11,7 +11,7 @@ import platform
 import logging
 import re
 import os
-from typing import Optional, List, Dict
+from typing import Optional, List
 from enum import Enum
 
 # Configure logging

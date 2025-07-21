@@ -4,7 +4,6 @@ PortableSource - Main Entry Point
 Emulates the behavior of a compiled .exe file
 """
 
-import os
 import sys
 import logging
 import argparse
@@ -15,7 +14,7 @@ import winreg
 # Relative imports
 from portablesource.get_gpu import GPUDetector
 from portablesource.config import ConfigManager, SERVER_DOMAIN
-from portablesource.envs_manager import EnvironmentManager, EnvironmentSpec
+from portablesource.envs_manager import EnvironmentManager
 from portablesource.repository_installer import RepositoryInstaller
 
 # Logging configuration
@@ -185,9 +184,9 @@ class PortableSourceApp:
         if not self.environment_manager:
             return
         
-        # Check Miniconda availability
-        if not self.environment_manager.ensure_miniconda():
-            logger.warning("Miniconda not found or corrupted")
+        # Only check if Miniconda is already installed, don't install it here
+        if not self.environment_manager.installer.is_installed():
+            logger.info("Miniconda not installed yet (will be installed when needed)")
             return
         
         # Check base environment integrity

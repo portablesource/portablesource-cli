@@ -7,13 +7,11 @@ This module manages configuration for GPU detection, CUDA versions, and system p
 
 SERVER_DOMAIN = "portables.dev"
 
-import os
 import json
 import logging
 from pathlib import Path
-from sqlite3.dbapi2 import version_info
 from typing import Dict, List, Optional, Any
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from enum import Enum
 from portablesource.Version import __version__ as ver
 

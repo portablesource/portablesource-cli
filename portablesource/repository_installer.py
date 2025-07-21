@@ -7,14 +7,12 @@ dependency analysis and GPU-specific package handling.
 """
 
 import os
-import sys
 import re
 import subprocess
 import logging
-import shutil
 import requests
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Set, Union
+from typing import Dict, List, Optional, Union
 from urllib.parse import urlparse
 from dataclasses import dataclass, field
 from enum import Enum
