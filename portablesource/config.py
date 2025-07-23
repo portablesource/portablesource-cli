@@ -45,11 +45,11 @@ class GPUConfig:
     memory_gb: int = 0
     recommended_backend: str = "cpu"
     supports_tensorrt: bool = False
-    conda_packages: Optional[List[str]] = None
+    packages: Optional[List[str]] = None
     
     def __post_init__(self):
-        if self.conda_packages is None:
-            self.conda_packages = []
+        if self.packages is None:
+            self.packages = []
         if self.cuda_version is None:
             self.cuda_version = CUDAVersion.CUDA_118
 
@@ -164,8 +164,8 @@ class ConfigManager:
         # Determine compute capability
         compute_capability = self._get_compute_capability(generation)
         
-        # Determine conda packages and backend based on new logic
-        conda_packages = []
+        # Determine packages and backend based on new logic
+        packages = []
         supports_tensorrt = False
         
         gpu_name_upper = gpu_name.upper()
@@ -173,13 +173,13 @@ class ConfigManager:
             # NVIDIA GPU detected with known generation
             if cuda_version:
                 # Include CUDA version in package name for proper indexing
-                conda_packages.append(f"cudatoolkit={cuda_version.value}")
-                conda_packages.append("cudnn")
+                packages.append(f"cudatoolkit={cuda_version.value}")
+                packages.append("cudnn")
                 
                 # Check if CUDA >= 12.4 and generation >= Turing for TensorRT
                 if (cuda_version in [CUDAVersion.CUDA_124, CUDAVersion.CUDA_128] and 
                     generation in [GPUGeneration.TURING, GPUGeneration.AMPERE, GPUGeneration.ADA_LOVELACE, GPUGeneration.BLACKWELL]):
-                    conda_packages.append("tensorrt")
+                    packages.append("tensorrt")
                     supports_tensorrt = True
                     backend = "cuda,tensorrt"
                 else:
@@ -201,7 +201,7 @@ class ConfigManager:
             memory_gb=memory_gb,
             recommended_backend=backend,
             supports_tensorrt=supports_tensorrt,
-            conda_packages=conda_packages
+            packages=packages
         )
         
         self.config.gpu_config = gpu_config
@@ -286,7 +286,7 @@ class ConfigManager:
                     "memory_gb": self.config.gpu_config.memory_gb,
                     "recommended_backend": self.config.gpu_config.recommended_backend,
                     "supports_tensorrt": self.config.gpu_config.supports_tensorrt,
-                    "conda_packages": self.config.gpu_config.conda_packages
+                    "packages": self.config.gpu_config.packages
                 } if self.config.gpu_config else None,
                 "environment_vars": self.config.environment_vars
             }
@@ -359,8 +359,11 @@ class ConfigManager:
         
         return config
     
+    def msvc_bt(self):
+        msvc_bt_url = "https://aka.ms/vs/17/release/vs_buildtools.exe"
+        msvc_bt_args = " --quiet --wait --norestart --nocache --add Microsoft.VisualStudio.Workload.NativeDesktop --add Microsoft.VisualStudio.Component.VC.CMake.Project --add Microsoft.VisualStudio.Component.VC.Llvm.Clang"
+        return msvc_bt_url, msvc_bt_args
 
-    
     def get_config_summary(self) -> str:
         """
         Get configuration summary
@@ -369,7 +372,7 @@ class ConfigManager:
             Configuration summary string
         """
         if self.config.gpu_config:
-            conda_packages = ", ".join(self.config.gpu_config.conda_packages) if self.config.gpu_config.conda_packages else "None"
+            packages = ", ".join(self.config.gpu_config.packages) if self.config.gpu_config.packages else "None"
             gpu_name = self.config.gpu_config.name
             gpu_generation = self.config.gpu_config.generation.value
             cuda_version = self.config.gpu_config.cuda_version.value if self.config.gpu_config.cuda_version else 'None'
@@ -378,7 +381,7 @@ class ConfigManager:
             backend = self.config.gpu_config.recommended_backend
             tensorrt_support = self.config.gpu_config.supports_tensorrt
         else:
-            conda_packages = "None"
+            packages = "None"
             gpu_name = "Not configured"
             gpu_generation = "Unknown"
             cuda_version = "None"
@@ -401,7 +404,7 @@ GPU Configuration:
   Memory: {memory_gb}GB
   Backend: {backend}
   TensorRT Support: {tensorrt_support}
-  Conda Packages: {conda_packages}
+  Packages: {packages}
 
 Install Path: {self.config.install_path}
 

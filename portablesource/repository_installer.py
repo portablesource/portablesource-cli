@@ -137,9 +137,10 @@ class ServerAPIClient:
             response = self.session.get(url, timeout=self.timeout)
             
             if response.status_code == 200:
-                plan = response.json()
-                if self._validate_installation_plan(plan):
-                    return plan
+                plan_data = response.json()
+                if plan_data.get('success') and 'installation_plan' in plan_data:
+                    # Return the installation_plan part directly
+                    return plan_data['installation_plan']
                 else:
                     logger.error(f"Invalid installation plan data received for '{name}'")
                     return None
@@ -233,7 +234,7 @@ class ServerAPIClient:
         Validate installation plan data from server
         
         Args:
-            plan: Installation plan from server
+            plan: Installation plan from server (already extracted installation_plan part)
             
         Returns:
             True if plan is valid
@@ -241,23 +242,11 @@ class ServerAPIClient:
         if not plan or not isinstance(plan, dict):
             return False
         
-        # Check for success field
-        if not plan.get('success', False):
-            return False
-        
-        # Check for installation_plan field
-        if 'installation_plan' not in plan:
-            return False
-        
-        installation_plan = plan['installation_plan']
-        if not isinstance(installation_plan, dict):
-            return False
-        
         # Check for steps field
-        if 'steps' not in installation_plan:
+        if 'steps' not in plan:
             return False
         
-        steps = installation_plan['steps']
+        steps = plan['steps']
         if not isinstance(steps, list):
             return False
         
@@ -271,7 +260,7 @@ class ServerAPIClient:
                 return False
             
             # Validate step type
-            valid_types = ['torch', 'regular', 'onnxruntime', 'insightface']
+            valid_types = ['torch', 'regular', 'onnxruntime', 'insightface', 'triton']
             if step['type'] not in valid_types:
                 return False
             
@@ -315,6 +304,7 @@ class PackageType(Enum):
     TORCH = "torch"
     ONNXRUNTIME = "onnxruntime"
     INSIGHTFACE = "insightface"
+    TRITON = "triton"
     REGULAR = "regular"
 
 
@@ -342,6 +332,7 @@ class InstallationPlan:
     torch_packages: List[PackageInfo] = field(default_factory=list)
     onnx_packages: List[PackageInfo] = field(default_factory=list)
     insightface_packages: List[PackageInfo] = field(default_factory=list)
+    triton_packages: List[PackageInfo] = field(default_factory=list)
     regular_packages: List[PackageInfo] = field(default_factory=list)
     torch_index_url: Optional[str] = None
     onnx_package_name: Optional[str] = None
@@ -354,6 +345,7 @@ class RequirementsAnalyzer:
         self.torch_packages = {"torch", "torchvision", "torchaudio", "torchtext", "torchdata"}
         self.onnx_packages = {"onnxruntime", "onnxruntime-gpu", "onnxruntime-directml", "onnxruntime-openvino"}
         self.insightface_packages = {"insightface"}
+        self.triton_packages = {"triton"}
     
     def parse_requirement_line(self, line: str) -> Optional[PackageInfo]:
         """
@@ -402,6 +394,8 @@ class RequirementsAnalyzer:
             package_type = PackageType.ONNXRUNTIME
         elif package_name in self.insightface_packages:
             package_type = PackageType.INSIGHTFACE
+        elif package_name in self.triton_packages:
+            package_type = PackageType.TRITON
         
         return PackageInfo(
             name=package_name,
@@ -468,6 +462,8 @@ class RequirementsAnalyzer:
                 plan.onnx_packages.append(package)
             elif package.package_type == PackageType.INSIGHTFACE:
                 plan.insightface_packages.append(package)
+            elif package.package_type == PackageType.TRITON:
+                plan.triton_packages.append(package)
             else:
                 plan.regular_packages.append(package)
         
@@ -691,7 +687,19 @@ class MainFileFinder:
 class RepositoryInstaller:
     """Universal repository installer with intelligent dependency handling"""
     
-    def __init__(self, config_manager: Optional[ConfigManager] = None, server_url: str = f"http://{SERVER_DOMAIN}"):
+    def __init__(self, install_path: Optional[Union[str, Path]] = None, config_manager: Optional[ConfigManager] = None, server_url: str = f"http://{SERVER_DOMAIN}"):
+        # Set base_path from install_path parameter
+        if install_path:
+            if isinstance(install_path, str):
+                self.base_path = Path(install_path)
+            else:
+                self.base_path = install_path
+        else:
+            self.base_path = Path.cwd()  # Default to current directory
+        
+        # Type annotation for the attribute
+        self.base_path: Path
+            
         self.config_manager = config_manager or ConfigManager()
         self.analyzer = RequirementsAnalyzer()
         
@@ -757,9 +765,14 @@ class RepositoryInstaller:
                 logger.error("install_path must be a string or Path object")
                 return False
             
-            # Determine input type and route to appropriate handler
+            # Set current repository name for unified methods
             is_url = self._is_repository_url(repo_url_or_name)
+            if is_url:
+                self._current_repo_name = self._extract_repo_name(repo_url_or_name)
+            else:
+                self._current_repo_name = repo_url_or_name.lower()
             
+            # Determine input type and route to appropriate handler
             if is_url:
                 # Handle URL installation: extract name -> search server plan -> install dependencies or clone
                 return self._handle_url_installation(repo_url_or_name, install_path)
@@ -787,9 +800,10 @@ class RepositoryInstaller:
             repo_name = self._extract_repo_name(repo_url)
             
             # Try to get installation plan from server
-            server_plan = self.server_client.get_installation_plan(repo_name)
+            if repo_name is not None:
+                server_plan = self.server_client.get_installation_plan(repo_name)
             
-            if server_plan:
+            if server_plan and repo_name is not None:
                 # Install only dependencies from server plan without cloning
                 success = self._install_from_server_plan_only(server_plan, repo_name, install_path)
                 if success:
@@ -902,8 +916,9 @@ class RepositoryInstaller:
             repo_url = None
         
         # Try server API first
-        server_info = self.server_client.get_repository_info(repo_name)
-        if server_info:
+        if repo_name is not None:
+            server_info = self.server_client.get_repository_info(repo_name)
+        if server_info and repo_name is not None:
             # Handle new server response format
             if 'success' in server_info and 'repository' in server_info:
                 repository = server_info['repository']
@@ -927,7 +942,7 @@ class RepositoryInstaller:
             return self.fallback_repositories[repo_name]
         
         # If we have a URL but no server info, create basic info
-        if repo_url:
+        if repo_url and repo_name is not None:
             return {
                 "url": repo_url,
                 "main_file": None,  # Will be determined later
@@ -969,13 +984,14 @@ class RepositoryInstaller:
         try:
             # Create basic repo info for cloning
             repo_name = self._extract_repo_name(repo_url)
-            repo_info = {
-                "url": repo_url,
-                "main_file": None,  # Will be determined later
-                "special_setup": self._get_special_setup(repo_name)
-            }
+            if repo_name is not None:
+                repo_info = {
+                    "url": repo_url,
+                    "main_file": None,  # Will be determined later
+                    "special_setup": self._get_special_setup(repo_name)
+                }
             
-            repo_path = install_path / repo_name
+                repo_path = install_path / repo_name
             
             # Clone or update repository
             if not self._clone_or_update_repository(repo_info, repo_path):
@@ -993,7 +1009,8 @@ class RepositoryInstaller:
             self._generate_startup_script(repo_path, repo_info)
             
             # Send download statistics to server
-            self._send_download_stats(repo_name)
+            if repo_name is not None:
+                self._send_download_stats(repo_name)
 
             return True
             
@@ -1006,7 +1023,7 @@ class RepositoryInstaller:
         Validate server installation plan data
         
         Args:
-            plan: Installation plan from server
+            plan: Installation plan from server (already extracted installation_plan part)
             
         Returns:
             True if plan is valid
@@ -1014,23 +1031,11 @@ class RepositoryInstaller:
         if not plan or not isinstance(plan, dict):
             return False
         
-        # Check for success field
-        if not plan.get('success', False):
-            return False
-        
-        # Check for installation_plan field
-        if 'installation_plan' not in plan:
-            return False
-        
-        installation_plan = plan['installation_plan']
-        if not isinstance(installation_plan, dict):
-            return False
-        
         # Check for steps field
-        if 'steps' not in installation_plan:
+        if 'steps' not in plan:
             return False
         
-        steps = installation_plan['steps']
+        steps = plan['steps']
         if not isinstance(steps, list):
             return False
         
@@ -1289,11 +1294,11 @@ class RepositoryInstaller:
          return False
     
     def _get_git_executable(self) -> str:
-        """Get git executable path from conda environment"""
+        """Get git executable path from micromamba environment"""
         if self.config_manager.config.install_path:
             install_path = Path(self.config_manager.config.install_path)
-            conda_env_path = install_path / "miniconda" / "envs" / "portablesource"
-            git_path = conda_env_path / "Scripts" / "git.exe"
+            ps_env_path = install_path / "ps_env"
+            git_path = ps_env_path / "Scripts" / "git.exe"
             if git_path.exists():
                 return str(git_path)
         
@@ -1303,11 +1308,11 @@ class RepositoryInstaller:
 
     
     def _get_python_executable(self) -> str:
-        """Get Python executable path from conda environment"""
+        """Get Python executable path from micromamba environment"""
         if self.config_manager.config.install_path:
             install_path = Path(self.config_manager.config.install_path)
-            conda_env_path = install_path / "miniconda" / "envs" / "portablesource"
-            python_path = conda_env_path / "python.exe"
+            ps_env_path = install_path / "ps_env"
+            python_path = ps_env_path / "python.exe"
             if python_path.exists():
                 return str(python_path)
         
@@ -1369,18 +1374,7 @@ class RepositoryInstaller:
             logger.error(f"Error installing uv: {e}")
             return False
     
-    def _get_installation_plan_from_server(self, repo_name: str) -> Optional[Dict]:
-        """Get installation plan from server for the repository"""
-        try:
-            if not self.server_client.is_server_available():
-                return None
-            
-            plan = self.server_client.get_installation_plan(repo_name)
-            return plan
-                
-        except Exception as e:
-            logger.error(f"Failed to get installation plan from server for {repo_name}: {e}")
-            return None
+
     
     def _install_dependencies(self, repo_path: Path) -> bool:
         """Install dependencies in venv with new architecture - try server first, then local requirements"""
@@ -1393,7 +1387,7 @@ class RepositoryInstaller:
                 return False
             
             # Try to get installation plan from server first
-            server_plan = self._get_installation_plan_from_server(repo_name)
+            server_plan = self.server_client.get_installation_plan(repo_name)
             if server_plan:
                 if self._execute_server_installation_plan(server_plan, repo_path, repo_name):
                     return True
@@ -1443,7 +1437,7 @@ class RepositoryInstaller:
                 import shutil
                 shutil.rmtree(venv_path)
             
-            # Create new venv using conda python
+            # Create new venv using micromamba python
             python_exe = self._get_python_executable()
             
             result = subprocess.run([
@@ -1503,19 +1497,16 @@ class RepositoryInstaller:
             # Install InsightFace packages with special handling
             if plan.insightface_packages:
                 for package in plan.insightface_packages:
-                    self._handle_insightface_package(package, pip_exe)
+                    self._handle_insightface_package(package)
             
-            # Handle Triton package separately
-            triton_packages = [p for p in plan.regular_packages if 'triton' in p.name]
-            regular_packages_no_triton = [p for p in plan.regular_packages if 'triton' not in p.name]
-
-            if triton_packages:
-                logger.info("Handling Triton package...")
-                for package in triton_packages:
-                    self._handle_triton_package(package, pip_exe)
+            # Install Triton packages with special handling
+            if plan.triton_packages:
+                logger.info("Handling Triton packages...")
+                for package in plan.triton_packages:
+                    self._handle_triton_package(package)
 
             # Install regular packages with uv
-            if regular_packages_no_triton:
+            if plan.regular_packages:
                 # Create temporary requirements file for regular packages
                 temp_requirements = requirements_path.parent / "requirements_regular_temp.txt"
                 with open(temp_requirements, 'w', encoding='utf-8') as f:
@@ -1542,13 +1533,12 @@ class RepositoryInstaller:
     def _install_packages_with_pip_only(self, repo_name: str, requirements_path: Path) -> bool:
         """Fallback method to install all packages with pip only"""
         try:
-            pip_exe = self._get_pip_executable(repo_name)
-            
-            self._run_pip_with_progress([
-                pip_exe, "install", "-r", str(requirements_path)
-            ], f"Installing packages for {repo_name}")
-            
-            return True
+            # Use unified method with requirements file
+            return self._install_package_with_progress(
+                ["-r", str(requirements_path)], 
+                f"Installing packages for {repo_name}", 
+                repo_name
+            )
                 
         except Exception as e:
             logger.error(f"Error installing packages with pip: {e}")
@@ -1567,8 +1557,7 @@ class RepositoryInstaller:
             pip_exe = self._get_pip_executable(repo_name)
             
             # Execute installation steps in order
-            installation_plan = server_plan.get('installation_plan', {})
-            steps = installation_plan.get('steps', [])
+            steps = server_plan.get('steps', [])
             if not steps:
                 logger.warning(f"No installation steps found in server plan for {repo_name}")
                 return True  # Empty plan is considered successful
@@ -1598,7 +1587,7 @@ class RepositoryInstaller:
                 
                 # Determine which tool to use based on step type
                 # First try uv, then fallback to pip for regular packages
-                if step_type in ['regular', 'onnxruntime', 'insightface']:
+                if step_type in ['regular', 'onnxruntime', 'insightface', 'triton']:
                     # Always try to install uv for these packages (don't cache the result)
                     uv_available = self._install_uv_in_venv(repo_name)
                     
@@ -1637,6 +1626,10 @@ class RepositoryInstaller:
                                 pkg_str = "https://huggingface.co/hanamizuki-ai/pypi-wheels/resolve/main/insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl"
                                 install_cmd.append(pkg_str)
                                 continue
+                            # Special handling for Triton packages
+                            elif step_type == 'triton':
+                                # Triton packages are handled with pip directly
+                                pass
                             
                             if pkg_version:
                                 if pkg_version.startswith('>=') or pkg_version.startswith('=='):
@@ -1688,7 +1681,7 @@ class RepositoryInstaller:
                     logger.warning(f"No packages to install for step {step_index}, skipping. Command would be: {install_cmd}")
                     continue
                 
-                if step_type in ['regular', 'onnxruntime', 'insightface'] and use_uv_first:
+                if step_type in ['regular', 'onnxruntime', 'insightface', 'triton'] and use_uv_first:
                     # Try uv first, then fallback to pip if it fails
                     try:
                         self._run_uv_with_progress(install_cmd, step_description)
@@ -1733,19 +1726,18 @@ class RepositoryInstaller:
     def _execute_installation_plan(self, plan: InstallationPlan, original_requirements: Path, repo_name: str) -> bool:
         """Execute the installation plan using base Python"""
         try:
-            pip_exe = self._get_pip_executable(repo_name)
-            
             # Install PyTorch packages with specific index
             if plan.torch_packages:
-                torch_cmd = [pip_exe, "install"]
+                torch_packages = [str(package) for package in plan.torch_packages]
+                repo_name = getattr(self, '_current_repo_name', 'default')
                 
-                for package in plan.torch_packages:
-                    torch_cmd.append(str(package))
-                
-                if plan.torch_index_url:
-                    torch_cmd.extend(["--index-url", plan.torch_index_url])
-                
-                self._run_pip_with_progress(torch_cmd, "Installing PyTorch packages")
+                if plan.torch_index_url is not None:
+                    self._install_package_with_progress(
+                        torch_packages, 
+                        "Installing PyTorch packages", 
+                        repo_name, 
+                        index_url=plan.torch_index_url
+                    )
             
             # Install ONNX Runtime packages with GPU auto-detection for fallback
             if plan.onnx_packages:
@@ -1781,46 +1773,34 @@ class RepositoryInstaller:
                         else:
                             package_str = "onnxruntime-directml"
 
-                    self._run_pip_with_progress([pip_exe, "install", package_str], f"Installing ONNX package: {package_str}")
+                    repo_name = getattr(self, '_current_repo_name', 'default')
+                    self._install_package_with_progress([package_str], f"Installing ONNX package: {package_str}", repo_name)
             
             # Install InsightFace packages (if any)
             if plan.insightface_packages:
                 for package in plan.insightface_packages:
-                    self._handle_insightface_package(package, pip_exe)
+                    self._handle_insightface_package(package)
             
-            # Install uv in venv for regular packages
+            # Install Triton packages (if any)
+            if plan.triton_packages:
+                for package in plan.triton_packages:
+                    self._handle_triton_package(package)
+            
+            # Install regular packages using unified method
             if plan.regular_packages:
-                if not self._install_uv_in_venv(repo_name):
-                    logger.warning("Failed to install uv, using pip for regular packages")
-                    # Fallback to pip for regular packages
-                    modified_requirements = original_requirements.parent / "requirements_modified.txt"
-                    with open(modified_requirements, 'w', encoding='utf-8') as f:
-                        for package in plan.regular_packages:
-                            f.write(package.original_line + '\n')
-                    
-                    if modified_requirements.stat().st_size > 0:
-                        self._run_pip_with_progress([pip_exe, "install", "-r", str(modified_requirements)], "Installing regular packages")
-                    
-                    try:
-                        modified_requirements.unlink()
-                    except Exception:
-                        pass
-                else:
-                    # Use uv for regular packages
-                    uv_cmd = self._get_uv_executable(repo_name)
-                    modified_requirements = original_requirements.parent / "requirements_modified.txt"
-                    with open(modified_requirements, 'w', encoding='utf-8') as f:
-                        for package in plan.regular_packages:
-                            f.write(package.original_line + '\n')
-                    
-                    if modified_requirements.stat().st_size > 0:
-                        uv_install_cmd = uv_cmd + ["pip", "install", "-r", str(modified_requirements)]
-                        self._run_uv_with_progress(uv_install_cmd, "Installing regular packages with uv")
-                    
-                    try:
-                        modified_requirements.unlink()
-                    except Exception:
-                        pass
+                modified_requirements = original_requirements.parent / "requirements_modified.txt"
+                with open(modified_requirements, 'w', encoding='utf-8') as f:
+                    for package in plan.regular_packages:
+                        f.write(package.original_line + '\n')
+                
+                if modified_requirements.stat().st_size > 0:
+                    repo_name = getattr(self, '_current_repo_name', 'default')
+                    self._install_package_with_progress(["-r", str(modified_requirements)], "Installing regular packages", repo_name)
+                
+                try:
+                    modified_requirements.unlink()
+                except Exception:
+                    pass
             
             return True
             
@@ -1838,7 +1818,7 @@ class RepositoryInstaller:
         models_dir.mkdir(exist_ok=True)
     
     def _generate_startup_script(self, repo_path: Path, repo_info: Dict):
-        """Generate startup script with dual activation (conda + venv)"""
+        """Generate startup script with dual activation (micromamba + venv)"""
         try:
             repo_name = repo_path.name.lower()
             
@@ -1863,7 +1843,8 @@ class RepositoryInstaller:
                 return False
             
             install_path = Path(self.config_manager.config.install_path)
-            conda_activate = install_path / "miniconda" / "Scripts" / "activate.bat"
+            micromamba_exe = install_path / "micromamba" / "micromamba.exe"
+            ps_env_path = install_path / "ps_env"
             venv_activate = install_path / "envs" / repo_name / "Scripts" / "activate.bat"
             
             # Get program args from repo info
@@ -1882,8 +1863,8 @@ set USERPROFILE={tmp_path}
 set TEMP={tmp_path}
 set TMP={tmp_path}
 
-call "{conda_activate}"
-call conda activate portablesource
+call "{micromamba_exe}" shell hook -s cmd.exe > nul
+call micromamba activate "{ps_env_path}"
 call "{venv_activate}"
 cls
 python {main_file} {program_args}
@@ -2079,8 +2060,7 @@ pause
             True if installation successful
         """
         try:
-            installation_plan = server_plan.get('installation_plan', {})
-            steps = installation_plan.get('steps', [])
+            steps = server_plan.get('steps', [])
             pip_exe = self._get_pip_executable(repo_name)
             
             for step in steps:
@@ -2091,13 +2071,15 @@ pause
                     continue
                 
                 if step_type == 'torch':
-                    # Install PyTorch packages with pip and special index URL
+                    # Install PyTorch packages with special index URL
                     torch_index_url = server_plan.get('torch_index_url') or self._get_default_torch_index_url()
-                    torch_cmd = [pip_exe, "install"] + packages
-                    if torch_index_url:
-                        torch_cmd.extend(["--index-url", torch_index_url])
                     
-                    self._run_pip_with_progress(torch_cmd, f"Installing PyTorch packages: {', '.join(packages)}")
+                    self._install_package_with_progress(
+                        packages, 
+                        f"Installing PyTorch packages: {', '.join(packages)}", 
+                        repo_name, 
+                        index_url=torch_index_url
+                    )
                 
                 elif step_type == 'onnxruntime':
                     # Install ONNX Runtime with appropriate package name
@@ -2116,17 +2098,27 @@ pause
                         else:
                             onnx_packages.append(package if isinstance(package, str) else package.get('package_name', str(package)))
                     
-                    self._run_pip_with_progress([pip_exe, "install"] + onnx_packages, f"Installing ONNX packages: {', '.join(onnx_packages)}")
+                    self._install_package_with_progress(onnx_packages, f"Installing ONNX packages: {', '.join(onnx_packages)}", repo_name)
+                
+                elif step_type == 'triton':
+                    # Install Triton packages
+                    triton_packages = []
+                    for package in packages:
+                        package_name = package if isinstance(package, str) else package.get('package_name', str(package))
+                        triton_packages.append(package_name)
+                    
+                    if triton_packages:
+                        self._install_package_with_progress(triton_packages, f"Installing Triton packages: {', '.join(triton_packages)}", repo_name)
                 
                 else:  # regular and insightface packages
-                    # Install all other packages with pip
+                    # Install all other packages
                     regular_packages = []
                     for package in packages:
                         package_name = package if isinstance(package, str) else package.get('package_name', str(package))
                         regular_packages.append(package_name)
                     
                     if regular_packages:
-                        self._run_pip_with_progress([pip_exe, "install"] + regular_packages, f"Installing packages: {', '.join(regular_packages)}")
+                        self._install_package_with_progress(regular_packages, f"Installing packages: {', '.join(regular_packages)}", repo_name)
             
             return True
             
@@ -2161,7 +2153,7 @@ pause
             logger.warning(f"Error getting default ONNX package: {e}")
             return "onnxruntime"
     
-    def _handle_insightface_package_from_name(self, package_name: str, pip_exe: str):
+    def _handle_insightface_package_from_name(self, package_name: str):
         """Handle InsightFace package installation from package name"""
         try:
             # Parse version if present
@@ -2180,52 +2172,240 @@ pause
             )
             
             # Use existing InsightFace handling logic
-            self._handle_insightface_package(temp_package, pip_exe)
+            self._handle_insightface_package(temp_package)
             
         except Exception as e:
             logger.error(f"Error handling InsightFace package {package_name}: {e}")
-            # Fallback to simple pip install
-            self._run_pip_with_progress([pip_exe, "install", package_name], f"Installing InsightFace package: {package_name}")
+            # Fallback to unified installation method
+            repo_name = getattr(self, '_current_repo_name', 'default')
+            self._install_package_with_progress([package_name], f"Installing InsightFace package: {package_name}", repo_name)
     
-    def _handle_insightface_package(self, package: PackageInfo, pip_exe: str):
+    def _handle_insightface_package(self, package: PackageInfo):
         """Handle InsightFace package installation with special requirements"""
         try:
             # InsightFace often requires specific versions and dependencies
             package_str = str(package)
             
-            # Install InsightFace with pip
-            self._run_pip_with_progress([pip_exe, "install", package_str], f"Installing InsightFace package: {package_str}")
+            # Use unified installation method
+            repo_name = getattr(self, '_current_repo_name', 'default')
+            success = self._install_package_with_progress([package_str], f"Installing InsightFace package: {package_str}", repo_name)
+            
+            if not success:
+                raise Exception(f"Failed to install InsightFace package: {package_str}")
             
         except Exception as e:
             logger.error(f"Error installing InsightFace package {package}: {e}")
             raise
     
-    def _handle_triton_package(self, package: PackageInfo, pip_exe: str):
+    def _install_package_with_progress(self, packages: list, description: str, repo_name: str, index_url: Optional[str] = None, install_flags: Optional[list] = None) -> bool:
+        """Unified package installation method that tries uv first, then falls back to pip
+        
+        Args:
+            packages: List of package names/specs to install
+            description: Description for progress display
+            repo_name: Repository name for venv context
+            index_url: Optional index URL for package installation
+            install_flags: Optional additional flags for installation
+            
+        Returns:
+            True if installation successful, False otherwise
+        """
+        try:
+            if not packages:
+                logger.warning(f"No packages provided for installation: {description}")
+                return True
+            
+            # Check if uv is available in the virtual environment
+            uv_available = self._install_uv_in_venv(repo_name)
+            
+            if uv_available:
+                # Use uv for installation
+                uv_cmd = self._get_uv_executable(repo_name)
+                install_cmd = uv_cmd + ["pip", "install"] + packages
+                
+                if index_url:
+                    install_cmd.extend(["--index-url", index_url])
+                
+                if install_flags:
+                    install_cmd.extend(install_flags)
+                
+                try:
+                    self._run_uv_with_progress(install_cmd, description)
+                    return True
+                except subprocess.CalledProcessError as e:
+                    logger.warning(f"UV installation failed, trying pip fallback: {e}")
+                    # Fall through to pip fallback
+            
+            # Use pip as fallback or primary method
+            pip_exe = self._get_pip_executable(repo_name)
+            install_cmd = [pip_exe, "install"] + packages
+            
+            if index_url:
+                install_cmd.extend(["--index-url", index_url])
+            
+            if install_flags:
+                install_cmd.extend(install_flags)
+            
+            self._run_pip_with_progress(install_cmd, description)
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error during package installation ({description}): {e}")
+            return False
+    
+    def _install_package(self, packages: list, repo_name: str, index_url: Optional[str] = None, install_flags: Optional[list] = None) -> bool:
+        """Unified package installation method without progress display
+        
+        Args:
+            packages: List of package names/specs to install
+            repo_name: Repository name for venv context
+            index_url: Optional index URL for package installation
+            install_flags: Optional additional flags for installation
+            
+        Returns:
+            True if installation successful, False otherwise
+        """
+        try:
+            if not packages:
+                logger.warning("No packages provided for installation")
+                return True
+            
+            # Check if uv is available in the virtual environment
+            uv_available = self._install_uv_in_venv(repo_name)
+            
+            if uv_available:
+                # Use uv for installation
+                uv_cmd = self._get_uv_executable(repo_name)
+                install_cmd = uv_cmd + ["pip", "install"] + packages
+                
+                if index_url:
+                    install_cmd.extend(["--index-url", index_url])
+                
+                if install_flags:
+                    install_cmd.extend(install_flags)
+                
+                try:
+                    subprocess.run(install_cmd, check=True, capture_output=True, text=True)
+                    return True
+                except subprocess.CalledProcessError as e:
+                    logger.warning(f"UV installation failed, trying pip fallback: {e}")
+                    # Fall through to pip fallback
+            
+            # Use pip as fallback or primary method
+            pip_exe = self._get_pip_executable(repo_name)
+            install_cmd = [pip_exe, "install"] + packages
+            
+            if index_url:
+                install_cmd.extend(["--index-url", index_url])
+            
+            if install_flags:
+                install_cmd.extend(install_flags)
+            
+            subprocess.run(install_cmd, check=True, capture_output=True, text=True)
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error during package installation: {e}")
+            return False
+    
+    def _handle_triton_package(self, package: PackageInfo):
         """Handle Triton package installation with special requirements"""
         try:
             # Triton has specific installation requirements
             package_str = str(package)
             
-            # Install Triton with pip
-            self._run_pip_with_progress([pip_exe, "install", package_str], f"Installing Triton package: {package_str}")
+            # Use unified installation method
+            repo_name = getattr(self, '_current_repo_name', 'default')
+            success = self._install_package_with_progress([package_str], f"Installing Triton package: {package_str}", repo_name)
+            
+            if not success:
+                raise Exception(f"Failed to install Triton package: {package_str}")
             
         except Exception as e:
             logger.error(f"Error installing Triton package {package}: {e}")
             raise
 
 
-# Main execution for testing
-#if __name__ == "__main__":
-    #logging.basicConfig(level=logging.INFO)
     
-    # Test the installer
-    #installer = RepositoryInstaller()
+    def update_repository(self, repo_name: str) -> bool:
+        """Update an existing repository.
+        
+        Args:
+            repo_name: Name of the repository to update
+            
+        Returns:
+            True if update successful, False otherwise
+        """
+        try:
+            logger.info(f"Updating repository: {repo_name}")
+            
+            repos_path = self.base_path / "repos"
+            repo_path = repos_path / repo_name
+            
+            if not repo_path.exists():
+                logger.error(f"Repository {repo_name} not found at {repo_path}")
+                return False
+            
+            # Set current repo name for context
+            self._current_repo_name = repo_name
+            
+            # Update the repository using git pull
+            try:
+                result = subprocess.run(
+                    ["git", "pull"],
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                logger.info(f"Git pull output: {result.stdout}")
+                
+                # Reinstall dependencies after update
+                if not self._install_dependencies(repo_path):
+                    logger.warning(f"Failed to reinstall dependencies for {repo_name}")
+                
+                logger.info(f"✅ Repository {repo_name} updated successfully")
+                return True
+                
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Git pull failed for {repo_name}: {e.stderr}")
+                return False
+            
+        except Exception as e:
+            logger.error(f"Error updating repository {repo_name}: {e}")
+            return False
     
-    # Test with FaceFusion
-    #print("Testing repository installer with FaceFusion...")
-    #success = installer.install_repository("facefusion")
-    
-    #if success:
-        #print("✅ Installation successful!")
-    #else:
-        #print("❌ Installation failed!")
+    def list_installed_repositories(self) -> list:
+        """Get list of installed repositories.
+        
+        Returns:
+            List of dictionaries with repository information
+        """
+        repos = []
+        repos_path = self.base_path / "repos"
+        
+        if not repos_path.exists():
+            logger.info("No repositories directory found")
+            return repos
+        
+        for item in repos_path.iterdir():
+            item: Path  # Type annotation for PyRight
+            if item.is_dir() and not item.name.startswith('.'):
+                # Check if launcher exists
+                bat_file = item / f"start_{item.name}.bat"
+                sh_file = item / f"start_{item.name}.sh"
+                has_launcher = bat_file.exists() or sh_file.exists()
+                
+                repo_info = {
+                    'name': item.name,
+                    'path': str(item),
+                    'has_launcher': has_launcher
+                }
+                repos.append(repo_info)
+        
+        logger.info(f"Found repositories: {len(repos)}")
+        for repo in repos:
+            launcher_status = "✅" if repo['has_launcher'] else "❌"
+            logger.info(f"  - {repo['name']} {launcher_status}")
+        
+        return repos

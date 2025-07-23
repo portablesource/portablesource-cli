@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
 Environment Manager for PortableSource
-Managing environments based on Miniconda
+Managing micromamba and base ps_env environment only
 """
 
 import os
 import logging
 import subprocess
-import shutil
+import urllib.request
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 
 from portablesource.get_gpu import GPUDetector, GPUType
@@ -17,637 +17,249 @@ from portablesource.get_gpu import GPUDetector, GPUType
 logger = logging.getLogger(__name__)
 
 @dataclass
-class EnvironmentSpec:
-    """Environment specification"""
-    name: str
+class BaseEnvironmentSpec:
+    """Base environment specification for ps_env"""
     python_version: str = "3.11"
-    packages: Optional[List[str]] = None
-    pip_packages: Optional[List[str]] = None
     cuda_version: Optional[str] = None
     
-    def __post_init__(self):
-        if self.packages is None:
-            self.packages = []
-        if self.pip_packages is None:
-            self.pip_packages = []
+    def get_packages(self) -> List[str]:
+        """Get base packages for ps_env"""
+        packages = ["git", "ffmpeg", "uv", f"python=={self.python_version}"]
+        
+        if self.cuda_version:
+            packages.extend([
+                f"cuda-toolkit={self.cuda_version}",
+                "cudnn"
+            ])
+        
+        return packages
 
-class MinicondaInstaller:
-    """Miniconda installer"""
+class MicromambaManager:
+    """Micromamba installer and base environment manager"""
     
     def __init__(self, install_path: Path):
         self.install_path = install_path
-        self.miniconda_path = install_path / "miniconda"
-        self.conda_exe = self.miniconda_path / "Scripts" / "conda.exe" if os.name == 'nt' else self.miniconda_path / "bin" / "conda"
-        
-    def is_installed(self) -> bool:
-        """Checks if Miniconda is installed"""
-        return self.conda_exe.exists()
-    
+        self.micromamba_path = install_path / "micromamba"
+        self.micromamba_exe = self.micromamba_path / "micromamba.exe" if os.name == 'nt' else self.micromamba_path / "micromamba"
+        self.ps_env_path = install_path / "ps_env"  # Main environment path
+        self.gpu_detector = GPUDetector()
+
     def get_installer_url(self) -> str:
-        """Gets URL for downloading Miniconda"""
+        """Gets URL for downloading Micromamba"""
         if os.name == 'nt':
-            # Windows
-            return "https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe"
+            return "https://github.com/mamba-org/micromamba-releases/releases/download/2.3.0-1/micromamba-win-64"
         else:
-            # Linux/macOS
-            return "https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh"
-    
-    def download_installer(self) -> Path:
-        """Downloads Miniconda installer"""
-        import urllib.request
-        try:
-            from tqdm import tqdm
-        except ImportError:
-            logger.warning("tqdm not installed, downloading without progress bar")
-            tqdm = None
-        
+            return "https://github.com/mamba-org/micromamba-releases/releases/download/2.3.0-1/micromamba-linux-64"
+
+    def ensure_micromamba_installed(self) -> bool:
+        """Ensures that micromamba is installed"""
+        if self.micromamba_exe.exists():
+            logger.info("Micromamba already installed.")
+            return True
+
+        logger.info("Micromamba not found, downloading...")
+        self.micromamba_path.mkdir(exist_ok=True)
         url = self.get_installer_url()
-        filename = Path(url).name
-        installer_path = self.install_path / filename
-        
-        logger.info(f"Downloading Miniconda from {url}")
         
         try:
-            if tqdm:
-                # Download with progress bar
+            # Download with progress bar if tqdm is available
+            try:
+                from tqdm import tqdm
                 response = urllib.request.urlopen(url)
                 total_size = int(response.headers.get('Content-Length', 0))
                 
-                with open(installer_path, 'wb') as f:
-                    with tqdm(total=total_size, unit='B', unit_scale=True, desc="Downloading Miniconda") as pbar:
+                with open(self.micromamba_exe, 'wb') as f:
+                    with tqdm(total=total_size, unit='B', unit_scale=True, desc="Downloading Micromamba") as pbar:
                         while True:
                             chunk = response.read(8192)
                             if not chunk:
                                 break
                             f.write(chunk)
                             pbar.update(len(chunk))
-            else:
-                # Regular download without progress bar
-                urllib.request.urlretrieve(url, installer_path)
-            
-            logger.info(f"Miniconda downloaded: {installer_path}")
-            return installer_path
-        except Exception as e:
-            logger.error(f"Error downloading Miniconda: {e}")
-            raise
-    
-    def install(self) -> bool:
-        """Installs Miniconda"""
-        if self.is_installed():
-            logger.info("Miniconda already installed")
-            return True
-        
-        # Check if miniconda directory exists and is not empty
-        if self.miniconda_path.exists():
-            if any(self.miniconda_path.iterdir()):
-                logger.warning(f"Directory {self.miniconda_path} is not empty, removing it...")
-                try:
-                    shutil.rmtree(self.miniconda_path)
-                    logger.info(f"Directory {self.miniconda_path} removed")
-                except Exception as e:
-                    logger.error(f"Failed to remove directory {self.miniconda_path}: {e}")
-                    return False
-        
-        installer_path = self.download_installer()
-        
-        try:
-            if os.name == 'nt':
-                # Windows
-                cmd = [
-                    str(installer_path),
-                    "/InstallationType=JustMe",
-                    "/S",  # Silent installation
-                    f"/D={self.miniconda_path}",
-                ]
-            else:
-                # Linux/macOS
-                cmd = [
-                    "bash",
-                    str(installer_path),
-                    "-b",  # Batch mode
-                    "-p", str(self.miniconda_path),
-                ]
-            
-            logger.info(f"Installing Miniconda to {self.miniconda_path}")
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            
-            if result.returncode == 0:
-                logger.info("Miniconda successfully installed")
-                return True
-            else:
-                logger.error(f"Error installing Miniconda:")
-                logger.error(f"Return code: {result.returncode}")
-                if result.stdout:
-                    logger.error(f"STDOUT: {result.stdout}")
-                if result.stderr:
-                    logger.error(f"STDERR: {result.stderr}")
-                logger.error(f"Command: {' '.join(cmd)}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error during Miniconda installation: {e}")
-            logger.error(f"Exception type: {type(e).__name__}")
-            logger.error(f"Command that failed: {' '.join(cmd)}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            return False
-        finally:
-            # Remove installer in any case
-            try:
-                if installer_path.exists():
-                    os.remove(installer_path)
-                    logger.info(f"Installer removed: {installer_path}")
-            except Exception as e:
-                logger.warning(f"Could not remove installer {installer_path}: {e}")
+            except ImportError:
+                logger.warning("tqdm not installed, downloading without progress bar")
+                urllib.request.urlretrieve(url, self.micromamba_exe)
 
+            logger.info(f"Micromamba downloaded to {self.micromamba_exe}")
             
-class EnvironmentManager:
-    """Conda environment manager"""
-    
-    def __init__(self, install_path: Path):
-        self.install_path = install_path
-        self.miniconda_path = install_path / "miniconda"
-        self.envs_path = install_path / "envs"
-        self.repos_path = install_path / "repos"
-        self.conda_exe = self.miniconda_path / "Scripts" / "conda.exe" if os.name == 'nt' else self.miniconda_path / "bin" / "conda"
-        # Python executable from base conda environment
+            # On non-windows, make it executable
+            if os.name != 'nt':
+                os.chmod(self.micromamba_exe, 0o755)
+
+            return True
+        except Exception as e:
+            logger.error(f"Error downloading Micromamba: {e}")
+            return False
+
+    def run_micromamba_command(self, command: List[str], cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
+        """Runs a micromamba command"""
+        full_cmd = [str(self.micromamba_exe)] + command
+        logger.info(f"Running command: {' '.join(full_cmd)}")
+        
+        return subprocess.run(
+            full_cmd, 
+            capture_output=True, 
+            text=True, 
+            encoding='utf-8',
+            cwd=str(cwd) if cwd else None
+        )
+
+    def create_base_environment(self, cuda_version: Optional[str] = None) -> bool:
+        """Creates the main ps_env environment with micromamba"""
+        if not self.ensure_micromamba_installed():
+            return False
+
+        if self.ps_env_path.exists():
+            logger.info("Base environment ps_env already exists.")
+            return True
+
+        logger.info("Creating base environment ps_env...")
+        
+        # Auto-detect CUDA version if not provided
+        if not cuda_version:
+            gpu_info = self.gpu_detector.get_gpu_info()
+            if gpu_info and gpu_info[0].gpu_type == GPUType.NVIDIA:
+                cuda_version = gpu_info[0].cuda_version.value if gpu_info[0].cuda_version else None
+        
+        # Create environment spec
+        env_spec = BaseEnvironmentSpec(cuda_version=cuda_version)
+        packages = env_spec.get_packages()
+        
+        # Build create command: {mamba_path} create -p ./ps_env -c nvidia -c conda-forge cuda-toolkit={cuda_ver} cudnn git ffmpeg uv python==3.11
+        create_cmd = [
+            "create",
+            "-p", str(self.ps_env_path),
+            "-c", "nvidia",
+            "-c", "conda-forge", 
+            "-y"
+        ] + packages
+
+        result = self.run_micromamba_command(create_cmd)
+
+        if result.returncode != 0:
+            logger.error("Error creating base environment ps_env:")
+            logger.error(f"STDOUT: {result.stdout}")
+            logger.error(f"STDERR: {result.stderr}")
+            return False
+
+        logger.info("✅ Base environment ps_env created successfully.")
+        return True
+
+    def get_activation_commands(self) -> List[str]:
+        """Get the activation commands for micromamba shell hook (for batch files)"""
         if os.name == 'nt':
-            self.python_exe = self.miniconda_path / "envs" / "portablesource" / "python.exe"
+            return [
+                f'call "{self.micromamba_exe}" shell hook -s cmd.exe > nul',
+                f'call micromamba activate "{self.ps_env_path}"'
+            ]
         else:
-            self.python_exe = self.miniconda_path / "envs" / "portablesource" / "bin" / "python"
-        self.installer = MinicondaInstaller(install_path)
-        self.gpu_detector = GPUDetector()
-        
-    def ensure_miniconda(self) -> bool:
-        """Ensures that Miniconda is installed"""
-        if not self.installer.is_installed():
-            return self.installer.install()
-        return True
-    
-    def accept_conda_terms_of_service(self) -> bool:
-        """Accepts Terms of Service for conda channels"""
-        channels = [
-            "https://repo.anaconda.com/pkgs/main",
-            "https://repo.anaconda.com/pkgs/r", 
-            "https://repo.anaconda.com/pkgs/msys2"
-        ]
-        
-        logger.info("Accepting Terms of Service for conda channels...")
-        
-        for channel in channels:
-            try:
-                cmd = ["tos", "accept", "--override-channels", "--channel", channel]
-                result = self.run_conda_command(cmd)
-                
-                if result.returncode == 0:
-                    logger.info(f"✅ Terms of Service accepted for {channel}")
-                else:
-                    logger.warning(f"⚠️ Failed to accept ToS for {channel}: {result.stderr}")
-                    
-            except Exception as e:
-                logger.warning(f"Error accepting ToS for {channel}: {e}")
-        
-        return True
-    
-    def run_conda_command(self, args: List[str], **kwargs) -> subprocess.CompletedProcess:
-        """Executes conda command"""
-        cmd = [str(self.conda_exe)] + args
-        logger.info(f"Executing command: {' '.join(cmd)}")
-        
-        # Add environment variables for conda
+            return [
+                f'eval "$({self.micromamba_exe} shell hook -s bash)"',
+                f'micromamba activate "{self.ps_env_path}"'
+            ]
+
+    def setup_environment_for_subprocess(self) -> Dict[str, str]:
+        """Setup environment variables for subprocess to use micromamba"""
         env = os.environ.copy()
-        if os.name == 'nt':
-            env['PATH'] = str(self.miniconda_path / "Scripts") + os.pathsep + env.get('PATH', '')
+        
+        # Add micromamba to PATH
+        micromamba_dir = str(self.micromamba_path)
+        if 'PATH' in env:
+            env['PATH'] = f"{micromamba_dir}{os.pathsep}{env['PATH']}"
         else:
-            env['PATH'] = str(self.miniconda_path / "bin") + os.pathsep + env.get('PATH', '')
-        
-        return subprocess.run(cmd, env=env, capture_output=True, text=True, **kwargs)
-    
-    def run_conda_command_with_progress(self, args: List[str], description: str = "Executing conda command", **kwargs) -> subprocess.CompletedProcess:
-        """Executes conda command with progress bar and output capture"""
-        cmd = [str(self.conda_exe)] + args
-        logger.info(f"Executing command: {' '.join(cmd)}")
-        
-        # Add environment variables for conda
-        env = os.environ.copy()
-        if os.name == 'nt':
-            env['PATH'] = str(self.miniconda_path / "Scripts") + os.pathsep + env.get('PATH', '')
-        else:
-            env['PATH'] = str(self.miniconda_path / "bin") + os.pathsep + env.get('PATH', '')
-        
-        try:
-            from tqdm import tqdm
-            TQDM_AVAILABLE = True
-        except ImportError:
-            TQDM_AVAILABLE = False
-            logger.warning("tqdm not installed, executing without progress bar")
-        
-        if TQDM_AVAILABLE:
-            # Execution with progress bar
-            logger.info(f"🔄 {description}...")
+            env['PATH'] = micromamba_dir
             
-            # Start process
-            process = subprocess.Popen(
-                cmd,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                universal_newlines=True
-            )
-            
-            # Create progress bar
-            with tqdm(desc=description, unit="operation", dynamic_ncols=True) as pbar:
-                output_lines = []
-                if process.stdout:
-                    for line in process.stdout:
-                        output_lines.append(line)
-                        pbar.update(1)
-                        
-                        # Show important conda messages
-                        line_lower = line.lower().strip()
-                        if any(keyword in line_lower for keyword in [
-                            "downloading", "extracting", "installing", "solving", 
-                            "collecting", "preparing", "executing", "verifying",
-                            "error", "failed", "warning"
-                        ]):
-                            # Truncate long lines for display
-                            display_text = line.strip()[:60]
-                            if len(line.strip()) > 60:
-                                display_text += "..."
-                            pbar.set_postfix_str(display_text)
-            
-            # Wait for completion
-            process.wait()
-            
-            # Create result in CompletedProcess format
-            result = subprocess.CompletedProcess(
-                args=cmd,
-                returncode=process.returncode,
-                stdout=''.join(output_lines),
-                stderr=None
-            )
-            
-            if result.returncode == 0:
-                logger.info(f"✅ {description} completed successfully")
-            else:
-                logger.error(f"❌ {description} completed with error (code: {result.returncode})")
-                if result.stdout:
-                    logger.error(f"Output: {result.stdout[-500:]}")
-            
-            return result
-        else:
-            # Regular execution without progress bar
-            return subprocess.run(cmd, env=env, capture_output=True, text=True, **kwargs)
-    
-    def list_environments(self) -> List[str]:
-        """List of all venv environments"""
-        if not self.envs_path.exists():
-            return []
+        # Set MAMBA_EXE for shell hook
+        env['MAMBA_EXE'] = str(self.micromamba_exe)
         
-        envs = []
-        for item in self.envs_path.iterdir():
-            if item.is_dir() and (item / "pyvenv.cfg").exists():
-                envs.append(item.name)
+        return env
+
+    def run_in_activated_environment(self, command: List[str], cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
+        """Run a command in the activated ps_env environment using micromamba run"""
+        if not self.ps_env_path.exists():
+            logger.error("Base environment ps_env not found. Run --setup-env first.")
+            return subprocess.CompletedProcess([], 1, "", "Base environment not found")
+
+        # Use micromamba run to execute command in environment
+        run_cmd = ["run", "-p", str(self.ps_env_path)] + command
         
-        return envs
-    
-    def environment_exists(self, name: str) -> bool:
-        """Checks existence of venv environment"""
-        repo_env_path = self.envs_path / name
-        return repo_env_path.exists() and (repo_env_path / "pyvenv.cfg").exists()
-    
-    def check_base_environment_integrity(self) -> bool:
-        """Checks integrity of base environment"""
-        env_name = "portablesource"
-        conda_env_path = self.miniconda_path / "envs" / env_name
+        return self.run_micromamba_command(run_cmd, cwd=cwd)
+
+    def get_ps_env_python(self) -> Optional[Path]:
+        """Gets the path to python executable in ps_env"""
+        if not self.ps_env_path.exists():
+            return None
         
-        if not conda_env_path.exists():
-            logger.warning(f"Conda environment {env_name} not found")
+        python_exe = self.ps_env_path / "python.exe" if os.name == 'nt' else self.ps_env_path / "bin" / "python"
+        return python_exe if python_exe.exists() else None
+
+    def get_ps_env_pip(self) -> Optional[Path]:
+        """Gets the path to pip executable in ps_env"""
+        if not self.ps_env_path.exists():
+            return None
+        
+        pip_exe = self.ps_env_path / "pip.exe" if os.name == 'nt' else self.ps_env_path / "bin" / "pip"
+        return pip_exe if pip_exe.exists() else None
+
+    def get_ps_env_uv(self) -> Optional[Path]:
+        """Gets the path to uv executable in ps_env"""
+        if not self.ps_env_path.exists():
+            return None
+        
+        uv_exe = self.ps_env_path / "uv.exe" if os.name == 'nt' else self.ps_env_path / "bin" / "uv"
+        return uv_exe if uv_exe.exists() else None
+
+    def get_environment_info(self) -> Dict[str, Any]:
+        """Get information about environments"""
+        info = {
+            "micromamba_installed": self.micromamba_exe.exists(),
+            "base_env_exists": self.ps_env_path.exists(),
+            "base_env_python": str(self.get_ps_env_python()) if self.get_ps_env_python() else None,
+            "base_env_pip": str(self.get_ps_env_pip()) if self.get_ps_env_pip() else None,
+            "base_env_uv": str(self.get_ps_env_uv()) if self.get_ps_env_uv() else None,
+            "paths": {
+                "micromamba_exe": str(self.micromamba_exe),
+                "ps_env_path": str(self.ps_env_path)
+            }
+        }
+        return info
+
+    def check_micromamba_availability(self) -> bool:
+        """Check if micromamba is available and working.
+        
+        Returns:
+            True if micromamba is available, False otherwise
+        """
+        if not self.micromamba_exe.exists():
             return False
         
-        # Check for main executable files
-        if os.name == 'nt':
-            python_exe = conda_env_path / "python.exe"
-            pip_exe = conda_env_path / "Scripts" / "pip.exe"
-            git_exe = conda_env_path / "Library" / "bin" / "git.exe"
-        else:
-            python_exe = conda_env_path / "bin" / "python"
-            pip_exe = conda_env_path / "bin" / "pip"
-            git_exe = conda_env_path / "bin" / "git"
-        
-        missing_tools = []
-        if not python_exe.exists():
-            missing_tools.append("python")
-        if not pip_exe.exists():
-            missing_tools.append("pip")
-        if not git_exe.exists():
-            missing_tools.append("git")
-        
-        if missing_tools:
-            logger.warning(f"Environment {env_name} is missing tools: {', '.join(missing_tools)}")
-            return False
-        
-        # Check Python functionality
         try:
-            result = subprocess.run([str(python_exe), "--version"], 
-                                  capture_output=True, text=True, timeout=10)
-            if result.returncode != 0:
-                logger.warning(f"Python in environment {env_name} is not working")
-                return False
+            result = self.run_micromamba_command(["--version"])
+            return result.returncode == 0
         except Exception as e:
-            logger.warning(f"Error checking Python in environment {env_name}: {e}")
+            logger.error(f"Error checking micromamba availability: {e}")
+            return False
+
+    def setup_environment(self) -> bool:
+        """Setup the complete environment (micromamba + ps_env).
+        
+        Returns:
+            True if setup was successful, False otherwise
+        """
+        logger.info("Setting up PortableSource environment...")
+        
+        # Step 1: Install micromamba
+        if not self.ensure_micromamba_installed():
+            logger.error("❌ Failed to install micromamba")
             return False
         
-        # Check TensorRT for NVIDIA GPU
-        gpu_info = self.gpu_detector.get_gpu_info()
-        nvidia_gpu = next((gpu for gpu in gpu_info if gpu.gpu_type == GPUType.NVIDIA), None)
+        # Step 2: Create base environment
+        if not self.create_base_environment():
+            logger.error("❌ Failed to create base environment")
+            return False
         
-        if nvidia_gpu:
-            # Use ConfigManager to determine TensorRT support
-            from .config import ConfigManager
-            config_manager = ConfigManager()
-            gpu_config = config_manager.configure_gpu(nvidia_gpu.name, nvidia_gpu.memory // 1024 if nvidia_gpu.memory else 0)
-            
-            if gpu_config.supports_tensorrt:
-                tensorrt_status = self.check_tensorrt_installation()
-                if not tensorrt_status:
-                    logger.warning("TensorRT not installed or not working, will reinstall")
-                    if not self.reinstall_tensorrt():
-                        logger.warning("Failed to reinstall TensorRT, but base environment is working")
+        logger.info("✅ Environment setup completed successfully")
+        logger.info(f"Micromamba installed at: {self.micromamba_exe}")
+        logger.info(f"Base environment created at: {self.ps_env_path}")
         
         return True
-    
-    def check_tensorrt_installation(self) -> bool:
-        """Checks TensorRT installation and functionality"""
-        env_name = "portablesource"
-        conda_env_path = self.miniconda_path / "envs" / env_name
-        
-        if os.name == 'nt':
-            python_exe = conda_env_path / "python.exe"
-        else:
-            python_exe = conda_env_path / "bin" / "python"
-        
-        try:
-            # Check TensorRT import
-            result = subprocess.run([
-                str(python_exe), "-c", 
-                "import tensorrt; print(f'TensorRT {tensorrt.__version__} working'); assert tensorrt.Builder(tensorrt.Logger())"
-            ], capture_output=True, text=True, timeout=30)
-            
-            if result.returncode == 0:
-                return True
-            else:
-                logger.warning(f"❌ TensorRT check failed: {result.stderr.strip()}")
-                return False
-        except Exception as e:
-            logger.warning(f"❌ TensorRT check error: {e}")
-            return False
-    
-    def reinstall_tensorrt(self) -> bool:
-        """Reinstalls TensorRT"""
-        env_name = "portablesource"
-        
-        try:
-            logger.info("Reinstalling TensorRT...")
-            
-            # Remove existing TensorRT
-            uninstall_cmd = ["run", "-n", env_name, "pip", "uninstall", "-y", "tensorrt", "tensorrt-libs", "tensorrt-bindings"]
-            uninstall_result = self.run_conda_command(uninstall_cmd)
-            
-            # Update pip, setuptools and wheel (ignore errors if packages are already updated)
-            # update_cmd = ["run", "-n", env_name, "pip", "install", "--upgrade", "pip", "setuptools", "wheel"]
-            # update_result = self.run_conda_command_with_progress(update_cmd, "Updating pip, setuptools and wheel")
-            update_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
-            
-            # Continue TensorRT installation even if pip update failed
-                    # (often pip is already updated but returns error code)
-            if update_result.returncode == 0:
-                pass
-                #logger.info("✅ pip, setuptools and wheel updated")
-            else:
-                logger.warning("⚠️ pip update completed with warnings, continuing TensorRT installation")
-            
-            # Install TensorRT again
-            tensorrt_cmd = ["run", "-n", env_name, "pip", "install", "--upgrade", "tensorrt"]
-            tensorrt_result = self.run_conda_command_with_progress(tensorrt_cmd, "Reinstalling TensorRT")
-            
-            if tensorrt_result.returncode == 0:
-                # Check installation
-                if self.check_tensorrt_installation():
-                    logger.info("✅ TensorRT successfully reinstalled")
-                    return True
-                else:
-                    logger.warning("⚠️ TensorRT installed but check failed")
-                    return False
-            else:
-                logger.warning(f"⚠️ TensorRT reinstallation error: {tensorrt_result.stderr}")
-                return False
-                
-        except Exception as e:
-            logger.warning(f"⚠️ TensorRT reinstallation error: {e}")
-            return False
-    
-    def remove_base_environment(self) -> bool:
-        """Removes base conda environment"""
-        env_name = "portablesource"
-        conda_env_path = self.miniconda_path / "envs" / env_name
-        
-        if not conda_env_path.exists():
-            logger.info(f"Conda environment {env_name} already absent")
-            return True
-        
-        try:
-            # Remove via conda
-            cmd = ["env", "remove", "-n", env_name, "-y"]
-            result = self.run_conda_command(cmd)
-            
-            if result.returncode == 0:
-                logger.info(f"Conda environment {env_name} removed")
-                return True
-            else:
-                logger.error(f"Error removing conda environment: {result.stderr}")
-                # Try to remove folder directly
-                shutil.rmtree(conda_env_path)
-                logger.info(f"Conda environment {env_name} forcibly removed")
-                return True
-        except Exception as e:
-            logger.error(f"Error removing conda environment {env_name}: {e}")
-            return False
-    
-    def create_base_environment(self) -> bool:
-        """Creates base PortableSource environment"""
-        env_name = "portablesource"
-        
-        # Check environment existence and integrity
-        conda_env_path = self.miniconda_path / "envs" / env_name
-        if conda_env_path.exists():
-            if self.check_base_environment_integrity():
-                logger.info(f"Base environment {env_name} already exists and works correctly")
-                return True
-            else:
-                logger.warning(f"Base environment {env_name} is corrupted, reinstalling...")
-                if not self.remove_base_environment():
-                    logger.error("Failed to remove corrupted environment")
-                    return False
-        
-        # Accept Terms of Service before creating environment
-        self.accept_conda_terms_of_service()
-        
-        # Define packages for installation
-        packages = [
-            "python=3.11",
-            "git",
-            "ffmpeg",
-            "pip",
-            "setuptools",
-            "wheel"
-        ]
-        
-        # Add CUDA packages if NVIDIA GPU is present
-        gpu_info = self.gpu_detector.get_gpu_info()
-        nvidia_gpu = next((gpu for gpu in gpu_info if gpu.gpu_type == GPUType.NVIDIA), None)
-        
-        if nvidia_gpu and nvidia_gpu.cuda_version:
-            cuda_version = nvidia_gpu.cuda_version.value
-            logger.info(f"Adding CUDA {cuda_version} toolkit + cuDNN")
-            
-            if cuda_version == "11.8":
-                packages.extend([
-                    "cuda-toolkit=11.8",
-                    "cudnn"
-                ])
-            elif cuda_version == "12.4":
-                packages.extend([
-                    "cuda-toolkit=12.4",
-                    "cudnn"
-                ])
-            elif cuda_version == "12.8":
-                packages.extend([
-                    "cuda-toolkit=12.8",
-                    "cudnn"
-                ])
-        
-        # Create environment with progress bar
-        cmd = ["create", "-n", env_name, "-y"] + packages
-        result = self.run_conda_command_with_progress(cmd, "")
-        
-        if result.returncode == 0:
-            #logger.info(f"Базовое окружение {env_name} создано")
-            
-            # Install additional packages for NVIDIA GPU
-            if nvidia_gpu:
-                #logger.info("Установка дополнительных пакетов для NVIDIA GPU...")
-                try:
-                    # Skip pip upgrade to avoid permission issues
-                    # update_cmd = ["run", "-n", env_name, "pip", "install", "--upgrade", "pip", "setuptools", "wheel"]
-                    # update_result = self.run_conda_command_with_progress(update_cmd, "Updating pip, setuptools and wheel")
-                    update_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")  # Mock successful result
-                    
-                    # Continue TensorRT installation even if pip update failed
-                    if update_result.returncode == 0:
-                        logger.info("✅ pip, setuptools and wheel updated")
-                    else:
-                        logger.warning("⚠️ pip update completed with warnings, continuing TensorRT installation")
-                    
-                    # Install TensorRT according to official documentation
-                    #logger.info("Installing TensorRT (optional)...")
-                    tensorrt_cmd = ["run", "-n", env_name, "pip", "install", "--upgrade", "tensorrt"]
-                    tensorrt_result = self.run_conda_command_with_progress(tensorrt_cmd, "Installing TensorRT")
-                    
-                    if tensorrt_result.returncode == 0:
-                        pass
-                        #logger.info("✅ TensorRT successfully installed")
-                        #logger.info("💡 For verification use: python -c 'import tensorrt; print(tensorrt.__version__)'")
-                    else:
-                        logger.warning("⚠️ TensorRT failed to install (possibly incompatible Python or CUDA version)")
-                        logger.info("💡 TensorRT can be installed manually later if needed")
-                except Exception as e:
-                    logger.warning(f"⚠️ Error installing additional NVIDIA packages: {e}")
-                    logger.info("💡 Base environment created successfully, additional packages can be installed later")
-            
-            return True
-        else:
-            logger.error(f"Error creating base environment: {result.stderr}")
-            return False
-    
-    def create_repository_environment(self, repo_name: str, spec: EnvironmentSpec) -> bool:
-        """Creates venv environment for repository"""
-        repo_env_path = self.envs_path / repo_name
-        
-        if repo_env_path.exists():
-            #logger.info(f"Venv environment {repo_name} already exists")
-            return True
-        
-        # Create folder for venv environments
-        self.envs_path.mkdir(parents=True, exist_ok=True)
-        
-        # Check for base conda environment
-        if not (self.miniconda_path / "envs" / "portablesource").exists():
-            logger.error("Base conda environment portablesource not found!")
-            return False
-        
-        # Create venv using Python from base conda environment
-        try:
-            cmd = [str(self.python_exe), "-m", "venv", str(repo_env_path)]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            
-            if result.returncode != 0:
-                logger.error(f"Error creating venv: {result.stderr}")
-                return False
-            
-            # Define path to pip in venv
-            if os.name == 'nt':
-                venv_pip = repo_env_path / "Scripts" / "pip.exe"
-                venv_python = repo_env_path / "Scripts" / "python.exe"
-            else:
-                venv_pip = repo_env_path / "bin" / "pip"
-                venv_python = repo_env_path / "bin" / "python"
-            
-            # Skip pip upgrade to avoid permission issues
-            # subprocess.run([str(venv_python), "-m", "pip", "install", "--upgrade", "pip"], 
-            #              capture_output=True, text=True)
-            
-            # Install additional packages
-            if spec.pip_packages:
-                for package in spec.pip_packages:
-                    result = subprocess.run([str(venv_pip), "install", package], 
-                                          capture_output=True, text=True)
-                    if result.returncode != 0:
-                        logger.warning(f"Failed to install {package}: {result.stderr}")
-            
-            #logger.info(f"Venv environment {repo_name} created in {repo_env_path}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error creating venv environment: {e}")
-            return False
-    
-    def remove_environment(self, name: str) -> bool:
-        """Removes venv environment"""
-        if not self.environment_exists(name):
-            logger.warning(f"Venv environment {name} does not exist")
-            return True
-        
-        repo_env_path = self.envs_path / name
-        
-        try:
-            # Remove venv folder
-            shutil.rmtree(repo_env_path)
-            logger.info(f"Venv environment {name} removed")
-            return True
-        except Exception as e:
-            logger.error(f"Error removing venv environment {name}: {e}")
-            return False
-    
-    def get_environment_python_path(self, env_name: str) -> Optional[Path]:
-        """Gets path to Python in venv environment"""
-        repo_env_path = self.envs_path / env_name
-        
-        if os.name == 'nt':
-            python_path = repo_env_path / "Scripts" / "python.exe"
-        else:
-            python_path = repo_env_path / "bin" / "python"
-        
-        return python_path if python_path.exists() else None
