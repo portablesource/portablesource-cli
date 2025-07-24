@@ -1920,7 +1920,7 @@ set TEMP={tmp_path}
 set TMP={tmp_path}
 
 call "{micromamba_exe}" shell hook -s cmd.exe > nul
-call micromamba activate "{ps_env_path}"
+call micromamba activate "{ps_env_path}" > nul
 call "{venv_activate}"
 cls
 python {main_file} {program_args}
