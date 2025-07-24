@@ -210,7 +210,7 @@ def main():
         print("ENVIRONMENT STATUS")
         print("="*60)
         print(f"Environment exists: {'✅' if status['environment_exists'] else '❌'}")
-        print(f"Setup completed: {'✅' if status['environment_setup_completed'] else '❌'}")
+        print(f"Setup completed: {'YES' if status['environment_setup_completed'] else 'NO'}")
         print(f"Overall status: {status['overall_status']}")
         
         if status['environment_exists']:
