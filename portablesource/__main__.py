@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from portablesource.config import logger
+from portablesource.config import logger, ConfigManager
 from portablesource.envs_manager import MicromambaManager
 from portablesource.repository_installer import RepositoryInstaller
 from portablesource.utils import (
@@ -17,7 +17,9 @@ from portablesource.utils import (
     validate_and_get_path,
     create_directory_structure,
     change_installation_path,
-    show_system_info
+    show_system_info,
+    install_msvc_build_tools,
+    check_msvc_build_tools_installed
 )
 
 class PortableSourceApp:
@@ -25,6 +27,7 @@ class PortableSourceApp:
     
     def __init__(self):
         self.install_path: Optional[Path] = None
+        self.config_manager: Optional[ConfigManager] = None
         self.environment_manager: Optional[MicromambaManager] = None
         self.repository_installer: Optional[RepositoryInstaller] = None
         
@@ -40,9 +43,18 @@ class PortableSourceApp:
         # Create directory structure
         create_directory_structure(self.install_path)
         
+        # Initialize config manager with proper config path
+        config_path = self.install_path / "portablesource_config.json"
+        self.config_manager = ConfigManager(config_path)
+        self.config_manager.load_config()
+        # Set install path in config if not already set
+        if not self.config_manager.config.install_path:
+            self.config_manager.config.install_path = str(self.install_path)
+            self.config_manager.save_config()
+        
         # Initialize managers
-        self.environment_manager = MicromambaManager(self.install_path)
-        self.repository_installer = RepositoryInstaller(self.install_path)
+        self.environment_manager = MicromambaManager(self.install_path, self.config_manager)
+        self.repository_installer = RepositoryInstaller(self.install_path, config_manager=self.config_manager)
     
     def _get_installation_path(self) -> Path:
         """Request installation path from user"""
@@ -101,7 +113,13 @@ class PortableSourceApp:
             logger.error("Repository installer not initialized")
             return False
         
-        return self.repository_installer.install_repository(repo_url_or_name, self.install_path)
+        # Repositories should be installed in the repos subdirectory
+        if not self.install_path:
+            logger.error("install path is none")
+            return False
+
+        repos_path = self.install_path / "repos"
+        return self.repository_installer.install_repository(repo_url_or_name, repos_path)
     
     def update_repository(self, repo_name: str) -> bool:
         """Update repository"""
@@ -130,6 +148,9 @@ def main():
     parser.add_argument("--update-repo", type=str, help="Update repository")
     parser.add_argument("--list-repos", action="store_true", help="Show installed repositories")
     parser.add_argument("--system-info", action="store_true", help="Show system information")
+    parser.add_argument("--check-env", action="store_true", help="Check environment status and tools")
+    parser.add_argument("--install-msvc", action="store_true", help="Install MSVC Build Tools")
+    parser.add_argument("--check-msvc", action="store_true", help="Check MSVC Build Tools installation")
     
     args = parser.parse_args()
     
@@ -174,6 +195,47 @@ def main():
         check_micromamba_func = app.environment_manager.check_micromamba_availability if app.environment_manager else None
         show_system_info(app.install_path, app.environment_manager, check_micromamba_func)
     
+    if args.check_env:
+        if app.install_path is None:
+            logger.error("Installation path not initialized")
+            return
+        if not app.environment_manager:
+            logger.error("Environment manager not initialized")
+            return
+        
+        logger.info("Checking environment status...")
+        status = app.environment_manager.check_environment_status()
+        
+        print("\n" + "="*60)
+        print("ENVIRONMENT STATUS")
+        print("="*60)
+        print(f"Environment exists: {'✅' if status['environment_exists'] else '❌'}")
+        print(f"Setup completed: {'✅' if status['environment_setup_completed'] else '❌'}")
+        print(f"Overall status: {status['overall_status']}")
+        
+        if status['environment_exists']:
+            print("\nTools status:")
+            for tool_name, tool_status in status['tools_status'].items():
+                if tool_status['working']:
+                    print(f"  ✅ {tool_name}: {tool_status['version']}")
+                else:
+                    print(f"  ❌ {tool_name}: {tool_status['error']}")
+                    if 'stderr' in tool_status and tool_status['stderr']:
+                        print(f"     Error details: {tool_status['stderr']}")
+        
+        print("="*60)
+    
+    if args.install_msvc:
+        if app.install_path is None:
+            logger.error("Installation path not initialized")
+            return
+        install_msvc_build_tools(app.install_path)
+    
+    if args.check_msvc:
+        is_installed = check_msvc_build_tools_installed()
+        status = "✅ Installed" if is_installed else "❌ Not installed"
+        logger.info(f"MSVC Build Tools: {status}")
+    
     # If no arguments, show help
     if len(sys.argv) == 1:
         if app.install_path is None:
@@ -197,7 +259,10 @@ def main():
         print("  --update-repo <name>    Update repository")
         print("  --list-repos            Show repositories")
         print("  --system-info           System information")
+        print("  --check-env             Check environment status")
         print("  --install-path <path>   Installation path")
+        print("  --install-msvc          Install MSVC Build Tools")
+        print("  --check-msvc            Check MSVC Build Tools")
         print("="*50)
 
 if __name__ == "__main__":

@@ -341,7 +341,8 @@ class InstallationPlan:
 class RequirementsAnalyzer:
     """Analyzes requirements.txt files and categorizes packages"""
     
-    def __init__(self):
+    def __init__(self, config_manager: ConfigManager):
+        self.config_manager = config_manager
         self.torch_packages = {"torch", "torchvision", "torchaudio", "torchtext", "torchdata"}
         self.onnx_packages = {"onnxruntime", "onnxruntime-gpu", "onnxruntime-directml", "onnxruntime-openvino"}
         self.insightface_packages = {"insightface"}
@@ -445,14 +446,10 @@ class RequirementsAnalyzer:
         Returns:
             InstallationPlan object
         """
-        from portablesource.get_gpu import GPUDetector
-        
         plan = InstallationPlan()
         
-        # Get GPU information
-        gpu_detector = GPUDetector()
-        gpu_info_list = gpu_detector.get_gpu_info()
-        primary_gpu_type = gpu_detector.get_primary_gpu_type()
+        # Get GPU information from config
+        gpu_config_obj = self.config_manager.config.gpu_config
         
         # Categorize packages
         for package in packages:
@@ -469,49 +466,45 @@ class RequirementsAnalyzer:
         
         # Determine PyTorch index URL
         if plan.torch_packages:
-            plan.torch_index_url = self._get_torch_index_url(gpu_info_list, primary_gpu_type)
+            plan.torch_index_url = self._get_torch_index_url_from_config(gpu_config_obj)
         
         # Auto-detect and set the correct ONNX Runtime package name
         if plan.onnx_packages:
-            plan.onnx_package_name = self._get_onnx_package_name(primary_gpu_type)
+            plan.onnx_package_name = self._get_onnx_package_name_from_config(gpu_config_obj)
         
         return plan
     
-    def _get_torch_index_url(self, gpu_info_list, primary_gpu_type) -> str:
-        """Get PyTorch index URL based on GPU information"""
-        from portablesource.get_gpu import GPUType, CUDAVersion
-        
-        if not primary_gpu_type or primary_gpu_type != GPUType.NVIDIA:
+    def _get_torch_index_url_from_config(self, gpu_config) -> str:
+        """Get PyTorch index URL based on GPU configuration"""
+        if not gpu_config or not gpu_config.name or not gpu_config.name.upper().startswith('NVIDIA'):
             return "https://download.pytorch.org/whl/cpu"
         
-        # Find NVIDIA GPU and get CUDA version
-        cuda_version = None
-        for gpu_info in gpu_info_list:
-            if gpu_info.gpu_type == GPUType.NVIDIA and gpu_info.cuda_version:
-                cuda_version = gpu_info.cuda_version
-                break
+        # Get CUDA version from config
+        cuda_version = gpu_config.cuda_version
         
         # Determine CUDA version for PyTorch
-        if cuda_version == CUDAVersion.CUDA_128:
-            return "https://download.pytorch.org/whl/cu128"
-        elif cuda_version == CUDAVersion.CUDA_124:
-            return "https://download.pytorch.org/whl/cu124"
-        elif cuda_version == CUDAVersion.CUDA_118:
-            return "https://download.pytorch.org/whl/cu118"
-        else:
-            return "https://download.pytorch.org/whl/cpu"  # Fallback to CPU
+        if cuda_version and hasattr(cuda_version, 'value'):
+            cuda_version_str = cuda_version.value
+            if cuda_version_str == "12.8":
+                return "https://download.pytorch.org/whl/cu128"
+            elif cuda_version_str == "12.4":
+                return "https://download.pytorch.org/whl/cu124"
+            elif cuda_version_str == "11.8":
+                return "https://download.pytorch.org/whl/cu118"
+        
+        return "https://download.pytorch.org/whl/cpu"  # Fallback to CPU
     
-    def _get_onnx_package_name(self, gpu_type) -> str:
-        """Get ONNX Runtime package name based on GPU type"""
-        from portablesource.get_gpu import GPUType
+    def _get_onnx_package_name_from_config(self, gpu_config) -> str:
+        """Get ONNX Runtime package name based on GPU configuration"""
         import os
 
-        if not gpu_type or gpu_type == GPUType.UNKNOWN:
+        if not gpu_config or not gpu_config.name:
             return "onnxruntime"
 
-        if gpu_type == GPUType.NVIDIA:
+        gpu_name_upper = gpu_config.name.upper()
+        if gpu_name_upper.startswith('NVIDIA'):
             return "onnxruntime-gpu"
-        elif gpu_type in [GPUType.AMD, GPUType.INTEL] and os.name == 'nt':
+        elif (gpu_name_upper.startswith('AMD') or gpu_name_upper.startswith('INTEL')) and os.name == 'nt':
             return "onnxruntime-directml"
         else:
             # For AMD/Intel on other OS or other cases, default to standard onnxruntime
@@ -557,12 +550,9 @@ class RequirementsAnalyzer:
                 {}
             )
         else:
-            # Auto-detect based on system
-            from portablesource.get_gpu import GPUDetector
-            gpu_detector = GPUDetector()
-            gpu_info_list = gpu_detector.get_gpu_info()
-            primary_gpu_type = gpu_detector.get_primary_gpu_type()
-            package_name = self._get_onnx_package_name(primary_gpu_type)
+            # Auto-detect based on system config
+            gpu_config_obj = self.config_manager.config.gpu_config
+            package_name = self._get_onnx_package_name_from_config(gpu_config_obj)
             env_vars = {}
             
             if package_name == "onnxruntime-gpu":
@@ -700,8 +690,14 @@ class RepositoryInstaller:
         # Type annotation for the attribute
         self.base_path: Path
             
-        self.config_manager = config_manager or ConfigManager()
-        self.analyzer = RequirementsAnalyzer()
+        # Initialize config manager with proper path if not provided
+        if config_manager is None:
+            config_path = self.base_path / "portablesource_config.json"
+            self.config_manager = ConfigManager(config_path)
+            self.config_manager.load_config()
+        else:
+            self.config_manager = config_manager
+        self.analyzer = RequirementsAnalyzer(config_manager=self.config_manager)
         
         # Initialize server client and main file finder
         self.server_client = ServerAPIClient(server_url)
@@ -1619,8 +1615,29 @@ class RepositoryInstaller:
                         if pkg_name:
                             # Special handling for ONNX Runtime with specific providers
                             if step_type == 'onnxruntime':
-                                onnx_package_name = server_plan.get('onnx_package_name') or 'onnxruntime'
-                                pkg_name = onnx_package_name
+                                # Auto-detect GPU and modify package name accordingly
+                                gpu_config_obj = self.config_manager.config.gpu_config
+                                
+                                if pkg_name == "onnxruntime":
+                                    if gpu_config_obj and gpu_config_obj.name:
+                                        gpu_name_upper = gpu_config_obj.name.upper()
+                                        if gpu_name_upper.startswith('NVIDIA'):
+                                            pkg_name = "onnxruntime-gpu"
+                                        elif gpu_name_upper.startswith('AMD') and os.name == "nt":
+                                            # AMD GPU on Windows - use DirectML
+                                            pkg_name = "onnxruntime-directml"
+                                        elif gpu_name_upper.startswith('AMD') and os.name == "posix":
+                                            # AMD GPU on Linux - use ROCm
+                                            pkg_name = "onnxruntime-rocm"
+                                        elif gpu_name_upper.startswith('INTEL'):
+                                            # Intel GPU - use DirectML
+                                            pkg_name = "onnxruntime-directml"
+                                    # For CPU or unknown GPU types, keep original "onnxruntime"
+                                else:
+                                    # If server plan specifies a custom onnx_package_name, use it
+                                    onnx_package_name = server_plan.get('onnx_package_name')
+                                    if onnx_package_name:
+                                        pkg_name = onnx_package_name
                             # Special handling for InsightFace on Windows
                             elif step_type == 'insightface' and pkg_name == 'insightface' and os.name == "nt":
                                 pkg_str = "https://huggingface.co/hanamizuki-ai/pypi-wheels/resolve/main/insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl"
@@ -1648,10 +1665,49 @@ class RepositoryInstaller:
                                 install_cmd.extend(['--index-url', index_url])
                     else:
                         # Handle string packages
-                        if isinstance(package, str) and package.strip():
-                            install_cmd.append(package.strip())
-                        else:
-                            logger.warning(f"Step {step_index}, Package {package_index}: Invalid package format or empty string: {package}")
+                         if isinstance(package, str) and package.strip():
+                            package_str = package.strip()
+                            
+                            # Apply GPU auto-detection for onnxruntime string packages
+                            if step_type == 'onnxruntime' and package_str.startswith('onnxruntime'):
+                                gpu_config_obj = self.config_manager.config.gpu_config
+                                
+                                if gpu_config_obj and gpu_config_obj.name:
+                                    gpu_name_upper = gpu_config_obj.name.upper()
+                                    
+                                    # Parse package string to extract version if present
+                                    if '==' in package_str:
+                                        _, version = package_str.split('==', 1)
+                                        if gpu_name_upper.startswith('NVIDIA'):
+                                            package_str = f"onnxruntime-gpu=={version}"
+                                        elif gpu_name_upper.startswith('AMD') and os.name == "nt":
+                                            package_str = f"onnxruntime-directml=={version}"
+                                        elif gpu_name_upper.startswith('AMD') and os.name == "posix":
+                                            package_str = f"onnxruntime-rocm=={version}"
+                                        elif gpu_name_upper.startswith('INTEL'):
+                                            package_str = f"onnxruntime-directml=={version}"
+                                    elif '>=' in package_str:
+                                        _, version = package_str.split('>=', 1)
+                                        if gpu_name_upper.startswith('NVIDIA'):
+                                            package_str = f"onnxruntime-gpu>={version}"
+                                        elif gpu_name_upper.startswith('AMD') and os.name == "nt":
+                                            package_str = f"onnxruntime-directml>={version}"
+                                        elif gpu_name_upper.startswith('AMD') and os.name == "posix":
+                                            package_str = f"onnxruntime-rocm>={version}"
+                                        elif gpu_name_upper.startswith('INTEL'):
+                                            package_str = f"onnxruntime-directml>={version}"
+                                    else:
+                                        # No version specified
+                                        if gpu_name_upper.startswith('NVIDIA'):
+                                            package_str = "onnxruntime-gpu"
+                                        elif gpu_name_upper.startswith('AMD') and os.name == "nt":
+                                            package_str = "onnxruntime-directml"
+                                        elif gpu_name_upper.startswith('AMD') and os.name == "posix":
+                                            package_str = "onnxruntime-rocm"
+                                        elif gpu_name_upper.startswith('INTEL'):
+                                            package_str = "onnxruntime-directml"
+                            
+                            install_cmd.append(package_str)
 
                 if server_plan.get('torch_index_url') and '--index-url' not in install_cmd:
                     install_cmd.extend(['--index-url', server_plan['torch_index_url']])
@@ -1741,37 +1797,37 @@ class RepositoryInstaller:
             
             # Install ONNX Runtime packages with GPU auto-detection for fallback
             if plan.onnx_packages:
-                from portablesource.get_gpu import GPUDetector, GPUType
-                gpu_detector = GPUDetector()
-                primary_gpu_type = gpu_detector.get_primary_gpu_type()
+                gpu_config_obj = self.config_manager.config.gpu_config
                 
                 for package in plan.onnx_packages:
                     # Auto-detect GPU version for onnxruntime when falling back to local requirements
                     package_str = str(package)
-                    if package.name == "onnxruntime" and primary_gpu_type == GPUType.NVIDIA:
-                        # Replace onnxruntime with onnxruntime-gpu for NVIDIA GPUs
-                        if package.version:
-                            package_str = f"onnxruntime-gpu=={package.version}"
-                        else:
-                            package_str = "onnxruntime-gpu"
-                    elif package.name == "onnxruntime" and primary_gpu_type == GPUType.AMD and os.name == "nt":
-                        # AMD GPU on Windows - use DirectML
-                        if package.version:
-                            package_str = f"onnxruntime-directml=={package.version}"
-                        else:
-                            package_str = "onnxruntime-directml"
-                    elif package.name == "onnxruntime" and primary_gpu_type == GPUType.AMD and os.name == "posix":
-                        # AMD GPU on Linux - use ROCm (if available)
-                        if package.version:
-                            package_str = f"onnxruntime-rocm=={package.version}"
-                        else:
-                            package_str = "onnxruntime-rocm"
-                    elif package.name == "onnxruntime" and primary_gpu_type == GPUType.INTEL:
-                        # Intel GPU - use DirectML
-                        if package.version:
-                            package_str = f"onnxruntime-directml=={package.version}"
-                        else:
-                            package_str = "onnxruntime-directml"
+                    if package.name == "onnxruntime" and gpu_config_obj and gpu_config_obj.name:
+                        gpu_name_upper = gpu_config_obj.name.upper()
+                        if gpu_name_upper.startswith('NVIDIA'):
+                            # Replace onnxruntime with onnxruntime-gpu for NVIDIA GPUs
+                            if package.version:
+                                package_str = f"onnxruntime-gpu=={package.version}"
+                            else:
+                                package_str = "onnxruntime-gpu"
+                        elif gpu_name_upper.startswith('AMD') and os.name == "nt":
+                            # AMD GPU on Windows - use DirectML
+                            if package.version:
+                                package_str = f"onnxruntime-directml=={package.version}"
+                            else:
+                                package_str = "onnxruntime-directml"
+                        elif gpu_name_upper.startswith('AMD') and os.name == "posix":
+                            # AMD GPU on Linux - use ROCm (if available)
+                            if package.version:
+                                package_str = f"onnxruntime-rocm=={package.version}"
+                            else:
+                                package_str = "onnxruntime-rocm"
+                        elif gpu_name_upper.startswith('INTEL'):
+                            # Intel GPU - use DirectML
+                            if package.version:
+                                package_str = f"onnxruntime-directml=={package.version}"
+                            else:
+                                package_str = "onnxruntime-directml"
 
                     repo_name = getattr(self, '_current_repo_name', 'default')
                     self._install_package_with_progress([package_str], f"Installing ONNX package: {package_str}", repo_name)
@@ -2129,13 +2185,8 @@ pause
     def _get_default_torch_index_url(self) -> str:
         """Get default PyTorch index URL based on GPU configuration"""
         try:
-            from portablesource.get_gpu import GPUDetector
-            
-            gpu_detector = GPUDetector()
-            gpu_info_list = gpu_detector.get_gpu_info()
-            primary_gpu_type = gpu_detector.get_primary_gpu_type()
-            
-            return self.analyzer._get_torch_index_url(gpu_info_list, primary_gpu_type)
+            gpu_config = self.config_manager.config.gpu_config
+            return self.analyzer._get_torch_index_url_from_config(gpu_config)
         except Exception as e:
             logger.warning(f"Error getting default torch index URL: {e}")
             return "https://download.pytorch.org/whl/cpu"
@@ -2143,12 +2194,8 @@ pause
     def _get_default_onnx_package(self) -> str:
         """Get default ONNX Runtime package name based on GPU configuration"""
         try:
-            from portablesource.get_gpu import GPUDetector
-            
-            gpu_detector = GPUDetector()
-            primary_gpu_type = gpu_detector.get_primary_gpu_type()
-            
-            return self.analyzer._get_onnx_package_name(primary_gpu_type)
+            gpu_config = self.config_manager.config.gpu_config
+            return self.analyzer._get_onnx_package_name_from_config(gpu_config)
         except Exception as e:
             logger.warning(f"Error getting default ONNX package: {e}")
             return "onnxruntime"

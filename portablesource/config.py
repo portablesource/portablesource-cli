@@ -61,6 +61,7 @@ class PortableSourceConfig:
     install_path: str = ""
     gpu_config: Optional[GPUConfig] = None
     environment_vars: Optional[Dict[str, str]] = None
+    environment_setup_completed: bool = False  # Tracks if environment setup is completed
     
     def __post_init__(self):
         if self.gpu_config is None:
@@ -111,8 +112,7 @@ class ConfigManager:
         
     def _get_config_file_path(self) -> Path:
         """Get the configuration file path, preferring install_path if available"""
-        if self.config.install_path:
-            return Path(self.config.install_path) / "portablesource_config.json"
+        # Use the config_path that was passed during initialization
         return self.config_path
         
     
@@ -207,6 +207,43 @@ class ConfigManager:
         self.config.gpu_config = gpu_config
         return gpu_config
     
+    def configure_gpu_from_detection(self) -> GPUConfig:
+        """
+        Automatically configure GPU settings using GPU detection
+        
+        Returns:
+            GPUConfig object
+        """
+        from portablesource.get_gpu import GPUDetector
+        
+        gpu_detector = GPUDetector()
+        gpu_info_list = gpu_detector.get_gpu_info()
+        
+        if not gpu_info_list:
+            logger.warning("No GPU detected, using CPU configuration")
+            return self.configure_gpu("Unknown GPU", 0)
+        
+        # Find the best NVIDIA GPU first, then fallback to others
+        nvidia_gpus = [gpu for gpu in gpu_info_list if gpu.gpu_type.name == "NVIDIA"]
+        
+        if nvidia_gpus:
+            # Sort by priority (newer GPUs first)
+            nvidia_gpus.sort(key=lambda x: gpu_detector._get_gpu_priority(x.name), reverse=True)
+            primary_gpu = nvidia_gpus[0]
+        else:
+            # Use the first available GPU
+            primary_gpu = gpu_info_list[0]
+        
+        # Convert memory from MB to GB
+        memory_gb = primary_gpu.memory // 1024 if primary_gpu.memory else 0
+        
+        logger.info(f"Detected GPU: {primary_gpu.name} ({memory_gb}GB)")
+        logger.info(f"GPU Type: {primary_gpu.gpu_type.value}")
+        if primary_gpu.cuda_version:
+            logger.info(f"Recommended CUDA: {primary_gpu.cuda_version.value}")
+        
+        return self.configure_gpu(primary_gpu.name, memory_gb)
+    
     def configure_install_path(self, install_path: str) -> str:
         """
         Configure installation path
@@ -288,7 +325,8 @@ class ConfigManager:
                     "supports_tensorrt": self.config.gpu_config.supports_tensorrt,
                     "packages": self.config.gpu_config.packages
                 } if self.config.gpu_config else None,
-                "environment_vars": self.config.environment_vars
+                "environment_vars": self.config.environment_vars,
+                "environment_setup_completed": self.config.environment_setup_completed
             }
             
             with open(config_file_path, 'w', encoding='utf-8') as f:
@@ -357,12 +395,38 @@ class ConfigManager:
         if 'environment_vars' in config_dict:
             config.environment_vars = config_dict['environment_vars']
         
+        if 'environment_setup_completed' in config_dict:
+            config.environment_setup_completed = config_dict['environment_setup_completed']
+        
         return config
     
-    def msvc_bt(self):
+    def msvc_bt_config(self):
         msvc_bt_url = "https://aka.ms/vs/17/release/vs_buildtools.exe"
         msvc_bt_args = " --quiet --wait --norestart --nocache --add Microsoft.VisualStudio.Workload.NativeDesktop --add Microsoft.VisualStudio.Component.VC.CMake.Project --add Microsoft.VisualStudio.Component.VC.Llvm.Clang"
         return msvc_bt_url, msvc_bt_args
+
+    def is_environment_setup_completed(self) -> bool:
+        """
+        Check if environment setup has been completed successfully
+        
+        Returns:
+            True if environment setup is completed
+        """
+        # Force PyRight to re-read type definitions
+        return self.config.environment_setup_completed
+    
+    def mark_environment_setup_completed(self, completed: bool = True) -> bool:
+        """
+        Mark environment setup as completed and save config
+        
+        Args:
+            completed: Whether setup is completed
+            
+        Returns:
+            True if saved successfully
+        """
+        self.config.environment_setup_completed = completed
+        return self.save_config()
 
     def get_config_summary(self) -> str:
         """
@@ -391,10 +455,13 @@ class ConfigManager:
             tensorrt_support = False
         
         env_vars_count = len(self.config.environment_vars) if self.config.environment_vars else 0
+        setup_status = "✅ Completed" if self.config.environment_setup_completed else "❌ Not completed"
         
         summary = f"""
 PortableSource Configuration Summary
 ====================================
+
+Environment Setup: {setup_status}
 
 GPU Configuration:
   Name: {gpu_name}
