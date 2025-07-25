@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 class ServerAPIClient:
     """Client for PortableSource server API"""
 
-    def __init__(self, server_url: str = f"http://{SERVER_DOMAIN}"):
+    def __init__(self, server_url: str = f"https://{SERVER_DOMAIN}"):
         self.server_url = server_url.rstrip('/')
         self.session = requests.Session()
         self.timeout = 10
@@ -677,7 +677,7 @@ class MainFileFinder:
 class RepositoryInstaller:
     """Universal repository installer with intelligent dependency handling"""
     
-    def __init__(self, install_path: Optional[Union[str, Path]] = None, config_manager: Optional[ConfigManager] = None, server_url: str = f"http://{SERVER_DOMAIN}"):
+    def __init__(self, install_path: Optional[Union[str, Path]] = None, config_manager: Optional[ConfigManager] = None, server_url: str = f"https://{SERVER_DOMAIN}"):
         # Set base_path from install_path parameter
         if install_path:
             if isinstance(install_path, str):
