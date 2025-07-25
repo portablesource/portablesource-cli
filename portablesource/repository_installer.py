@@ -891,8 +891,6 @@ class RepositoryInstaller:
             logger.error(f"Error handling name installation for {repo_name}: {e}")
             return False
     
-
-
     
     def _get_repository_info(self, repo_url_or_name: str) -> Optional[Dict]:
         """Get repository information from server API or fallback methods"""
@@ -1315,6 +1313,97 @@ class RepositoryInstaller:
         # Fallback to system python
         return "python"
     
+    def _activate_micromamba_environment(self) -> bool:
+        """Activate micromamba environment to make CUDA packages visible"""
+        try:
+            if not self.config_manager.config.install_path:
+                logger.error("Install path not configured")
+                return False
+            
+            install_path = Path(self.config_manager.config.install_path)
+            micromamba_exe = install_path / "micromamba" / "micromamba.exe"
+            ps_env_path = install_path / "ps_env"
+            
+            if not micromamba_exe.exists():
+                logger.warning("Micromamba executable not found")
+                return False
+            
+            if not ps_env_path.exists():
+                logger.warning("Micromamba ps_env environment not found")
+                return False
+            
+            # Set environment variables for micromamba directly
+            import os
+            try:
+                # Set basic micromamba environment variables
+                os.environ['MAMBA_EXE'] = str(micromamba_exe)
+                os.environ['MAMBA_ROOT_PREFIX'] = str(install_path / "micromamba")
+                
+                # Initialize micromamba shell hook and execute it
+                result = subprocess.run([
+                    str(micromamba_exe), "shell", "hook", "-s", "cmd.exe"
+                ], capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0 and result.stdout.strip():
+                    # Extract the hook command from output
+                    hook_output = result.stdout.strip()
+                    if "mamba_hook.bat" in hook_output:
+                        # Execute the hook batch file to initialize micromamba
+                        import re
+                        hook_match = re.search(r'CALL "([^"]+mamba_hook\.bat)"', hook_output)
+                        if hook_match:
+                            hook_bat_path = hook_match.group(1)
+                            if Path(hook_bat_path).exists():
+                                # Execute the hook
+                                hook_result = subprocess.run([
+                                    "cmd.exe", "/c", f'CALL "{hook_bat_path}"'
+                                ], capture_output=True, text=True, timeout=30)
+                                
+                                if hook_result.returncode == 0:
+                                    logger.info("Micromamba hook executed successfully")
+                                else:
+                                    logger.warning(f"Hook execution failed: {hook_result.stderr}")
+                
+                # Add micromamba environment paths to PATH and other env vars
+                ps_env_bin = ps_env_path / "Scripts" if (ps_env_path / "Scripts").exists() else ps_env_path / "bin"
+                ps_env_lib = ps_env_path / "Library" / "bin" if (ps_env_path / "Library" / "bin").exists() else None
+                micromamba_dir = install_path / "micromamba"
+                
+                # Add condabin path for mamba command
+                import os
+                condabin_path = Path(os.path.expanduser("~")) / "AppData" / "Roaming" / "mamba" / "condabin"
+                
+                # Update PATH to include micromamba executable and environment
+                current_path = os.environ.get('PATH', '')
+                new_paths = [str(micromamba_dir), str(ps_env_bin)]  # Add micromamba directory first
+                if condabin_path.exists():
+                    new_paths.append(str(condabin_path))  # Add condabin for mamba command
+                if ps_env_lib:
+                    new_paths.append(str(ps_env_lib))
+                
+                if new_paths:
+                    os.environ['PATH'] = os.pathsep.join(new_paths + [current_path])
+                
+                # Set CONDA_PREFIX to point to ps_env
+                os.environ['CONDA_PREFIX'] = str(ps_env_path)
+                os.environ['CONDA_DEFAULT_ENV'] = 'ps_env'
+                
+                # Set Python path
+                python_path = ps_env_path / "python.exe"
+                if python_path.exists():
+                    os.environ['PYTHON_EXE'] = str(python_path)
+                
+                logger.info("Micromamba environment variables set successfully")
+                return True
+                
+            except Exception as e:
+                logger.warning(f"Error setting micromamba environment variables: {e}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error activating micromamba environment: {e}")
+            return False
+    
     def _get_pip_executable(self, repo_name: str) -> str:
         """Get pip executable path from repository's venv"""
         if self.config_manager.config.install_path:
@@ -1458,6 +1547,10 @@ class RepositoryInstaller:
                 logger.warning("Failed to install uv, falling back to pip for all packages")
                 return self._install_packages_with_pip_only(repo_name, requirements_path)
             
+            # Activate micromamba environment to make CUDA packages visible
+            if not self._activate_micromamba_environment():
+                logger.warning("Failed to activate micromamba environment, CUDA packages may not be visible")
+            
             # Analyze requirements to separate torch and regular packages
             packages = self.analyzer.analyze_requirements(requirements_path)
             plan = self.analyzer.create_installation_plan(packages, None)
@@ -1550,6 +1643,14 @@ class RepositoryInstaller:
                 logger.error(f"Invalid server plan structure for {repo_name}")
                 return False
             
+            # Install uv in venv first
+            if not self._install_uv_in_venv(repo_name):
+                logger.warning("Failed to install uv, some packages may use pip fallback")
+            
+            # Activate micromamba environment to make CUDA packages visible
+            if not self._activate_micromamba_environment():
+                logger.warning("Failed to activate micromamba environment, CUDA packages may not be visible")
+            
             pip_exe = self._get_pip_executable(repo_name)
             
             # Execute installation steps in order
@@ -1581,188 +1682,70 @@ class RepositoryInstaller:
                     logger.debug(f"Skipping empty package list at step {step_index} for {repo_name}")
                     continue
                 
-                # Determine which tool to use based on step type
-                # First try uv, then fallback to pip for regular packages
-                if step_type in ['regular', 'onnxruntime', 'insightface', 'triton']:
-                    # Always try to install uv for these packages (don't cache the result)
-                    uv_available = self._install_uv_in_venv(repo_name)
+                # Special handling for regular steps - split packages by type
+                if step_type == 'regular':
+                    # Separate packages into special and regular categories
+                    special_packages = {'onnxruntime': [], 'torch': [], 'insightface': [], 'triton': []}
+                    regular_packages = []
                     
-                    if uv_available:
-                        uv_cmd = self._get_uv_executable(repo_name)
-                        install_cmd = uv_cmd + ["pip", "install"]
-                        use_uv = True
-                        use_uv_first = True
-                    else:
-                        logger.warning(f"UV not available, using pip for {step_type} packages")
-                        install_cmd = [pip_exe, "install"]
-                        use_uv = False
-                        use_uv_first = False
-                else:
-                    # Use pip for torch packages (may need specific index URLs)
-                    install_cmd = [pip_exe, "install"]
-                    use_uv = False
-                    use_uv_first = False
-                
-                # Add packages with special handling for ONNX Runtime providers
-                onnx_provider = None
-                for package_index, package in enumerate(packages):
-                    if isinstance(package, dict):
-                        pkg_name = package.get('package_name', '')
-                        pkg_version = package.get('version', '')
-                        index_url = package.get('index_url', '')
-                        gpu_support = package.get('gpu_support', '')
-                        
-                        if pkg_name:
-                            # Special handling for ONNX Runtime with specific providers
-                            if step_type == 'onnxruntime':
-                                # Auto-detect GPU and modify package name accordingly
-                                gpu_config_obj = self.config_manager.config.gpu_config
-                                
-                                if pkg_name == "onnxruntime":
-                                    if gpu_config_obj and gpu_config_obj.name:
-                                        gpu_name_upper = gpu_config_obj.name.upper()
-                                        if gpu_name_upper.startswith('NVIDIA'):
-                                            pkg_name = "onnxruntime-gpu"
-                                        elif gpu_name_upper.startswith('AMD') and os.name == "nt":
-                                            # AMD GPU on Windows - use DirectML
-                                            pkg_name = "onnxruntime-directml"
-                                        elif gpu_name_upper.startswith('AMD') and os.name == "posix":
-                                            # AMD GPU on Linux - use ROCm
-                                            pkg_name = "onnxruntime-rocm"
-                                        elif gpu_name_upper.startswith('INTEL'):
-                                            # Intel GPU - use DirectML
-                                            pkg_name = "onnxruntime-directml"
-                                    # For CPU or unknown GPU types, keep original "onnxruntime"
-                                else:
-                                    # If server plan specifies a custom onnx_package_name, use it
-                                    onnx_package_name = server_plan.get('onnx_package_name')
-                                    if onnx_package_name:
-                                        pkg_name = onnx_package_name
-                            # Special handling for InsightFace on Windows
-                            elif step_type == 'insightface' and pkg_name == 'insightface' and os.name == "nt":
-                                pkg_str = "https://huggingface.co/hanamizuki-ai/pypi-wheels/resolve/main/insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl"
-                                install_cmd.append(pkg_str)
-                                continue
-                            # Special handling for Triton packages
-                            elif step_type == 'triton':
-                                # Triton packages are handled with pip directly
-                                pass
-                            
-                            if pkg_version:
-                                if pkg_version.startswith('>=') or pkg_version.startswith('=='):
-                                    pkg_str = f"{pkg_name}{pkg_version}"
-                                else:
-                                    pkg_str = f"{pkg_name}=={pkg_version}"
+                    for package in packages:
+                        if isinstance(package, str) and package.strip():
+                            package_str = package.strip().lower()
+                            if package_str.startswith('onnxruntime'):
+                                special_packages['onnxruntime'].append(package)
+                            elif package_str.startswith('torch') or package_str.startswith('torchvision') or package_str.startswith('torchaudio'):
+                                special_packages['torch'].append(package)
+                            elif package_str.startswith('insightface'):
+                                special_packages['insightface'].append(package)
+                            elif package_str.startswith('triton'):
+                                special_packages['triton'].append(package)
                             else:
-                                pkg_str = pkg_name
-                            
-                            install_cmd.append(pkg_str)
+                                regular_packages.append(package)
+                        elif isinstance(package, dict):
+                            pkg_name = package.get('package_name', '').lower()
+                            if pkg_name.startswith('onnxruntime'):
+                                special_packages['onnxruntime'].append(package)
+                            elif pkg_name.startswith('torch') or pkg_name.startswith('torchvision') or pkg_name.startswith('torchaudio'):
+                                special_packages['torch'].append(package)
+                            elif pkg_name.startswith('insightface'):
+                                special_packages['insightface'].append(package)
+                            elif pkg_name.startswith('triton'):
+                                special_packages['triton'].append(package)
+                            else:
+                                regular_packages.append(package)
                         else:
-                            logger.warning(f"Step {step_index}, Package {package_index}: Empty pkg_name, skipping package")
-                            
-                            # Add index URL if specified for this package
-                            if index_url and '--index-url' not in install_cmd:
-                                install_cmd.extend(['--index-url', index_url])
-                    else:
-                        # Handle string packages
-                         if isinstance(package, str) and package.strip():
-                            package_str = package.strip()
-                            
-                            # Apply GPU auto-detection for onnxruntime string packages
-                            if step_type == 'onnxruntime' and package_str.startswith('onnxruntime'):
-                                gpu_config_obj = self.config_manager.config.gpu_config
-                                
-                                if gpu_config_obj and gpu_config_obj.name:
-                                    gpu_name_upper = gpu_config_obj.name.upper()
-                                    
-                                    # Parse package string to extract version if present
-                                    if '==' in package_str:
-                                        _, version = package_str.split('==', 1)
-                                        if gpu_name_upper.startswith('NVIDIA'):
-                                            package_str = f"onnxruntime-gpu=={version}"
-                                        elif gpu_name_upper.startswith('AMD') and os.name == "nt":
-                                            package_str = f"onnxruntime-directml=={version}"
-                                        elif gpu_name_upper.startswith('AMD') and os.name == "posix":
-                                            package_str = f"onnxruntime-rocm=={version}"
-                                        elif gpu_name_upper.startswith('INTEL'):
-                                            package_str = f"onnxruntime-directml=={version}"
-                                    elif '>=' in package_str:
-                                        _, version = package_str.split('>=', 1)
-                                        if gpu_name_upper.startswith('NVIDIA'):
-                                            package_str = f"onnxruntime-gpu>={version}"
-                                        elif gpu_name_upper.startswith('AMD') and os.name == "nt":
-                                            package_str = f"onnxruntime-directml>={version}"
-                                        elif gpu_name_upper.startswith('AMD') and os.name == "posix":
-                                            package_str = f"onnxruntime-rocm>={version}"
-                                        elif gpu_name_upper.startswith('INTEL'):
-                                            package_str = f"onnxruntime-directml>={version}"
-                                    else:
-                                        # No version specified
-                                        if gpu_name_upper.startswith('NVIDIA'):
-                                            package_str = "onnxruntime-gpu"
-                                        elif gpu_name_upper.startswith('AMD') and os.name == "nt":
-                                            package_str = "onnxruntime-directml"
-                                        elif gpu_name_upper.startswith('AMD') and os.name == "posix":
-                                            package_str = "onnxruntime-rocm"
-                                        elif gpu_name_upper.startswith('INTEL'):
-                                            package_str = "onnxruntime-directml"
-                            
-                            install_cmd.append(package_str)
-
-                if server_plan.get('torch_index_url') and '--index-url' not in install_cmd:
-                    install_cmd.extend(['--index-url', server_plan['torch_index_url']])
+                            regular_packages.append(package)
+                    
+                    # Process special packages first with their specific logic
+                    for special_type, special_pkgs in special_packages.items():
+                        if special_pkgs:
+                            # Create a synthetic step for this special package type
+                            special_step = {
+                                'type': special_type,
+                                'packages': special_pkgs,
+                                'install_flags': install_flags,
+                                'description': f'Install {special_type} packages'
+                            }
+                            # Recursively process this special step
+                            if not self._process_installation_step(special_step, step_index, server_plan, repo_name, pip_exe):
+                                return False
+                    
+                    # Process remaining regular packages if any
+                    if regular_packages:
+                        regular_step = {
+                            'type': 'regular_only',
+                            'packages': regular_packages,
+                            'install_flags': install_flags,
+                            'description': 'Install regular packages'
+                        }
+                        if not self._process_installation_step(regular_step, step_index, server_plan, repo_name, pip_exe):
+                            return False
+                    
+                    continue  # Skip the normal processing for this step
                 
-                # Add install flags
-                if install_flags:
-                    install_cmd.extend(install_flags)
-                
-                # Execute command with progress and fallback logic
-                description = step.get('description', step_type)
-                if description.startswith('Install '):
-                    step_description = description.replace('Install ', 'Installing ', 1)
-                else:
-                    step_description = f"Installing {description}"
-                
-                # Debug logging: show what command will be executed (removed for cleaner output)
-                
-                # Check if there are actual packages to install
-                # For uv commands: [uv_exe, "pip", "install", ...packages_and_flags]
-                # For pip commands: [pip_exe, "install", ...packages_and_flags]
-                if use_uv:
-                    has_packages = len(install_cmd) > 3  # More than just [uv_exe, "pip", "install"]
-                else:
-                    has_packages = len(install_cmd) > 2  # More than just [pip_exe, "install"]
-                
-                if not has_packages:
-                    logger.warning(f"No packages to install for step {step_index}, skipping. Command would be: {install_cmd}")
-                    continue
-                
-                if step_type in ['regular', 'onnxruntime', 'insightface', 'triton'] and use_uv_first:
-                    # Try uv first, then fallback to pip if it fails
-                    try:
-                        self._run_uv_with_progress(install_cmd, step_description)
-                    except subprocess.CalledProcessError as e:
-                        logger.warning(f"UV installation failed, trying pip fallback: {e}")
-                        # Try pip fallback - extract packages and flags from uv command
-                        # uv command format: [uv_exe, "pip", "install", ...packages_and_flags]
-                        # pip command format: [pip_exe, "install", ...packages_and_flags]
-                        packages_and_flags = install_cmd[3:]  # Skip uv_exe, "pip", "install"
-                        
-                        # Safety check: ensure packages_and_flags doesn't contain "pip" or "install"
-                        # This can happen if the original command was malformed
-                        if packages_and_flags and ("pip" in packages_and_flags or "install" in packages_and_flags):
-                            logger.error(f"Malformed uv command detected, skipping pip fallback: {install_cmd}")
-                            continue
-                        
-                        if packages_and_flags:  # Only run if there are actual packages to install
-                            pip_install_cmd = [pip_exe, "install"] + packages_and_flags
-                            self._run_pip_with_progress(pip_install_cmd, f"{step_description} (pip fallback)")
-                        else:
-                            logger.warning(f"No packages to install in fallback for step {step_index}")
-                elif use_uv:
-                    self._run_uv_with_progress(install_cmd, step_description)
-                else:
-                    self._run_pip_with_progress(install_cmd, step_description)
+                # Normal processing for non-regular steps
+                if not self._process_installation_step(step, step_index, server_plan, repo_name, pip_exe):
+                    return False
             
             return True
             
@@ -1778,6 +1761,210 @@ class RepositoryInstaller:
         except Exception as e:
             logger.error(f"Unexpected error executing server installation plan for {repo_name}: {e}")
             return False
+    
+    def _process_installation_step(self, step: Dict, step_index: int, server_plan: Dict, repo_name: str, pip_exe: str) -> bool:
+        """Process a single installation step"""
+        try:
+            step_type = step.get('type', '')
+            packages = step.get('packages', [])
+            install_flags = step.get('install_flags', [])
+            
+            if not packages:
+                logger.debug(f"Skipping empty package list at step {step_index} for {repo_name}")
+                return True
+            
+            # Determine installation tool and build command
+            install_cmd, use_uv, use_uv_first = self._prepare_install_command(step_type, repo_name, pip_exe)
+            
+            # Process packages and add to command
+            self._add_packages_to_command(install_cmd, packages, step_type, server_plan)
+            
+            # Add additional flags and URLs
+            self._add_install_flags_and_urls(install_cmd, install_flags, server_plan)
+            
+            # Execute installation
+            return self._execute_install_command(install_cmd, step, step_type, step_index, use_uv, use_uv_first, pip_exe)
+            
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Package installation failed for {repo_name}: {e}")
+            return False
+        except KeyError as e:
+            logger.error(f"Missing required field in server plan for {repo_name}: {e}")
+            return False
+        except ValueError as e:
+            logger.error(f"Invalid data in server plan for {repo_name}: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error executing server installation plan for {repo_name}: {e}")
+            return False
+    
+    def _prepare_install_command(self, step_type: str, repo_name: str, pip_exe: str) -> tuple:
+        """Prepare the base installation command based on step type"""
+        if step_type in ['regular_only', 'onnxruntime', 'insightface', 'triton']:
+            uv_available = self._install_uv_in_venv(repo_name)
+            
+            if uv_available:
+                uv_cmd = self._get_uv_executable(repo_name)
+                install_cmd = uv_cmd + ["pip", "install"]
+                return install_cmd, True, True
+            else:
+                logger.warning(f"UV not available, using pip for {step_type} packages")
+                install_cmd = [pip_exe, "install"]
+                return install_cmd, False, False
+        else:
+            # Use pip for torch packages (may need specific index URLs)
+            install_cmd = [pip_exe, "install"]
+            return install_cmd, False, False
+    
+    def _add_packages_to_command(self, install_cmd: list, packages: list, step_type: str, server_plan: Dict):
+        """Add packages to the installation command with special handling"""
+        for package_index, package in enumerate(packages):
+            if isinstance(package, str) and package.strip():
+                package_str = self._process_string_package(package.strip(), step_type)
+                install_cmd.append(package_str)
+            elif isinstance(package, dict):
+                self._process_dict_package(install_cmd, package, step_type, server_plan, package_index)
+    
+    def _process_string_package(self, package_str: str, step_type: str) -> str:
+        """Process string package with GPU auto-detection for onnxruntime"""
+        if step_type == 'onnxruntime' and package_str.startswith('onnxruntime'):
+            return self._apply_gpu_detection_to_onnx(package_str)
+        elif step_type == 'insightface' and package_str.startswith('insightface') and os.name == "nt":
+            return "https://huggingface.co/hanamizuki-ai/pypi-wheels/resolve/main/insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl"
+        return package_str
+    
+    def _process_dict_package(self, install_cmd: list, package: Dict, step_type: str, server_plan: Dict, package_index: int):
+        """Process dictionary package with special handling"""
+        pkg_name = package.get('package_name', '')
+        pkg_version = package.get('version', '')
+        index_url = package.get('index_url', '')
+        
+        if not pkg_name:
+            logger.warning(f"Package {package_index}: Empty pkg_name, skipping package")
+            if index_url and '--index-url' not in install_cmd:
+                install_cmd.extend(['--index-url', index_url])
+            return
+        
+        # Apply special handling based on step type
+        pkg_name = self._apply_special_package_handling(pkg_name, step_type, server_plan)
+        
+        # Handle special case for InsightFace on Windows
+        if step_type == 'insightface' and pkg_name == 'insightface' and os.name == "nt":
+            install_cmd.append("https://huggingface.co/hanamizuki-ai/pypi-wheels/resolve/main/insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl")
+            return
+        
+        # Build package string with version
+        pkg_str = self._build_package_string(pkg_name, pkg_version)
+        install_cmd.append(pkg_str)
+    
+    def _apply_gpu_detection_to_onnx(self, package_str: str) -> str:
+        """Apply GPU auto-detection for onnxruntime packages"""
+        gpu_config_obj = self.config_manager.config.gpu_config
+        
+        if not (gpu_config_obj and gpu_config_obj.name):
+            return package_str
+        
+        gpu_name_upper = gpu_config_obj.name.upper()
+        
+        # Parse package string to extract version if present
+        if '==' in package_str:
+            _, version = package_str.split('==', 1)
+            return self._get_gpu_specific_onnx_package(gpu_name_upper, f"=={version}")
+        elif '>=' in package_str:
+            _, version = package_str.split('>=', 1)
+            return self._get_gpu_specific_onnx_package(gpu_name_upper, f">={version}")
+        else:
+            return self._get_gpu_specific_onnx_package(gpu_name_upper, "")
+    
+    def _get_gpu_specific_onnx_package(self, gpu_name_upper: str, version_suffix: str) -> str:
+        """Get GPU-specific onnxruntime package name"""
+        if gpu_name_upper.startswith('NVIDIA'):
+            return f"onnxruntime-gpu{version_suffix}"
+        elif gpu_name_upper.startswith('AMD') and os.name == "nt":
+            return f"onnxruntime-directml{version_suffix}"
+        elif gpu_name_upper.startswith('AMD') and os.name == "posix":
+            return f"onnxruntime-rocm{version_suffix}"
+        elif gpu_name_upper.startswith('INTEL'):
+            return f"onnxruntime-directml{version_suffix}"
+        else:
+            return f"onnxruntime{version_suffix}"
+    
+    def _apply_special_package_handling(self, pkg_name: str, step_type: str, server_plan: Dict) -> str:
+        """Apply special handling for specific package types"""
+        if step_type == 'onnxruntime' and pkg_name == "onnxruntime":
+            gpu_config_obj = self.config_manager.config.gpu_config
+            
+            if gpu_config_obj and gpu_config_obj.name:
+                gpu_name_upper = gpu_config_obj.name.upper()
+                if gpu_name_upper.startswith('NVIDIA'):
+                    return "onnxruntime-gpu"
+                elif gpu_name_upper.startswith('AMD') and os.name == "nt":
+                    return "onnxruntime-directml"
+                elif gpu_name_upper.startswith('AMD') and os.name == "posix":
+                    return "onnxruntime-rocm"
+                elif gpu_name_upper.startswith('INTEL'):
+                    return "onnxruntime-directml"
+            
+            # Check for custom onnx package name in server plan
+            onnx_package_name = server_plan.get('onnx_package_name')
+            if onnx_package_name:
+                return onnx_package_name
+        
+        return pkg_name
+    
+    def _build_package_string(self, pkg_name: str, pkg_version: str) -> str:
+        """Build package string with version"""
+        if pkg_version:
+            if pkg_version.startswith('>=') or pkg_version.startswith('=='):
+                return f"{pkg_name}{pkg_version}"
+            else:
+                return f"{pkg_name}=={pkg_version}"
+        else:
+            return pkg_name
+    
+    def _add_install_flags_and_urls(self, install_cmd: list, install_flags: list, server_plan: Dict):
+        """Add installation flags and index URLs to command"""
+        # Add torch index URL if specified
+        if server_plan.get('torch_index_url') and '--index-url' not in install_cmd:
+            install_cmd.extend(['--index-url', server_plan['torch_index_url']])
+        
+        # Add install flags
+        if install_flags:
+            install_cmd.extend(install_flags)
+    
+    def _execute_install_command(self, install_cmd: list, step: Dict, step_type: str, step_index: int, use_uv: bool, use_uv_first: bool, pip_exe: str) -> bool:
+        """Execute the installation command with appropriate tool"""
+        description = step.get('description', step_type)
+        if description.startswith('Install '):
+            step_description = description.replace('Install ', 'Installing ', 1)
+        else:
+            step_description = f"Installing {description}"
+        
+        if step_type in ['regular', 'onnxruntime', 'insightface', 'triton'] and use_uv_first:
+            return self._try_uv_with_pip_fallback(install_cmd, step_description, step_index, pip_exe)
+        elif use_uv:
+            self._run_uv_with_progress(install_cmd, step_description)
+        else:
+            self._run_pip_with_progress(install_cmd, step_description)
+        
+        return True
+    
+    def _try_uv_with_pip_fallback(self, install_cmd: list, step_description: str, step_index: int, pip_exe: str) -> bool:
+        """Try uv first, then fallback to pip if it fails"""
+        try:
+            self._run_uv_with_progress(install_cmd, step_description)
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"UV installation failed, trying pip fallback: {e}")
+            # Extract packages and flags from uv command
+            packages_and_flags = install_cmd[3:]  # Skip uv_exe, "pip", "install"
+            
+            if packages_and_flags:
+                pip_install_cmd = [pip_exe, "install"] + packages_and_flags
+                self._run_pip_with_progress(pip_install_cmd, f"{step_description} (pip fallback)")
+            else:
+                logger.warning(f"No packages to install in fallback for step {step_index}")
+        
+        return True
     
     def _execute_installation_plan(self, plan: InstallationPlan, original_requirements: Path, repo_name: str) -> bool:
         """Execute the installation plan using base Python"""
@@ -1874,7 +2061,12 @@ class RepositoryInstaller:
         models_dir.mkdir(exist_ok=True)
     
     def _generate_startup_script(self, repo_path: Path, repo_info: Dict):
-        """Generate startup script with dual activation (micromamba + venv)"""
+        """Generate startup script using only venv activation, with manual CUDA/library path setup.
+        
+        This version explicitly removes all micromamba-related activation
+        due to observed persistent shell initialization issues,
+        but adds necessary library paths (like CUDA) that micromamba would provide.
+        """
         try:
             repo_name = repo_path.name.lower()
             
@@ -1891,7 +2083,7 @@ class RepositoryInstaller:
                     logger.error(f"   - {py_file.name}")
                 return False
             
-            # Create startup script with dual activation
+            # Create startup script
             bat_file = repo_path / f"start_{repo_name}.bat"
             
             if not self.config_manager.config.install_path:
@@ -1899,8 +2091,10 @@ class RepositoryInstaller:
                 return False
             
             install_path = Path(self.config_manager.config.install_path)
-            micromamba_exe = install_path / "micromamba" / "micromamba.exe"
-            ps_env_path = install_path / "ps_env"
+            
+            # Path to the base ps_env environment's Library folder (where CUDA libs are)
+            ps_env_library_path = install_path / "ps_env" / "Library"
+
             venv_activate = install_path / "envs" / repo_name / "Scripts" / "activate.bat"
             
             # Get program args from repo info
@@ -1909,21 +2103,76 @@ class RepositoryInstaller:
             # Setup tmp directory path
             tmp_path = install_path / "tmp"
             
-            # Generate batch file content
             bat_content = f"""@echo off
 echo Launch {repo_name}...
-cd /d "{repo_path}"
 
 REM Setup temporary directory
 set USERPROFILE={tmp_path}
 set TEMP={tmp_path}
 set TMP={tmp_path}
 
-call "{micromamba_exe}" shell hook -s cmd.exe > nul
-call micromamba activate "{ps_env_path}" > nul
-call "{venv_activate}"
-cls
+REM Security and compatibility settings
+set PYTHONIOENCODING=utf-8
+set PYTHONUNBUFFERED=1
+set PYTHONDONTWRITEBYTECODE=1
+
+REM === MICROMAMBA ACTIVATION REMOVED DUE TO PERSISTENT SHELL ISSUES ===
+REM All micromamba-related activation calls are removed.
+REM The system now relies solely on Venv for Python environment management.
+
+REM === ADD CUDA/MAMBA LIBRARY PATHS MANUALLY ===
+REM This is crucial for applications requiring CUDA, FFmpeg, etc., when not using micromamba's activation.
+REM These paths come from the 'ps_env/Library' folder where micromamba places shared native libraries.
+set PATH={ps_env_library_path}\\bin;%PATH%
+set PATH={ps_env_library_path}\\lib;%PATH%
+set PATH={ps_env_library_path}\\cmd;%PATH%
+set PATH={ps_env_library_path}\\include;%PATH%
+set PATH={ps_env_library_path}\\nvvm;%PATH%
+REM Add micromamba's own directory to PATH in case any micromamba commands are needed later (e.g. for updates)
+set PATH={install_path}\\micromamba;%PATH%
+
+
+REM Activate venv
+echo Activating virtual environment...
+if exist \"{venv_activate}\" (
+    call \"{venv_activate}\"
+    if %ERRORLEVEL% neq 0 (
+        echo Error activating virtual environment: {venv_activate}
+        pause
+        exit /b 1
+    )
+) else (
+    echo Virtual environment not found: {venv_activate}
+    pause
+    exit /b 1
+)
+
+REM Change to repository directory
+echo Change to repository directory...
+cd /d \"{repo_path}\"
+if %ERRORLEVEL% neq 0 (
+    echo Error changing to repository directory: {repo_path}
+    pause
+    exit /b 1
+)
+
+REM Run the application
+echo RUN {main_file}...
 python {main_file} {program_args}
+set EXIT_CODE=%ERRORLEVEL%
+
+REM Check result
+if %EXIT_CODE% neq 0 (
+    echo.
+    echo Program finished with error (code: %EXIT_CODE%)
+    echo Check logs above for more information about the error.
+    echo.
+) else (
+    echo.
+    echo Program finished successfully
+    echo.
+)
+
 pause
 """
             
@@ -2398,8 +2647,9 @@ pause
             
             # Update the repository using git pull
             try:
+                git_exe = self.base_path / "ps_env" / "Library" / "cmd" / "git.exe"
                 result = subprocess.run(
-                    ["git", "pull"],
+                    [str(git_exe), "pull"],
                     cwd=repo_path,
                     capture_output=True,
                     text=True,

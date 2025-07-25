@@ -176,7 +176,12 @@ def main():
             logger.error("Installation path not defined")
     
     if args.install_repo:
-        app.install_repository(args.install_repo)
+        success = app.install_repository(args.install_repo)
+        if success:
+            logger.info(f"✅ Repository '{args.install_repo}' installed successfully")
+        else:
+            logger.error(f"❌ Failed to install repository '{args.install_repo}'")
+            sys.exit(1)
     
     if args.update_repo:
         app.update_repository(args.update_repo)

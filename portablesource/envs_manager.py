@@ -171,8 +171,15 @@ class MicromambaManager:
     def get_activation_commands(self) -> List[str]:
         """Get the activation commands for micromamba shell hook (for batch files)"""
         if os.name == 'nt':
+            mamba_hook_path = self.micromamba_path / "condabin" / "mamba_hook.bat"
+
+            if not mamba_hook_path.exists():
+                logger.error(f"❌ mamba_hook.bat not found at path: {mamba_hook_path}. "
+                               "Make sure micromamba has been initialized (e.g. by running environment_manager.py).")
+                return []
+
             return [
-                f'call "{self.micromamba_exe}" shell hook -s cmd.exe > nul',
+                f'call "{mamba_hook_path}"',
                 f'call micromamba activate "{self.ps_env_path}"'
             ]
         else:
