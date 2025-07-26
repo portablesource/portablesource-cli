@@ -483,13 +483,19 @@ class RequirementsAnalyzer:
         cuda_version = gpu_config.cuda_version if gpu_config else None
         
         # Determine CUDA version for PyTorch
-        if cuda_version and hasattr(cuda_version, 'value'):
-            cuda_version_str = cuda_version.value
-            if cuda_version_str == "12.8":
+        if cuda_version:
+            # Handle both string and object formats
+            if hasattr(cuda_version, 'value'):
+                cuda_version_str = cuda_version.value
+            else:
+                cuda_version_str = str(cuda_version)
+            
+            # Map CUDA versions to PyTorch index URLs
+            if cuda_version_str in ["12.8", "128"]:
                 return "https://download.pytorch.org/whl/cu128"
-            elif cuda_version_str == "12.4":
+            elif cuda_version_str in ["12.4", "124"]:
                 return "https://download.pytorch.org/whl/cu124"
-            elif cuda_version_str == "11.8":
+            elif cuda_version_str in ["11.8", "118"]:
                 return "https://download.pytorch.org/whl/cu118"
         
         return "https://download.pytorch.org/whl/cpu"  # Fallback to CPU
@@ -920,7 +926,7 @@ class RepositoryInstaller:
             if 'success' in server_info and 'repository' in server_info:
                 repository = server_info['repository']
                 return {
-                    "url": repository.get("repositoryUrl", repo_url),
+                    "url": repository.get("repositoryUrl", repo_url).strip() if repository.get("repositoryUrl") else repo_url,
                     "main_file": repository.get("filePath", "main.py"),
                     "program_args": repository.get("programArgs", ""),
                     "special_setup": self._get_special_setup(repo_name)
