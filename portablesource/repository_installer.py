@@ -1328,18 +1328,18 @@ class RepositoryInstaller:
             logger.error(f"Error activating portable environment: {e}")
             return False
     
-    def _get_pip_executable(self, repo_name: str) -> str:
-        """Get pip executable path from repository's environment"""
+    def _get_pip_executable(self, repo_name: str) -> List[str]:
+        """Get pip executable command from repository's environment"""
         if self.config_manager.config and self.config_manager.config.install_path:
             install_path = Path(self.config_manager.config.install_path)
             venv_path = install_path / "envs" / repo_name
-            # For copied portable Python, pip is in Scripts subdirectory
-            pip_path = venv_path / "Scripts" / "pip.exe" if os.name == 'nt' else venv_path / "bin" / "pip"
-            if pip_path.exists():
-                return str(pip_path)
+            # For copied portable Python, python.exe is in the root of the copied directory
+            python_path = venv_path / "python.exe" if os.name == 'nt' else venv_path / "bin" / "python"
+            if python_path.exists():
+                return [str(python_path), "-m", "pip"]
         
-        # Fallback to system pip
-        return "pip"
+        # Fallback to system python with pip
+        return ["python", "-m", "pip"]
     
     def _get_uv_executable(self, repo_name: str) -> List[str]:
         """Get uv executable command from repository's environment"""
@@ -1367,7 +1367,7 @@ class RepositoryInstaller:
                 pass  # UV not available, continue with installation
             
             pip_exe = self._get_pip_executable(repo_name)
-            self._run_pip_with_progress([pip_exe, "install", "uv"], "Installing uv")
+            self._run_pip_with_progress(pip_exe + ["install", "uv"], "Installing uv")
             
             # Verify installation
             try:
@@ -1493,7 +1493,7 @@ class RepositoryInstaller:
             
             # Install torch packages with pip (they need special index URLs)
             if plan.torch_packages:
-                torch_cmd = [pip_exe, "install"]
+                torch_cmd = pip_exe + ["install"]
                 
                 for package in plan.torch_packages:
                     torch_cmd.append(str(package))
@@ -1514,7 +1514,7 @@ class RepositoryInstaller:
                 else:
                     package_str = onnx_package_name
 
-                self._run_pip_with_progress([pip_exe, "install", package_str], f"Installing ONNX package: {package_str}")
+                self._run_pip_with_progress(pip_exe + ["install", package_str], f"Installing ONNX package: {package_str}")
             
             # Install InsightFace packages with special handling
             if plan.insightface_packages:
@@ -1695,7 +1695,7 @@ class RepositoryInstaller:
             logger.error(f"Unexpected error executing server installation plan for {repo_name}: {e}")
             return False
     
-    def _process_installation_step(self, step: Dict, step_index: int, server_plan: Dict, repo_name: str, pip_exe: str) -> bool:
+    def _process_installation_step(self, step: Dict, step_index: int, server_plan: Dict, repo_name: str, pip_exe: List[str]) -> bool:
         """Process a single installation step"""
         try:
             step_type = step.get('type', '')
@@ -1731,7 +1731,7 @@ class RepositoryInstaller:
             logger.error(f"Unexpected error executing server installation plan for {repo_name}: {e}")
             return False
     
-    def _prepare_install_command(self, step_type: str, repo_name: str, pip_exe: str) -> tuple:
+    def _prepare_install_command(self, step_type: str, repo_name: str, pip_exe: List[str]) -> tuple:
         """Prepare the base installation command based on step type"""
         if step_type in ['regular_only', 'onnxruntime', 'insightface', 'triton']:
             uv_available = self._install_uv_in_venv(repo_name)
@@ -1742,11 +1742,11 @@ class RepositoryInstaller:
                 return install_cmd, True, True
             else:
                 logger.warning(f"UV not available, using pip for {step_type} packages")
-                install_cmd = [pip_exe, "install"]
+                install_cmd = pip_exe + ["install"]
                 return install_cmd, False, False
         else:
             # Use pip for torch packages (may need specific index URLs)
-            install_cmd = [pip_exe, "install"]
+            install_cmd = pip_exe + ["install"]
             return install_cmd, False, False
     
     def _add_packages_to_command(self, install_cmd: list, packages: list, step_type: str, server_plan: Dict):
@@ -1865,7 +1865,7 @@ class RepositoryInstaller:
         if install_flags:
             install_cmd.extend(install_flags)
     
-    def _execute_install_command(self, install_cmd: list, step: Dict, step_type: str, step_index: int, use_uv: bool, use_uv_first: bool, pip_exe: str) -> bool:
+    def _execute_install_command(self, install_cmd: list, step: Dict, step_type: str, step_index: int, use_uv: bool, use_uv_first: bool, pip_exe: List[str]) -> bool:
         """Execute the installation command with appropriate tool"""
         description = step.get('description', step_type)
         if description.startswith('Install '):
@@ -1882,7 +1882,7 @@ class RepositoryInstaller:
         
         return True
     
-    def _try_uv_with_pip_fallback(self, install_cmd: list, step_description: str, step_index: int, pip_exe: str) -> bool:
+    def _try_uv_with_pip_fallback(self, install_cmd: list, step_description: str, step_index: int, pip_exe: List[str]) -> bool:
         """Try uv first, then fallback to pip if it fails"""
         try:
             self._run_uv_with_progress(install_cmd, step_description)
@@ -1892,7 +1892,7 @@ class RepositoryInstaller:
             packages_and_flags = install_cmd[3:]  # Skip uv_exe, "pip", "install"
             
             if packages_and_flags:
-                pip_install_cmd = [pip_exe, "install"] + packages_and_flags
+                pip_install_cmd = pip_exe + ["install"] + packages_and_flags
                 self._run_pip_with_progress(pip_install_cmd, f"{step_description} (pip fallback)")
             else:
                 logger.warning(f"No packages to install in fallback for step {step_index}")
@@ -2455,7 +2455,7 @@ pause
             
             # Use pip as fallback or primary method
             pip_exe = self._get_pip_executable(repo_name)
-            install_cmd = [pip_exe, "install"] + packages
+            install_cmd = pip_exe + ["install"] + packages
             
             if index_url:
                 install_cmd.extend(["--index-url", index_url])
@@ -2510,7 +2510,7 @@ pause
             
             # Use pip as fallback or primary method
             pip_exe = self._get_pip_executable(repo_name)
-            install_cmd = [pip_exe, "install"] + packages
+            install_cmd = pip_exe + ["install"] + packages
             
             if index_url:
                 install_cmd.extend(["--index-url", index_url])
