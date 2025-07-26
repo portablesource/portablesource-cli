@@ -19,8 +19,8 @@ from enum import Enum
 
 from tqdm import tqdm
 
-from portablesource.config import ConfigManager, SERVER_DOMAIN
-
+from .config import ConfigManager, SERVER_DOMAIN
+from .envs_manager import PortableEnvironmentManager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -449,7 +449,7 @@ class RequirementsAnalyzer:
         plan = InstallationPlan()
         
         # Get GPU information from config
-        gpu_config_obj = self.config_manager.config.gpu_config
+        gpu_config_obj = self.config_manager.config.gpu_config if self.config_manager.config else None
         
         # Categorize packages
         for package in packages:
@@ -480,7 +480,7 @@ class RequirementsAnalyzer:
             return "https://download.pytorch.org/whl/cpu"
         
         # Get CUDA version from config
-        cuda_version = gpu_config.cuda_version
+        cuda_version = gpu_config.cuda_version if gpu_config else None
         
         # Determine CUDA version for PyTorch
         if cuda_version and hasattr(cuda_version, 'value'):
@@ -501,7 +501,7 @@ class RequirementsAnalyzer:
         if not gpu_config or not gpu_config.name:
             return "onnxruntime"
 
-        gpu_name_upper = gpu_config.name.upper()
+        gpu_name_upper = gpu_config.name.upper() if gpu_config and gpu_config.name else ""
         if gpu_name_upper.startswith('NVIDIA'):
             return "onnxruntime-gpu"
         elif (gpu_name_upper.startswith('AMD') or gpu_name_upper.startswith('INTEL')) and os.name == 'nt':
@@ -551,7 +551,7 @@ class RequirementsAnalyzer:
             )
         else:
             # Auto-detect based on system config
-            gpu_config_obj = self.config_manager.config.gpu_config
+            gpu_config_obj = self.config_manager.config.gpu_config if self.config_manager.config else None
             package_name = self._get_onnx_package_name_from_config(gpu_config_obj)
             env_vars = {}
             
@@ -698,6 +698,9 @@ class RepositoryInstaller:
         else:
             self.config_manager = config_manager
         self.analyzer = RequirementsAnalyzer(config_manager=self.config_manager)
+        
+        # Initialize environment manager
+        self.environment_manager = PortableEnvironmentManager(self.base_path, self.config_manager)
         
         # Initialize server client and main file finder
         self.server_client = ServerAPIClient(server_url)
@@ -1288,13 +1291,10 @@ class RepositoryInstaller:
          return False
     
     def _get_git_executable(self) -> str:
-        """Get git executable path from micromamba environment"""
-        if self.config_manager.config.install_path:
-            install_path = Path(self.config_manager.config.install_path)
-            ps_env_path = install_path / "ps_env"
-            git_path = ps_env_path / "Scripts" / "git.exe"
-            if git_path.exists():
-                return str(git_path)
+        """Get git executable path from portable environment"""
+        git_path = self.environment_manager.get_git_executable()
+        if git_path and git_path.exists():
+            return str(git_path)
         
         # Fallback to system git
         return "git"
@@ -1302,114 +1302,39 @@ class RepositoryInstaller:
 
     
     def _get_python_executable(self) -> str:
-        """Get Python executable path from micromamba environment"""
-        if self.config_manager.config.install_path:
-            install_path = Path(self.config_manager.config.install_path)
-            ps_env_path = install_path / "ps_env"
-            python_path = ps_env_path / "python.exe"
-            if python_path.exists():
-                return str(python_path)
+        """Get Python executable path from portable environment"""
+        python_path = self.environment_manager.get_python_executable()
+        if python_path and python_path.exists():
+            return str(python_path)
         
         # Fallback to system python
         return "python"
     
-    def _activate_micromamba_environment(self) -> bool:
-        """Activate micromamba environment to make CUDA packages visible"""
+    def _activate_portable_environment(self) -> bool:
+        """Activate portable environment to make packages visible"""
         try:
-            if not self.config_manager.config.install_path:
-                logger.error("Install path not configured")
-                return False
+            # Setup environment variables using portable environment manager
+            env_vars = self.environment_manager.setup_environment_for_subprocess()
             
-            install_path = Path(self.config_manager.config.install_path)
-            micromamba_exe = install_path / "micromamba" / "micromamba.exe"
-            ps_env_path = install_path / "ps_env"
-            
-            if not micromamba_exe.exists():
-                logger.warning("Micromamba executable not found")
-                return False
-            
-            if not ps_env_path.exists():
-                logger.warning("Micromamba ps_env environment not found")
-                return False
-            
-            # Set environment variables for micromamba directly
+            # Update current process environment
             import os
-            try:
-                # Set basic micromamba environment variables
-                os.environ['MAMBA_EXE'] = str(micromamba_exe)
-                os.environ['MAMBA_ROOT_PREFIX'] = str(install_path / "micromamba")
-                
-                # Initialize micromamba shell hook and execute it
-                result = subprocess.run([
-                    str(micromamba_exe), "shell", "hook", "-s", "cmd.exe"
-                ], capture_output=True, text=True, timeout=30)
-                
-                if result.returncode == 0 and result.stdout.strip():
-                    # Extract the hook command from output
-                    hook_output = result.stdout.strip()
-                    if "mamba_hook.bat" in hook_output:
-                        # Execute the hook batch file to initialize micromamba
-                        import re
-                        hook_match = re.search(r'CALL "([^"]+mamba_hook\.bat)"', hook_output)
-                        if hook_match:
-                            hook_bat_path = hook_match.group(1)
-                            if Path(hook_bat_path).exists():
-                                # Execute the hook
-                                hook_result = subprocess.run([
-                                    "cmd.exe", "/c", f'CALL "{hook_bat_path}"'
-                                ], capture_output=True, text=True, timeout=30)
-                                
-                                if hook_result.returncode == 0:
-                                    logger.info("Micromamba hook executed successfully")
-                                else:
-                                    logger.warning(f"Hook execution failed: {hook_result.stderr}")
-                
-                # Add micromamba environment paths to PATH and other env vars
-                ps_env_bin = ps_env_path / "Scripts" if (ps_env_path / "Scripts").exists() else ps_env_path / "bin"
-                ps_env_lib = ps_env_path / "Library" / "bin" if (ps_env_path / "Library" / "bin").exists() else None
-                micromamba_dir = install_path / "micromamba"
-                
-                # Add condabin path for mamba command
-                import os
-                condabin_path = Path(os.path.expanduser("~")) / "AppData" / "Roaming" / "mamba" / "condabin"
-                
-                # Update PATH to include micromamba executable and environment
-                current_path = os.environ.get('PATH', '')
-                new_paths = [str(micromamba_dir), str(ps_env_bin)]  # Add micromamba directory first
-                if condabin_path.exists():
-                    new_paths.append(str(condabin_path))  # Add condabin for mamba command
-                if ps_env_lib:
-                    new_paths.append(str(ps_env_lib))
-                
-                if new_paths:
-                    os.environ['PATH'] = os.pathsep.join(new_paths + [current_path])
-                
-                # Set CONDA_PREFIX to point to ps_env
-                os.environ['CONDA_PREFIX'] = str(ps_env_path)
-                os.environ['CONDA_DEFAULT_ENV'] = 'ps_env'
-                
-                # Set Python path
-                python_path = ps_env_path / "python.exe"
-                if python_path.exists():
-                    os.environ['PYTHON_EXE'] = str(python_path)
-                
-                logger.info("Micromamba environment variables set successfully")
-                return True
-                
-            except Exception as e:
-                logger.warning(f"Error setting micromamba environment variables: {e}")
-                return False
+            for key, value in env_vars.items():
+                os.environ[key] = value
+            
+            logger.info("Portable environment variables set successfully")
+            return True
                 
         except Exception as e:
-            logger.error(f"Error activating micromamba environment: {e}")
+            logger.error(f"Error activating portable environment: {e}")
             return False
     
     def _get_pip_executable(self, repo_name: str) -> str:
-        """Get pip executable path from repository's venv"""
-        if self.config_manager.config.install_path:
+        """Get pip executable path from repository's environment"""
+        if self.config_manager.config and self.config_manager.config.install_path:
             install_path = Path(self.config_manager.config.install_path)
             venv_path = install_path / "envs" / repo_name
-            pip_path = venv_path / "Scripts" / "pip.exe"
+            # For copied portable Python, pip is in Scripts subdirectory
+            pip_path = venv_path / "Scripts" / "pip.exe" if os.name == 'nt' else venv_path / "bin" / "pip"
             if pip_path.exists():
                 return str(pip_path)
         
@@ -1417,11 +1342,12 @@ class RepositoryInstaller:
         return "pip"
     
     def _get_uv_executable(self, repo_name: str) -> List[str]:
-        """Get uv executable command from repository's venv"""
-        if self.config_manager.config.install_path:
+        """Get uv executable command from repository's environment"""
+        if self.config_manager.config and self.config_manager.config.install_path:
             install_path = Path(self.config_manager.config.install_path)
             venv_path = install_path / "envs" / repo_name
-            python_path = venv_path / "Scripts" / "python.exe"
+            # For copied portable Python, python.exe is in the root of the copied directory
+            python_path = venv_path / "python.exe" if os.name == 'nt' else venv_path / "bin" / "python"
             if python_path.exists():
                 return [str(python_path), "-m", "uv"]
         
@@ -1504,39 +1430,46 @@ class RepositoryInstaller:
             return False
     
     def _create_venv_environment(self, repo_name: str) -> bool:
-        """Create venv environment for repository"""
+        """Create environment for repository by copying portable Python installation"""
         try:
-            if not self.config_manager.config.install_path:
+            if not self.config_manager.config or not self.config_manager.config.install_path:
                 logger.error("Install path not configured")
                 return False
             
             install_path = Path(self.config_manager.config.install_path)
             envs_path = install_path / "envs"
             venv_path = envs_path / repo_name
+            ps_env_python_path = install_path / "ps_env" / "python"
+            
+            # Check if portable Python exists
+            if not ps_env_python_path.exists():
+                logger.error(f"Portable Python not found at: {ps_env_python_path}")
+                return False
             
             # Create envs directory if it doesn't exist
             envs_path.mkdir(parents=True, exist_ok=True)
             
-            # Remove existing venv if exists
+            # Remove existing environment if exists
             if venv_path.exists():
                 import shutil
                 shutil.rmtree(venv_path)
             
-            # Create new venv using micromamba python
-            python_exe = self._get_python_executable()
+            # Copy portable Python installation to create isolated environment
+            import shutil
+            logger.info(f"Creating environment by copying portable Python: {ps_env_python_path} -> {venv_path}")
+            shutil.copytree(ps_env_python_path, venv_path)
             
-            result = subprocess.run([
-                python_exe, "-m", "venv", str(venv_path)
-            ], capture_output=True, text=True)
-            
-            if result.returncode == 0:
+            # Verify that Python executable exists in the new environment
+            python_exe = venv_path / "python.exe" if os.name == 'nt' else venv_path / "bin" / "python"
+            if python_exe.exists():
+                logger.info(f"[OK] Environment created successfully for {repo_name}")
                 return True
             else:
-                logger.error(f"Failed to create venv: {result.stderr}")
+                logger.error(f"Python executable not found in copied environment: {python_exe}")
                 return False
                 
         except Exception as e:
-            logger.error(f"Error creating venv environment: {e}")
+            logger.error(f"Error creating environment: {e}")
             return False
     
     def _install_packages_in_venv(self, repo_name: str, requirements_path: Path) -> bool:
@@ -1547,9 +1480,9 @@ class RepositoryInstaller:
                 logger.warning("Failed to install uv, falling back to pip for all packages")
                 return self._install_packages_with_pip_only(repo_name, requirements_path)
             
-            # Activate micromamba environment to make CUDA packages visible
-            if not self._activate_micromamba_environment():
-                logger.warning("Failed to activate micromamba environment, CUDA packages may not be visible")
+            # Activate portable environment to make CUDA packages visible
+            if not self._activate_portable_environment():
+                logger.warning("Failed to activate portable environment, CUDA packages may not be visible")
             
             # Analyze requirements to separate torch and regular packages
             packages = self.analyzer.analyze_requirements(requirements_path)
@@ -1647,9 +1580,9 @@ class RepositoryInstaller:
             if not self._install_uv_in_venv(repo_name):
                 logger.warning("Failed to install uv, some packages may use pip fallback")
             
-            # Activate micromamba environment to make CUDA packages visible
-            if not self._activate_micromamba_environment():
-                logger.warning("Failed to activate micromamba environment, CUDA packages may not be visible")
+            # Activate portable environment to make CUDA packages visible
+            if not self._activate_portable_environment():
+                logger.warning("Failed to activate portable environment, CUDA packages may not be visible")
             
             pip_exe = self._get_pip_executable(repo_name)
             
@@ -1859,7 +1792,7 @@ class RepositoryInstaller:
     
     def _apply_gpu_detection_to_onnx(self, package_str: str) -> str:
         """Apply GPU auto-detection for onnxruntime packages"""
-        gpu_config_obj = self.config_manager.config.gpu_config
+        gpu_config_obj = self.config_manager.config.gpu_config if self.config_manager.config else None
         
         if not (gpu_config_obj and gpu_config_obj.name):
             return package_str
@@ -1892,7 +1825,7 @@ class RepositoryInstaller:
     def _apply_special_package_handling(self, pkg_name: str, step_type: str, server_plan: Dict) -> str:
         """Apply special handling for specific package types"""
         if step_type == 'onnxruntime' and pkg_name == "onnxruntime":
-            gpu_config_obj = self.config_manager.config.gpu_config
+            gpu_config_obj = self.config_manager.config.gpu_config if self.config_manager.config else None
             
             if gpu_config_obj and gpu_config_obj.name:
                 gpu_name_upper = gpu_config_obj.name.upper()
@@ -1984,7 +1917,7 @@ class RepositoryInstaller:
             
             # Install ONNX Runtime packages with GPU auto-detection for fallback
             if plan.onnx_packages:
-                gpu_config_obj = self.config_manager.config.gpu_config
+                gpu_config_obj = self.config_manager.config.gpu_config if self.config_manager.config else None
                 
                 for package in plan.onnx_packages:
                     # Auto-detect GPU version for onnxruntime when falling back to local requirements
@@ -2061,11 +1994,10 @@ class RepositoryInstaller:
         models_dir.mkdir(exist_ok=True)
     
     def _generate_startup_script(self, repo_path: Path, repo_info: Dict):
-        """Generate startup script using only venv activation, with manual CUDA/library path setup.
+        """Generate startup script using copied Python environment with manual CUDA/library path setup.
         
-        This version explicitly removes all micromamba-related activation
-        due to observed persistent shell initialization issues,
-        but adds necessary library paths (like CUDA) that micromamba would provide.
+        This version uses portable environment system with copied Python installations
+        instead of traditional venv, providing better isolation and compatibility.
         """
         try:
             repo_name = repo_path.name.lower()
@@ -2076,7 +2008,7 @@ class RepositoryInstaller:
                 main_file = self.main_file_finder.find_main_file(repo_name, repo_path, repo_info["url"])
             
             if not main_file:
-                logger.error("❌ Could not determine main file for repository!")
+                logger.error("[ERROR] Could not determine main file for repository!")
                 logger.error("📝 Please manually specify the main file to run:")
                 logger.error(f"   Available Python files in {repo_path}:")
                 for py_file in repo_path.glob("*.py"):
@@ -2086,16 +2018,31 @@ class RepositoryInstaller:
             # Create startup script
             bat_file = repo_path / f"start_{repo_name}.bat"
             
-            if not self.config_manager.config.install_path:
+            if not self.config_manager.config or not self.config_manager.config.install_path:
                 logger.error("Install path not configured")
                 return False
             
             install_path = Path(self.config_manager.config.install_path)
             
-            # Path to the base ps_env environment's Library folder (where CUDA libs are)
-            ps_env_library_path = install_path / "ps_env" / "Library"
-
-            venv_activate = install_path / "envs" / repo_name / "Scripts" / "activate.bat"
+            # Get CUDA paths from configuration
+            cuda_paths = None
+            cuda_paths_section = "REM CUDA paths not configured"
+            if (self.config_manager.config and 
+                self.config_manager.config.gpu_config and 
+                self.config_manager.config.gpu_config.cuda_paths):
+                cuda_paths = self.config_manager.config.gpu_config.cuda_paths
+                cuda_paths_section = f"""set PATH={cuda_paths.cuda_bin};%PATH%
+set PATH={cuda_paths.cuda_lib};%PATH%
+set PATH={cuda_paths.cuda_lib_64};%PATH%
+set PATH={cuda_paths.cuda_nvml_bin};%PATH%
+set PATH={cuda_paths.cuda_nvml_lib};%PATH%
+set PATH={cuda_paths.cuda_nvvm_bin};%PATH%
+set PATH={cuda_paths.cuda_nvvm_lib};%PATH%
+echo All CUDA paths added to environment"""
+            
+            # Path to the copied Python environment
+            env_path = install_path / "envs" / repo_name
+            python_exe = env_path / "python.exe"
             
             # Get program args from repo info
             program_args = repo_info.get('program_args', '')
@@ -2116,49 +2063,23 @@ set PYTHONIOENCODING=utf-8
 set PYTHONUNBUFFERED=1
 set PYTHONDONTWRITEBYTECODE=1
 
-REM === MICROMAMBA ACTIVATION REMOVED DUE TO PERSISTENT SHELL ISSUES ===
-REM All micromamba-related activation calls are removed.
-REM The system now relies solely on Venv for Python environment management.
+REM === PORTABLE ENVIRONMENT SETUP ===
+REM Using portable environment system with copied Python installations
+REM instead of traditional venv for better isolation and compatibility.
 
-REM === ADD CUDA/MAMBA LIBRARY PATHS MANUALLY ===
-REM This is crucial for applications requiring CUDA, FFmpeg, etc., when not using micromamba's activation.
-REM These paths come from the 'ps_env/Library' folder where micromamba places shared native libraries.
-set PATH={ps_env_library_path}\\bin;%PATH%
-set PATH={ps_env_library_path}\\lib;%PATH%
-set PATH={ps_env_library_path}\\cmd;%PATH%
-set PATH={ps_env_library_path}\\include;%PATH%
-set PATH={ps_env_library_path}\\nvvm;%PATH%
-REM Add micromamba's own directory to PATH in case any micromamba commands are needed later (e.g. for updates)
-set PATH={install_path}\\micromamba;%PATH%
+REM === ADD CUDA PATHS ===
+REM Add all CUDA paths if available
+{cuda_paths_section}
 
+REM === ADD COPIED PYTHON ENVIRONMENT PATHS ===
+REM Add the copied Python environment to PATH
+set PATH={env_path};%PATH%
+set PATH={env_path}\\Scripts;%PATH%
+echo Python environment paths added to PATH
 
-REM Activate venv
-echo Activating virtual environment...
-if exist \"{venv_activate}\" (
-    call \"{venv_activate}\"
-    if %ERRORLEVEL% neq 0 (
-        echo Error activating virtual environment: {venv_activate}
-        pause
-        exit /b 1
-    )
-) else (
-    echo Virtual environment not found: {venv_activate}
-    pause
-    exit /b 1
-)
-
-REM Change to repository directory
-echo Change to repository directory...
-cd /d \"{repo_path}\"
-if %ERRORLEVEL% neq 0 (
-    echo Error changing to repository directory: {repo_path}
-    pause
-    exit /b 1
-)
-
-REM Run the application
-echo RUN {main_file}...
-python {main_file} {program_args}
+REM Change to repository directory and run
+cd /d "{repo_path}"
+"{python_exe}" -c "import sys; sys.path.insert(0, r'{repo_path}'); exec(open(r'{repo_path}\\{main_file}').read())" {program_args}
 set EXIT_CODE=%ERRORLEVEL%
 
 REM Check result
@@ -2434,7 +2355,7 @@ pause
     def _get_default_torch_index_url(self) -> str:
         """Get default PyTorch index URL based on GPU configuration"""
         try:
-            gpu_config = self.config_manager.config.gpu_config
+            gpu_config = self.config_manager.config.gpu_config if self.config_manager.config else None
             return self.analyzer._get_torch_index_url_from_config(gpu_config)
         except Exception as e:
             logger.warning(f"Error getting default torch index URL: {e}")
@@ -2443,7 +2364,7 @@ pause
     def _get_default_onnx_package(self) -> str:
         """Get default ONNX Runtime package name based on GPU configuration"""
         try:
-            gpu_config = self.config_manager.config.gpu_config
+            gpu_config = self.config_manager.config.gpu_config if self.config_manager.config else None
             return self.analyzer._get_onnx_package_name_from_config(gpu_config)
         except Exception as e:
             logger.warning(f"Error getting default ONNX package: {e}")
@@ -2661,7 +2582,7 @@ pause
                 if not self._install_dependencies(repo_path):
                     logger.warning(f"Failed to reinstall dependencies for {repo_name}")
                 
-                logger.info(f"✅ Repository {repo_name} updated successfully")
+                logger.info(f"[OK] Repository {repo_name} updated successfully")
                 return True
                 
             except subprocess.CalledProcessError as e:
@@ -2702,7 +2623,7 @@ pause
         
         logger.info(f"Found repositories: {len(repos)}")
         for repo in repos:
-            launcher_status = "✅" if repo['has_launcher'] else "❌"
+            launcher_status = "[OK]" if repo['has_launcher'] else "[ERROR]"
             logger.info(f"  - {repo['name']} {launcher_status}")
         
         return repos

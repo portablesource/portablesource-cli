@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Environment Manager for PortableSource
-Managing micromamba and base ps_env environment only
+Managing portable tools in ps_env directory
 """
 
 import os
@@ -12,37 +12,34 @@ import urllib.request
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from portablesource.get_gpu import GPUDetector, GPUType
-from portablesource.config import ConfigManager
+from .get_gpu import GPUDetector
+from .config import ConfigManager, TOOLinks
 
 logger = logging.getLogger(__name__)
 
 @dataclass
-class BaseEnvironmentSpec:
-    """Base environment specification for ps_env"""
-    python_version: str = "3.11"
-    cuda_version: Optional[str] = None
+class PortableToolSpec:
+    """Specification for portable tools"""
+    name: str
+    url: str
+    extract_path: str
+    executable_path: str
     
-    def get_packages(self) -> List[str]:
-        """Get base packages for ps_env"""
-        packages = ["git", "ffmpeg", f"python=={self.python_version}"]
-        
-        if self.cuda_version:
-            packages.extend([
-                f"cuda-toolkit={self.cuda_version}",
-                "cudnn"
-            ])
-        
-        return packages
+    def get_full_extract_path(self, ps_env_path: Path) -> Path:
+        """Get full extraction path"""
+        return ps_env_path / self.extract_path
+    
+    def get_full_executable_path(self, ps_env_path: Path) -> Path:
+        """Get full executable path"""
+        return ps_env_path / self.executable_path
 
-class MicromambaManager:
-    """Micromamba installer and base environment manager"""
+class PortableEnvironmentManager:
+    """Portable environment manager for downloading and extracting tools"""
     
     def __init__(self, install_path: Path, config_manager: Optional[ConfigManager] = None):
         self.install_path = install_path
-        self.micromamba_path = install_path / "micromamba"
-        self.micromamba_exe = self.micromamba_path / "micromamba.exe" if os.name == 'nt' else self.micromamba_path / "micromamba"
         self.ps_env_path = install_path / "ps_env"  # Main environment path
         self.gpu_detector = GPUDetector()
         
@@ -53,187 +50,660 @@ class MicromambaManager:
             self.config_manager.load_config()
         else:
             self.config_manager = config_manager
-
-    def get_installer_url(self) -> str:
-        """Gets URL for downloading Micromamba"""
-        if os.name == 'nt':
-            return "https://github.com/mamba-org/micromamba-releases/releases/download/2.3.0-1/micromamba-win-64"
-        else:
-            return "https://github.com/mamba-org/micromamba-releases/releases/download/2.3.0-1/micromamba-linux-64"
-
-    def ensure_micromamba_installed(self) -> bool:
-        """Ensures that micromamba is installed"""
-        if self.micromamba_exe.exists():
-            logger.info("Micromamba already installed.")
-            return True
-
-        logger.info("Micromamba not found, downloading...")
-        self.micromamba_path.mkdir(exist_ok=True)
-        url = self.get_installer_url()
         
+        # Define portable tools specifications
+        self.tool_specs = {
+            "ffmpeg": PortableToolSpec(
+                name="ffmpeg",
+                url=TOOLinks.FFMPEG_URL.value,
+                extract_path="ffmpeg",
+                executable_path="ffmpeg/ffmpeg.exe" if os.name == 'nt' else "ffmpeg/ffmpeg"
+            ),
+            "git": PortableToolSpec(
+                name="git",
+                url=TOOLinks.GIT_URL.value,
+                extract_path="git",
+                executable_path="git/cmd/git.exe" if os.name == 'nt' else "git/bin/git"
+            ),
+            "python": PortableToolSpec(
+                name="python",
+                url=TOOLinks.PYTHON311_URL.value,
+                extract_path="python",
+                executable_path="python/python.exe" if os.name == 'nt' else "python/bin/python"
+            )
+        }
+
+    def download_file(self, url: str, destination: Path, description: str = "Downloading") -> bool:
+        """Download a file with progress bar"""
         try:
             # Download with progress bar if tqdm is available
             try:
                 from tqdm import tqdm
                 response = urllib.request.urlopen(url)
                 total_size = int(response.headers.get('Content-Length', 0))
-                
-                with open(self.micromamba_exe, 'wb') as f:
-                    with tqdm(total=total_size, unit='B', unit_scale=True, desc="Downloading Micromamba") as pbar:
+                desc = f"Downloading {description}"
+                with open(destination, 'wb') as f:
+                    with tqdm(total=total_size, unit='B', unit_scale=True, desc=desc) as pbar:
                         while True:
-                            chunk = response.read(8192)
+                            chunk = response.read(16384)
                             if not chunk:
                                 break
                             f.write(chunk)
                             pbar.update(len(chunk))
             except ImportError:
                 logger.warning("tqdm not installed, downloading without progress bar")
-                urllib.request.urlretrieve(url, self.micromamba_exe)
+                urllib.request.urlretrieve(url, destination)
 
-            logger.info(f"Micromamba downloaded to {self.micromamba_exe}")
-            
-            # On non-windows, make it executable
-            if os.name != 'nt':
-                os.chmod(self.micromamba_exe, 0o755)
-
+            logger.info(f"Downloaded {description} to {destination}")
             return True
+
         except Exception as e:
-            logger.error(f"Error downloading Micromamba: {e}")
+            logger.error(f"Error downloading {description}: {e}")
             return False
-
-    def run_micromamba_command(self, command: List[str], cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
-        """Runs a micromamba command"""
-        full_cmd = [str(self.micromamba_exe)] + command
+    
+    def download_7z_executable(self) -> Optional[Path]:
+        """Download 7z.exe if not available in system"""
+        try:
+            # Check if 7z is already available in system
+            if shutil.which("7z"):
+                return None  # System 7z is available
+            
+            # Download 7z.exe to ps_env directory
+            seven_zip_url = "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/7z.exe"
+            seven_zip_path = self.ps_env_path / "7z.exe"
+            
+            if seven_zip_path.exists():
+                return seven_zip_path  # Already downloaded
+            
+            logger.info("Downloading 7z.exe...")
+            if self.download_file(seven_zip_url, seven_zip_path, "7z.exe"):
+                return seven_zip_path
+            else:
+                logger.error("Failed to download 7z.exe")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error downloading 7z.exe: {e}")
+            return None
+    
+    def extract_7z_archive(self, archive_path: Path, extract_to: Path) -> bool:
+        """Extract 7z archive using external 7zip"""
+        try:
+            # First try to use system 7zip or download 7z.exe
+            seven_zip_exe = None
+            
+            if shutil.which("7z"):
+                seven_zip_exe = "7z"
+            else:
+                # Try to download 7z.exe
+                downloaded_7z = self.download_7z_executable()
+                if downloaded_7z:
+                    seven_zip_exe = str(downloaded_7z)
+            
+            if seven_zip_exe:
+                result = subprocess.run(
+                    [seven_zip_exe, "x", str(archive_path), f"-o{extract_to}", "-y"],
+                    capture_output=True, text=True
+                )
+                if result.returncode == 0:
+                    logger.info(f"Extracted {archive_path} to {extract_to} using 7zip")
+                    return True
+                else:
+                    logger.error(f"7zip extraction failed: {result.stderr}")
+                    return False
+            else:
+                logger.error("7zip executable not found and could not be downloaded")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error extracting {archive_path}: {e}")
+            return False
+    
+    def _fix_nested_extraction(self, extract_path: Path, tool_name: str) -> None:
+        """Fix nested folder structure when archive contains a subfolder with the same name"""
+        try:
+            # Check if there's a nested folder with the same name as the tool
+            nested_folder = extract_path / tool_name
+            if nested_folder.exists() and nested_folder.is_dir():
+                # Check if the nested folder contains the actual content
+                nested_contents = list(nested_folder.iterdir())
+                extract_contents = [item for item in extract_path.iterdir() if item != nested_folder]
+                
+                # If the nested folder has content and the extract path has only the nested folder
+                if nested_contents and len(extract_contents) == 0:
+                    logger.info(f"Fixing nested folder structure for {tool_name}")
+                    
+                    # Create a temporary directory to move contents
+                    temp_dir = extract_path.parent / f"{tool_name}_temp"
+                    temp_dir.mkdir(exist_ok=True)
+                    
+                    # Move all contents from nested folder to temp directory
+                    for item in nested_contents:
+                        shutil.move(str(item), str(temp_dir / item.name))
+                    
+                    # Remove the now-empty nested folder
+                    nested_folder.rmdir()
+                    
+                    # Move contents from temp directory to extract path
+                    for item in temp_dir.iterdir():
+                        shutil.move(str(item), str(extract_path / item.name))
+                    
+                    # Remove temp directory
+                    temp_dir.rmdir()
+                    
+                    logger.info(f"Fixed nested folder structure for {tool_name}")
+                    
+        except Exception as e:
+            logger.warning(f"Failed to fix nested extraction for {tool_name}: {e}")
+    
+    def install_tool(self, tool_name: str) -> bool:
+        """Install a specific tool"""
+        if tool_name not in self.tool_specs:
+            logger.error(f"Unknown tool: {tool_name}")
+            return False
         
-        return subprocess.run(
-            full_cmd, 
-            capture_output=True, 
-            text=True, 
-            encoding='utf-8',
-            cwd=str(cwd) if cwd else None
-        )
-
-    def create_base_environment(self, cuda_version: Optional[str] = None) -> bool:
-        """Creates the main ps_env environment with micromamba"""
-        if not self.ensure_micromamba_installed():
-            return False
-
-        # Check if environment actually exists and is valid (has Python executable)
-        python_path = self.get_ps_env_python()
-        if self.ps_env_path.exists() and python_path and python_path.exists():
-            logger.info("Base environment ps_env already exists.")
+        tool_spec = self.tool_specs[tool_name]
+        extract_path = tool_spec.get_full_extract_path(self.ps_env_path)
+        executable_path = tool_spec.get_full_executable_path(self.ps_env_path)
+        
+        # Check if tool is already installed
+        if executable_path.exists():
+            logger.info(f"{tool_name} already installed at {executable_path}")
             return True
-        elif self.ps_env_path.exists():
-            logger.info("Found empty ps_env directory, recreating environment...")
-            # Remove empty directory to recreate properly
-            shutil.rmtree(self.ps_env_path)
-            logger.info("Removed empty ps_env directory.")
-
-        logger.info("Creating base environment ps_env...")
         
-        # Auto-detect CUDA version if not provided
-        if not cuda_version:
-            gpu_info = self.gpu_detector.get_gpu_info()
-            if gpu_info and gpu_info[0].gpu_type == GPUType.NVIDIA:
-                cuda_version = gpu_info[0].cuda_version.value if gpu_info[0].cuda_version else None
+        # Create ps_env directory if it doesn't exist
+        self.ps_env_path.mkdir(parents=True, exist_ok=True)
         
-        # Create environment spec
-        env_spec = BaseEnvironmentSpec(cuda_version=cuda_version)
-        packages = env_spec.get_packages()
+        # Download archive
+        archive_name = f"{tool_name}.7z"
+        archive_path = self.ps_env_path / archive_name
         
-        # Build create command: {mamba_path} create -p ./ps_env -c nvidia -c conda-forge cuda-toolkit={cuda_ver} cudnn git ffmpeg uv python==3.11
-        create_cmd = [
-            "create",
-            "-p", str(self.ps_env_path),
-            "-c", "nvidia",
-            "-c", "conda-forge", 
-            "-y"
-        ] + packages
-
-        result = self.run_micromamba_command(create_cmd)
-
-        if result.returncode != 0:
-            logger.error("❌ Error creating base environment ps_env:")
-            logger.error(f"STDOUT: {result.stdout}")
-            logger.error(f"STDERR: {result.stderr}")
+        logger.info(f"Downloading {tool_name}...")
+        if not self.download_file(tool_spec.url, archive_path, f"{tool_name}"):
             return False
         
-
+        # Extract archive
+        logger.info(f"Extracting {tool_name}...")
+        if not self.extract_7z_archive(archive_path, extract_path):
+            return False
         
-        # Verify that environment was actually created and all tools work
-        if not self._verify_environment_tools():
-            logger.error("❌ Environment verification failed - some tools are not working properly")
+        # Handle nested folder structure (when archive contains a subfolder with the same name)
+        self._fix_nested_extraction(extract_path, tool_name)
+        
+        # Clean up archive
+        try:
+            archive_path.unlink()
+            logger.info(f"Cleaned up {archive_name}")
+        except Exception as e:
+            logger.warning(f"Failed to clean up {archive_name}: {e}")
+        
+        # Verify installation
+        if executable_path.exists():
+            logger.info(f"[OK] {tool_name} installed successfully at {executable_path}")
+            return True
+        else:
+            logger.error(f"[ERROR] {tool_name} installation failed - executable not found at {executable_path}")
             return False
 
+    def install_cuda(self) -> bool:
+        """Install CUDA based on GPU configuration"""
+        if (not self.config_manager.config or 
+            not self.config_manager.config.gpu_config or 
+            not self.config_manager.config.gpu_config.cuda_version):
+            logger.info("No CUDA version configured, skipping CUDA installation")
+            return True
+        
+        cuda_version = self.config_manager.config.gpu_config.cuda_version
+        cuda_download_link = self.config_manager.get_cuda_download_link(cuda_version)
+        
+        if not cuda_download_link:
+            logger.error(f"No download link available for CUDA version {cuda_version.value}")
+            return False
+        
+        cuda_extract_path = self.ps_env_path / "CUDA"
+        cuda_archive_name = f"cuda_{cuda_version.value}.7z"
+        cuda_archive_path = self.ps_env_path
+        
+        # Check if CUDA is already installed
+        if cuda_extract_path.exists() and (cuda_extract_path / "bin").exists():
+            logger.info(f"CUDA {cuda_version.value} already installed at {cuda_extract_path}")
+            return True
+        
+        # Create ps_env directory if it doesn't exist
+        self.ps_env_path.mkdir(parents=True, exist_ok=True)
+        
+        # Download CUDA archive
+        logger.info(f"Downloading CUDA {cuda_version.value}...")
+        if not self.download_file(cuda_download_link, cuda_archive_path, f"CUDA {cuda_version.value}"):
+            return False
+        
+        # Extract CUDA archive
+        logger.info(f"Extracting CUDA {cuda_version.value}...")
+        if not self.extract_7z_archive(cuda_archive_path, cuda_extract_path):
+            return False
+        
+        # Clean up archive
+        try:
+            cuda_archive_path.unlink()
+            logger.info(f"Cleaned up {cuda_archive_name}")
+        except Exception as e:
+            logger.warning(f"Failed to clean up {cuda_archive_name}: {e}")
+        
+        # Verify CUDA installation
+        if cuda_extract_path.exists() and (cuda_extract_path / "bin").exists():
+            logger.info(f"[OK] CUDA {cuda_version.value} installed successfully at {cuda_extract_path}")
+            # Update CUDA paths in config
+            self.config_manager.configure_cuda_paths()
+            return True
+        else:
+            logger.error(f"[ERROR] CUDA {cuda_version.value} installation failed")
+            return False
+    
+    def _download_cuda_only(self, cuda_version) -> Optional[Path]:
+        """Download CUDA archive only (for parallel processing)"""
+        try:
+            cuda_download_link = self.config_manager.get_cuda_download_link(cuda_version)
+            if not cuda_download_link:
+                logger.error(f"No download link available for CUDA {cuda_version.value}")
+                return None
+            
+            cuda_archive_name = f"cuda_{cuda_version.value.replace('.', '_')}.7z"
+            cuda_archive_path = self.ps_env_path / cuda_archive_name
+            
+            # Check if already downloaded
+            if cuda_archive_path.exists():
+                logger.info(f"CUDA {cuda_version.value} archive already exists")
+                return cuda_archive_path
+            
+            # Download CUDA archive
+            logger.info(f"Downloading CUDA {cuda_version.value}...")
+            if self.download_file(cuda_download_link, cuda_archive_path, f"CUDA {cuda_version.value}"):
+                return cuda_archive_path
+            else:
+                return None
+        except Exception as e:
+            logger.error(f"Failed to download CUDA: {e}")
+            return None
+    
+    def _extract_cuda(self, cuda_archive_path: Path, cuda_version) -> bool:
+        """Extract CUDA archive (for parallel processing)"""
+        try:
+            # CUDA should be extracted to ps_env/CUDA directory
+            cuda_extract_path = self.ps_env_path / "CUDA"
+            
+            # Check if already extracted
+            if cuda_extract_path.exists() and (cuda_extract_path / "bin").exists():
+                logger.info(f"CUDA {cuda_version.value} already extracted")
+                # Update CUDA paths in config
+                self.config_manager.configure_cuda_paths()
+                return True
+            
+            # Check if old versioned folder exists and rename it
+            old_cuda_path = self.ps_env_path / f"cuda_{cuda_version.value.replace('.', '_')}"
+            if old_cuda_path.exists() and (old_cuda_path / "bin").exists():
+                logger.info(f"Renaming existing CUDA folder from {old_cuda_path} to {cuda_extract_path}")
+                try:
+                    if cuda_extract_path.exists():
+                        import shutil
+                        shutil.rmtree(cuda_extract_path)
+                    old_cuda_path.rename(cuda_extract_path)
+                    logger.info(f"[OK] CUDA {cuda_version.value} folder renamed successfully")
+                    # Update CUDA paths in config
+                    self.config_manager.configure_cuda_paths()
+                    return True
+                except Exception as e:
+                    logger.error(f"Failed to rename CUDA folder: {e}")
+                    return False
+            
+            # Ensure 7z.exe is available (should already be downloaded by this point)
+            import shutil
+            if not shutil.which("7z"):
+                seven_zip_path = self.ps_env_path / "7z.exe"
+                if not seven_zip_path.exists():
+                    logger.error("7z.exe not found for CUDA extraction")
+                    return False
+            
+            # Extract CUDA archive directly to CUDA folder
+            if not self.extract_7z_archive(cuda_archive_path, cuda_extract_path):
+                return False
+            
+            # Handle nested folder structure for CUDA
+            self._fix_nested_extraction(cuda_extract_path, "CUDA")
+            
+            # Clean up archive
+            try:
+                cuda_archive_path.unlink()
+                logger.info(f"Cleaned up CUDA archive")
+            except Exception as e:
+                logger.warning(f"Failed to clean up CUDA archive: {e}")
+            
+            # Verify CUDA installation
+            if cuda_extract_path.exists() and (cuda_extract_path / "bin").exists():
+                logger.info(f"[OK] CUDA {cuda_version.value} extracted successfully")
+                # Update CUDA paths in config
+                self.config_manager.configure_cuda_paths()
+                return True
+            else:
+                logger.error(f"[ERROR] CUDA {cuda_version.value} extraction failed")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to extract CUDA: {e}")
+            return False
 
+    def _install_tools_parallel(self, tools_to_install: List[str]) -> bool:
+        """Install multiple tools in parallel with optimized download and extraction"""
+        logger.info(f"Installing tools in parallel: {', '.join(tools_to_install)}")
+        
+        # Pre-download 7z.exe once to avoid conflicts during parallel extraction
+        if not shutil.which("7z"):
+            seven_zip_path = self.download_7z_executable()
+            if not seven_zip_path:
+                logger.error("Failed to download 7z.exe for extraction")
+                return False
+        
+        # Phase 1: Download all archives in parallel
+        download_tasks = []
+        archive_paths = {}
+        
+        with ThreadPoolExecutor(max_workers=len(tools_to_install)) as executor:
+            for tool_name in tools_to_install:
+                if tool_name not in self.tool_specs:
+                    logger.error(f"Unknown tool: {tool_name}")
+                    return False
+                
+                tool_spec = self.tool_specs[tool_name]
+                executable_path = tool_spec.get_full_executable_path(self.ps_env_path)
+                
+                # Check if tool is already installed
+                if executable_path.exists():
+                    logger.info(f"{tool_name} already installed at {executable_path}")
+                    continue
+                
+                # Prepare download
+                archive_name = f"{tool_name}.7z"
+                archive_path = self.ps_env_path / archive_name
+                archive_paths[tool_name] = archive_path
+                
+                # Submit download task
+                future = executor.submit(self._download_tool, tool_name, tool_spec.url, archive_path)
+                download_tasks.append((tool_name, future))
+            
+            # Wait for all downloads to complete
+            download_results = {}
+            for tool_name, future in download_tasks:
+                try:
+                    download_results[tool_name] = future.result()
+                    if download_results[tool_name]:
+                        logger.info(f"[OK] {tool_name} download completed")
+                    else:
+                        logger.error(f"[ERROR] {tool_name} download failed")
+                        return False
+                except Exception as e:
+                    logger.error(f"[ERROR] {tool_name} download failed with exception: {e}")
+                    return False
+        
+        # Phase 2: Extract archives sequentially to avoid file conflicts
+        for tool_name, archive_path in archive_paths.items():
+            if tool_name in download_results and download_results[tool_name]:
+                tool_spec = self.tool_specs[tool_name]
+                extract_path = tool_spec.get_full_extract_path(self.ps_env_path)
+                
+                success = self._extract_and_verify_tool(tool_name, archive_path, extract_path)
+                if success:
+                    logger.info(f"[OK] {tool_name} extraction and verification completed")
+                else:
+                    logger.error(f"[ERROR] {tool_name} extraction or verification failed")
+                    return False
+        
+        logger.info("[OK] All tools installed successfully")
+        return True
+    
+    def _download_tool(self, tool_name: str, url: str, archive_path: Path) -> bool:
+        """Download a single tool (thread-safe)"""
+        logger.info(f"Downloading {tool_name}...")
+        return self.download_file(url, archive_path, f"{tool_name}")
+    
+    def _extract_and_verify_tool(self, tool_name: str, archive_path: Path, extract_path: Path) -> bool:
+        """Extract and verify a single tool (thread-safe)"""
+        logger.info(f"Extracting {tool_name}...")
+        
+        # Extract archive
+        if not self.extract_7z_archive(archive_path, extract_path):
+            return False
+        
+        # Handle nested folder structure
+        self._fix_nested_extraction(extract_path, tool_name)
+        
+        # Clean up archive
+        try:
+            archive_path.unlink()
+            logger.info(f"Cleaned up {tool_name}.7z")
+        except Exception as e:
+            logger.warning(f"Failed to clean up {tool_name}.7z: {e}")
+        
+        # Verify installation
+        tool_spec = self.tool_specs[tool_name]
+        executable_path = tool_spec.get_full_executable_path(self.ps_env_path)
+        
+        if executable_path.exists():
+            return True
+        else:
+            logger.error(f"[ERROR] {tool_name} installation failed - executable not found at {executable_path}")
+            return False
+
+    def setup_portable_environment(self) -> bool:
+        """Setup the portable environment by downloading and extracting all tools"""
+        logger.info("Setting up portable environment...")
+        
+        # Create ps_env directory
+        self.ps_env_path.mkdir(parents=True, exist_ok=True)
+        
+        # Ensure install path is set in config
+        if not self.config_manager.config or not self.config_manager.config.install_path:
+            self.config_manager.configure_install_path(str(self.install_path))
+        
+        # Step 1: Configure GPU first to determine if we need CUDA
+        try:
+            logger.info("Configuring GPU...")
+            gpu_config = self.config_manager.configure_gpu_from_detection()
+            logger.info(f"GPU configured: {gpu_config.name} ({gpu_config.recommended_backend})")
+        except Exception as e:
+            logger.error(f"Failed to configure GPU: {e}")
+            gpu_config = None
+        
+        # Step 2: Download CUDA first if we have NVIDIA GPU
+        cuda_download_future = None
+        cuda_executor = None
+        if gpu_config:
+            logger.info(f"GPU config: backend={gpu_config.recommended_backend}, cuda_version={gpu_config.cuda_version}")
+            
+            if (gpu_config.recommended_backend and "cuda" in gpu_config.recommended_backend and 
+                gpu_config.cuda_version):
+                
+                # Check if CUDA is already installed
+                cuda_extract_path = self.ps_env_path / "CUDA"
+                if cuda_extract_path.exists() and (cuda_extract_path / "bin").exists():
+                    logger.info(f"CUDA {gpu_config.cuda_version.value} already installed at {cuda_extract_path}")
+                    # Configure CUDA paths in config
+                    self.config_manager.configure_cuda_paths()
+                else:
+                    logger.info(f"Starting CUDA {gpu_config.cuda_version.value} download...")
+                    cuda_executor = ThreadPoolExecutor(max_workers=1)
+                    cuda_download_future = cuda_executor.submit(self._download_cuda_only, gpu_config.cuda_version)
+            else:
+                logger.info("CUDA not needed for this GPU configuration")
+        else:
+            logger.info("No GPU configuration available, skipping CUDA")
+        
+        # Step 3: Install basic tools in parallel while CUDA downloads
+        tools_to_install = ["ffmpeg", "git", "python"]
+        
+        if not self._install_tools_parallel(tools_to_install):
+            logger.error("[ERROR] Failed to install basic tools")
+            return False
+        
+        # Step 4: Wait for CUDA download and extract it
+        if cuda_download_future and gpu_config and gpu_config.cuda_version:
+            try:
+                logger.info("Waiting for CUDA download to complete...")
+                cuda_archive_path = cuda_download_future.result()
+                if cuda_archive_path:
+                    logger.info(f"Extracting CUDA {gpu_config.cuda_version.value}...")
+                    if not self._extract_cuda(cuda_archive_path, gpu_config.cuda_version):
+                        logger.error("[ERROR] Failed to extract CUDA")
+                        return False
+                    logger.info(f"[OK] CUDA {gpu_config.cuda_version.value} installed successfully")
+                else:
+                    logger.error("[ERROR] CUDA download failed")
+                    return False
+            except Exception as e:
+                logger.error(f"[ERROR] CUDA installation failed: {e}")
+                return False
+            finally:
+                if cuda_executor:
+                    cuda_executor.shutdown(wait=True)
+        elif gpu_config and gpu_config.recommended_backend and "cuda" in gpu_config.recommended_backend:
+            logger.warning("CUDA was expected but download future is None")
+        
+        logger.info("[OK] Portable environment setup completed successfully")
         return True
 
-    def get_activation_commands(self) -> List[str]:
-        """Get the activation commands for micromamba shell hook (for batch files)"""
-        if os.name == 'nt':
-            mamba_hook_path = self.micromamba_path / "condabin" / "mamba_hook.bat"
 
-            if not mamba_hook_path.exists():
-                logger.error(f"❌ mamba_hook.bat not found at path: {mamba_hook_path}. "
-                               "Make sure micromamba has been initialized (e.g. by running environment_manager.py).")
-                return []
-
-            return [
-                f'call "{mamba_hook_path}"',
-                f'call micromamba activate "{self.ps_env_path}"'
-            ]
-        else:
-            return [
-                f'eval "$({self.micromamba_exe} shell hook -s bash)"',
-                f'micromamba activate "{self.ps_env_path}"'
-            ]
-
-    def setup_environment_for_subprocess(self) -> Dict[str, str]:
-        """Setup environment variables for subprocess to use micromamba"""
-        env = os.environ.copy()
-        
-        # Add micromamba to PATH
-        micromamba_dir = str(self.micromamba_path)
-        if 'PATH' in env:
-            env['PATH'] = f"{micromamba_dir}{os.pathsep}{env['PATH']}"
-        else:
-            env['PATH'] = micromamba_dir
-            
-        # Set MAMBA_EXE for shell hook
-        env['MAMBA_EXE'] = str(self.micromamba_exe)
-        
-        return env
 
     def run_in_activated_environment(self, command: List[str], cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
-        """Run a command in the activated ps_env environment using micromamba run"""
+        """Run a command in the portable environment with proper PATH setup"""
         if not self.ps_env_path.exists():
             logger.error("Base environment ps_env not found. Run --setup-env first.")
             return subprocess.CompletedProcess([], 1, "", "Base environment not found")
 
-        # Use micromamba run to execute command in environment
-        run_cmd = ["run", "-p", str(self.ps_env_path)] + command
+        # Use the centralized environment setup function
+        env = self.setup_environment_for_subprocess()
         
-        return self.run_micromamba_command(run_cmd, cwd=cwd)
+        # On Windows, use shell=True for better executable resolution
+        import platform
+        use_shell = platform.system() == "Windows"
+        
+        if use_shell:
+            # Convert command list to string for shell execution
+            command_str = ' '.join(f'"{arg}"' if ' ' in arg else arg for arg in command)
+            return subprocess.run(
+                command_str,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                env=env,
+                shell=True
+            )
+        else:
+            return subprocess.run(
+                command,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                env=env
+            )
 
     def get_ps_env_python(self) -> Optional[Path]:
         """Gets the path to python executable in ps_env"""
         if not self.ps_env_path.exists():
             return None
         
-        python_exe = self.ps_env_path / "python.exe" if os.name == 'nt' else self.ps_env_path / "bin" / "python"
-        return python_exe if python_exe.exists() else None
+        if "python" in self.tool_specs:
+            python_exe = self.ps_env_path / self.tool_specs["python"].executable_path
+            return python_exe if python_exe.exists() else None
+        return None
 
     def get_ps_env_pip(self) -> Optional[Path]:
         """Gets the path to pip executable in ps_env"""
         if not self.ps_env_path.exists():
             return None
         
-        pip_exe = self.ps_env_path / "pip.exe" if os.name == 'nt' else self.ps_env_path / "bin" / "pip"
-        return pip_exe if pip_exe.exists() else None
+        if "python" in self.tool_specs:
+            if os.name == 'nt':
+                pip_exe = self.ps_env_path / "python" / "Scripts" / "pip.exe"
+            else:
+                pip_exe = self.ps_env_path / "python" / "bin" / "pip"
+            return pip_exe if pip_exe.exists() else None
+        return None
+
+    def get_git_executable(self) -> Optional[Path]:
+        """Get git executable path from portable environment"""
+        if "git" in self.tool_specs:
+            git_exe = self.ps_env_path / self.tool_specs["git"].executable_path
+            return git_exe if git_exe.exists() else None
+        return None
+
+    def get_python_executable(self) -> Optional[Path]:
+        """Get Python executable path from portable environment"""
+        return self.get_ps_env_python()
+
+    def setup_environment_for_subprocess(self) -> Dict[str, str]:
+        """Setup environment variables for subprocess execution"""
+        # Start with a copy of the current environment
+        # Use dict() to ensure we get all environment variables
+        env_vars = dict(os.environ)
+        
+        if not self.ps_env_path.exists():
+            return env_vars
+        
+        # Add tool paths to PATH
+        tool_paths = []
+        for tool_name, tool_spec in self.tool_specs.items():
+            tool_dir = self.ps_env_path / tool_spec.extract_path
+            if tool_dir.exists():
+                # Add the directory containing the executable to PATH
+                executable_path = self.ps_env_path / tool_spec.executable_path
+                executable_dir = executable_path.parent
+                if executable_dir.exists():
+                    tool_paths.append(str(executable_dir))
+                else:
+                    # Fallback to extract directory
+                    tool_paths.append(str(tool_dir))
+        
+        # Add CUDA paths if available
+        if (self.config_manager.config and 
+            self.config_manager.config.gpu_config and 
+            self.config_manager.config.gpu_config.cuda_paths):
+            cuda_paths = self.config_manager.config.gpu_config.cuda_paths
+            cuda_bin = Path(cuda_paths.cuda_bin)
+            if cuda_bin.exists():
+                tool_paths.append(str(cuda_bin))
+                # Also add CUDA lib paths for runtime libraries
+                cuda_lib = Path(cuda_paths.cuda_lib)
+                if cuda_lib.exists():
+                    tool_paths.append(str(cuda_lib))
+                cuda_lib_64 = Path(cuda_paths.cuda_lib_64)
+                if cuda_lib_64.exists():
+                    tool_paths.append(str(cuda_lib_64))
+                
+                # Set CUDA environment variables
+                cuda_base = Path(cuda_paths.base_path)
+                env_vars['CUDA_PATH'] = str(cuda_base)
+                env_vars['CUDA_HOME'] = str(cuda_base)
+                env_vars['CUDA_ROOT'] = str(cuda_base)
+                env_vars['CUDA_BIN_PATH'] = str(cuda_bin)
+                env_vars['CUDA_LIB_PATH'] = str(cuda_lib_64) if cuda_lib_64.exists() else str(cuda_lib)
+        
+        if tool_paths:
+            current_path = env_vars.get('PATH', '')
+            env_vars['PATH'] = os.pathsep.join(tool_paths + [current_path])
+        
+        return env_vars
+
+    def check_environment_availability(self) -> bool:
+        """Check if portable environment is available and working"""
+        if not self.ps_env_path.exists():
+            return False
+        
+        # Check if essential tools are available
+        python_exe = self.get_python_executable()
+        git_exe = self.get_git_executable()
+        
+        return python_exe is not None and python_exe.exists() and git_exe is not None and git_exe.exists()
 
     
     def _extract_version_from_output(self, tool_name: str, output: str) -> str:
-        """Extract version information from tool output, filtering out micromamba activation noise"""
+        """Extract version information from tool output"""
         if not output:
             return "Unknown version"
         
@@ -292,17 +762,19 @@ class MicromambaManager:
         for tool_name, args in tools_to_check:
             try:
                 result = self.run_in_activated_environment([tool_name] + args)
-                if result.returncode == 0:
-                    # Extract version info from output, filtering out micromamba noise
-                    version_output = self._extract_version_from_output(tool_name, result.stdout)
-                    logger.info(f"✅ {tool_name}: {version_output}")
+                # Extract version info from output
+                version_output = self._extract_version_from_output(tool_name, result.stdout)
+                
+                # Consider tool working if we got meaningful version output, regardless of exit code
+                if version_output and version_output != "Unknown version":
+                    logger.info(f"[OK] {tool_name}: {version_output}")
                 else:
-                    logger.error(f"❌ {tool_name}: Failed to run (exit code {result.returncode})")
+                    logger.error(f"[ERROR] {tool_name}: Failed to run (exit code {result.returncode})")
                     if result.stderr:
                         logger.error(f"   Error: {result.stderr.strip()}")
                     all_tools_working = False
             except Exception as e:
-                logger.error(f"❌ {tool_name}: Exception occurred - {e}")
+                logger.error(f"[ERROR] {tool_name}: Exception occurred - {e}")
                 all_tools_working = False
         
         return all_tools_working
@@ -336,8 +808,10 @@ class MicromambaManager:
         for tool_name, args in tools_to_check:
             try:
                 result = self.run_in_activated_environment([tool_name] + args)
-                if result.returncode == 0:
-                    version_output = self._extract_version_from_output(tool_name, result.stdout)
+                version_output = self._extract_version_from_output(tool_name, result.stdout)
+                
+                # Consider tool working if we got meaningful version output, regardless of exit code
+                if version_output and version_output != "Unknown version":
                     status["tools_status"][tool_name] = {
                         "working": True,
                         "version": version_output
@@ -362,79 +836,61 @@ class MicromambaManager:
         return status
  
     def get_environment_info(self) -> Dict[str, Any]:
-        """Get information about environments"""
+        """Get information about portable environment"""
         # Check if environment actually exists and is valid (has Python executable)
         python_path = self.get_ps_env_python()
         base_env_exists = self.ps_env_path.exists() and python_path and python_path.exists()
         
+        # Check installed tools
+        installed_tools = {}
+        for tool_name, tool_spec in self.tool_specs.items():
+            tool_path = self.ps_env_path / tool_spec.extract_path
+            installed_tools[tool_name] = tool_path.exists()
+        
         info = {
-            "micromamba_installed": self.micromamba_exe.exists(),
             "base_env_exists": base_env_exists,
             "base_env_python": str(self.get_ps_env_python()) if self.get_ps_env_python() else None,
             "base_env_pip": str(self.get_ps_env_pip()) if self.get_ps_env_pip() else None,
+            "installed_tools": installed_tools,
             "paths": {
-                "micromamba_exe": str(self.micromamba_exe),
                 "ps_env_path": str(self.ps_env_path)
             }
         }
         return info
 
-    def check_micromamba_availability(self) -> bool:
-        """Check if micromamba is available and working.
-        
-        Returns:
-            True if micromamba is available, False otherwise
-        """
-        if not self.micromamba_exe.exists():
-            return False
-        
-        try:
-            result = self.run_micromamba_command(["--version"])
-            return result.returncode == 0
-        except Exception as e:
-            logger.error(f"Error checking micromamba availability: {e}")
-            return False
-
     def setup_environment(self) -> bool:
         """
-        Setup the complete environment (micromamba + ps_env).
+        Setup the complete portable environment.
         
         Returns:
             True if setup was successful, False otherwise
         """
         logger.info("Setting up PortableSource environment...")
         
-        # Step 1: Create base environment (this will install micromamba if needed)
-        if not self.create_base_environment():
-            logger.error("❌ Failed to create base environment")
+        # Step 1: Setup portable environment (download and extract tools)
+        if not self.setup_portable_environment():
+            logger.error("[ERROR] Failed to setup portable environment")
             return False
         
-        # Step 3: Verify environment is working by checking all tools
-        if not self._verify_environment_tools():
-            logger.error("❌ Environment verification failed - some tools are not working properly")
-            return False
-        
-        # Step 4: Configure GPU automatically (always run this step)
+        # Step 2: Verify that all tools work
         try:
-            logger.info("Starting GPU configuration...")
-            gpu_config = self.config_manager.configure_gpu_from_detection()
-            logger.info(f"✅ GPU configuration completed: {gpu_config.name} ({gpu_config.recommended_backend})")
+            if not self._verify_environment_tools():
+                logger.error("[ERROR] Environment verification failed - some tools are not working properly")
+                return False
         except Exception as e:
-            logger.error(f"Failed to configure GPU automatically: {e}")
-            import traceback
-            logger.error(f"GPU configuration traceback: {traceback.format_exc()}")
+            logger.warning(f"Environment verification failed: {e}")
         
-        # Step 5: Update setup status (GPU config already saved in step 4)
+        # Step 3: Update setup status
         try:
-            self.config_manager.config.environment_setup_completed = True
-            self.config_manager.config.install_path = str(self.install_path)
+            self.config_manager.mark_environment_setup_completed(True)
+            if self.config_manager.config:
+                self.config_manager.config.install_path = str(self.install_path)
             self.config_manager.save_config()
-            logger.info("✅ Environment setup status saved to configuration")
+            logger.info("[OK] Environment setup status saved to configuration")
         except Exception as e:
             logger.warning(f"Failed to save setup status to config: {e}")
         
-        logger.info("✅ Environment setup completed successfully")
-        logger.info(f"Micromamba installed at: {self.micromamba_exe}")
-        logger.info(f"Base environment created at: {self.ps_env_path}")
+        logger.info("[OK] Environment setup completed successfully")
+        logger.info(f"Portable environment created at: {self.ps_env_path}")
         
         return True

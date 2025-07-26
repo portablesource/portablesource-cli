@@ -2,12 +2,13 @@
 
 import subprocess
 import winreg
+import sys
 from pathlib import Path
 from typing import Optional
 import os
 
-from portablesource.config import logger
-from portablesource.config import ConfigManager
+from .config import logger
+from .config import ConfigManager
 
 def save_install_path_to_registry(install_path: Path) -> bool:
     """Save installation path to Windows registry.
@@ -74,7 +75,6 @@ def create_directory_structure(install_path: Path) -> None:
         install_path: Base installation path
     """
     directories = [
-        install_path / "micromamba",
         install_path / "ps_env", 
         install_path / "repos",
         install_path / "envs"
@@ -144,27 +144,29 @@ def change_installation_path() -> bool:
     success = save_install_path_to_registry(new_path)
     
     if success:
-        logger.info("✅ Installation path successfully changed")
+        logger.info("[OK] Installation path successfully changed")
         logger.info(f"New path: {new_path}")
         logger.info("Restart PortableSource to apply changes")
     else:
-        logger.error("❌ Failed to save new path to registry")
+        logger.error("[ERROR] Failed to save new path to registry")
     
     return success
 
 
-def show_system_info(install_path: Path, environment_manager=None, check_micromamba_func=None) -> None:
+def show_system_info(install_path: Path, environment_manager=None, check_environment_func=None, config_manager=None):
     """Show system information.
     
     Args:
         install_path: Installation path
         environment_manager: Environment manager instance (optional)
-        check_micromamba_func: Function to check micromamba availability (optional)
+        check_environment_func: Function to check environment availability (optional)
+        config_manager: ConfigManager instance (optional)
     """
-    # Load config to get GPU information
-    config_path = install_path / "portablesource_config.json"
-    config_manager = ConfigManager(config_path)
-    config_manager.load_config()
+    # Use provided config_manager or create new one
+    if config_manager is None:
+        config_path = install_path / "portablesource_config.json"
+        config_manager = ConfigManager(config_path)
+        config_manager.load_config()
     
     # Determine path separator based on OS
     if os.name == 'nt':
@@ -180,13 +182,12 @@ def show_system_info(install_path: Path, environment_manager=None, check_microma
     
     # Directory structure
     logger.info("  - Directory structure:")
-    logger.info(f"    * {install_path}{slash}micromamba")
     logger.info(f"    * {install_path}{slash}ps_env")
     logger.info(f"    * {install_path}{slash}repos")
     logger.info(f"    * {install_path}{slash}envs")
     
     # GPU information from config
-    gpu_config = config_manager.config.gpu_config
+    gpu_config = config_manager.config.gpu_config if config_manager.config else None
     if gpu_config and gpu_config.name:
         logger.info(f"  - GPU: {gpu_config.name}")
         # Determine GPU type from name
@@ -205,24 +206,24 @@ def show_system_info(install_path: Path, environment_manager=None, check_microma
     else:
         logger.info("  - GPU: Not configured")
     
-    # Micromamba status
-    micromamba_installed = False
-    if check_micromamba_func:
-        micromamba_installed = check_micromamba_func()
-        micromamba_status = "Installed" if micromamba_installed else "Not installed"
-        logger.info(f"  - Micromamba: {micromamba_status}")
+    # Portable environment status
+    environment_available = False
+    if check_environment_func:
+        environment_available = check_environment_func()
+        environment_status = "Available" if environment_available else "Not available"
+        logger.info(f"  - Portable Environment: {environment_status}")
     
-    # Base environment status (only if micromamba is installed)
-    if environment_manager and micromamba_installed:
+    # Base environment status (only if portable environment is available)
+    if environment_manager and environment_available:
         env_info = environment_manager.get_environment_info()
         base_env_status = "Created" if env_info["base_env_exists"] else "Not created"
         logger.info(f"  - Base environment (ps_env): {base_env_status}")
         if env_info["base_env_python"]:
             logger.info(f"    * Python: {env_info['base_env_python']}")
-        if env_info["base_env_uv"]:
-            logger.info(f"    * UV: {env_info['base_env_uv']}")
-    elif environment_manager and not micromamba_installed:
-        logger.info("  - Base environment (ps_env): Not available (Micromamba not installed)")
+        if env_info.get("base_env_pip"):
+            logger.info(f"    * Pip: {env_info['base_env_pip']}")
+    elif environment_manager and not environment_available:
+        logger.info("  - Base environment (ps_env): Not available (Portable environment not available)")
     
     # MSVC Build Tools status
     msvc_status = "Installed" if check_msvc_build_tools_installed() else "Not installed"
@@ -288,19 +289,19 @@ def install_msvc_build_tools(install_path: Path) -> bool:
             logger.warning(f"Failed to remove installer: {e}")
         
         if result.returncode == 0:
-            logger.info("✅ MSVC Build Tools installed successfully")
+            logger.info("[OK] MSVC Build Tools installed successfully")
             return True
         else:
-            logger.error(f"❌ MSVC Build Tools installation failed with exit code: {result.returncode}")
+            logger.error(f"[ERROR] MSVC Build Tools installation failed with exit code: {result.returncode}")
             if result.stderr:
                 logger.error(f"Error output: {result.stderr}")
             return False
             
     except subprocess.TimeoutExpired:
-        logger.error("❌ MSVC Build Tools installation timed out")
+        logger.error("[ERROR] MSVC Build Tools installation timed out")
         return False
     except Exception as e:
-        logger.error(f"❌ Failed to install MSVC Build Tools: {e}")
+        logger.error(f"[ERROR] Failed to install MSVC Build Tools: {e}")
         return False
 
 
@@ -367,3 +368,139 @@ def check_msvc_build_tools_installed() -> bool:
     except Exception as e:
         logger.debug(f"Error checking MSVC Build Tools: {e}")
         return False
+
+
+class PortableSourceApp:
+    """Main PortableSource Application"""
+    
+    def __init__(self):
+        self.install_path: Optional[Path] = None
+        self.config_manager: Optional[ConfigManager] = None
+        self.environment_manager = None
+        self.repository_installer = None
+        
+    def initialize(self, install_path: Optional[str] = None):
+        """Initialize the application"""
+        # Import here to avoid circular imports
+        from .envs_manager import PortableEnvironmentManager
+        from .repository_installer import RepositoryInstaller
+        
+        # Determine installation path
+        if install_path:
+            self.install_path = Path(install_path).resolve()
+            save_install_path_to_registry(self.install_path)
+        else:
+            self.install_path = self._get_installation_path()
+        
+        # Create directory structure
+        create_directory_structure(self.install_path)
+        
+        # Initialize config manager with proper config path
+        config_path = self.install_path / "portablesource_config.json"
+        self.config_manager = ConfigManager(config_path)
+        self.config_manager.load_config()
+        # Set install path in config if not already set
+        if not self.config_manager.config or not self.config_manager.config.install_path:
+            self.config_manager.configure_install_path(str(self.install_path))
+            self.config_manager.save_config()
+        
+        # Initialize managers
+        self.environment_manager = PortableEnvironmentManager(self.install_path, self.config_manager)
+        self.repository_installer = RepositoryInstaller(self.install_path, config_manager=self.config_manager)
+    
+    def _get_installation_path(self) -> Path:
+        """Request installation path from user"""
+        registry_path = load_install_path_from_registry()
+        
+        if registry_path:
+            return registry_path
+        
+        # If no path in registry, request from user
+        print("\n" + "="*60)
+        print("PORTABLESOURCE INSTALLATION PATH SETUP")
+        print("="*60)
+        
+        default_path = Path("C:/PortableSource")
+        print(f"\nDefault path will be used: {default_path}")
+        print("\nYou can:")
+        print("1. Press Enter to use the default path")
+        print("2. Enter your own installation path")
+        
+        user_input = input("\nEnter installation path (or Enter for default): ").strip()
+        
+        if not user_input:
+            chosen_path = default_path
+        else:
+            chosen_path = validate_and_get_path(user_input)
+        
+        print(f"\nChosen installation path: {chosen_path}")
+        
+        # Check if path exists and is not empty
+        if chosen_path.exists() and any(chosen_path.iterdir()):
+            print(f"\nWarning: Directory {chosen_path} already exists and is not empty.")
+            while True:
+                confirm = input("Continue? (y/n): ").strip().lower()
+                if confirm in ['y', 'yes']:
+                    break
+                elif confirm in ['n', 'no']:
+                    print("Installation cancelled.")
+                    sys.exit(1)
+                else:
+                    print("Please enter 'y' or 'n'")
+        
+        save_install_path_to_registry(chosen_path)
+        return chosen_path
+    
+    def setup_environment(self):
+        """Setup environment (Portable environment + base environment)"""
+        if not self.environment_manager:
+            logger.error("Environment manager not initialized")
+            return False
+        
+        return self.environment_manager.setup_environment()
+    
+    def install_repository(self, repo_url_or_name: str) -> bool:
+        """Install repository"""
+        if not self.repository_installer:
+            logger.error("Repository installer not initialized")
+            return False
+        
+        # Repositories should be installed in the repos subdirectory
+        if not self.install_path:
+            logger.error("install path is none")
+            return False
+
+        repos_path = self.install_path / "repos"
+        return self.repository_installer.install_repository(repo_url_or_name, repos_path)
+    
+    def update_repository(self, repo_name: str) -> bool:
+        """Update repository"""
+        if not self.repository_installer:
+            logger.error("Repository installer not initialized")
+            return False
+        
+        return self.repository_installer.update_repository(repo_name)
+    
+    def list_installed_repositories(self):
+        """List installed repositories"""
+        if not self.repository_installer:
+            logger.error("Repository installer not initialized")
+            return []
+        
+        return self.repository_installer.list_installed_repositories()
+    
+    def show_system_info_with_repos(self):
+        """Show system information and repositories"""
+        if self.install_path is None:
+            logger.error("Installation path not initialized")
+            return
+        
+        check_environment_func = self.environment_manager.check_environment_availability if self.environment_manager else None
+        show_system_info(self.install_path, self.environment_manager, check_environment_func, self.config_manager)
+        
+        # Show repositories
+        repos = self.list_installed_repositories()
+        logger.info(f"  - Installed repositories: {len(repos)}")
+        for repo in repos:
+            launcher_status = "[OK]" if repo['has_launcher'] else "[ERROR]"
+            logger.info(f"    * {repo['name']} {launcher_status}")

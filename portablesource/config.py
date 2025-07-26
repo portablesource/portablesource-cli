@@ -10,10 +10,11 @@ SERVER_DOMAIN = "portables.dev"
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, Optional, Any
 from dataclasses import dataclass
 from enum import Enum
-from portablesource.Version import __version__ as ver
+from .Version import __version__ as ver
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +31,45 @@ class GPUGeneration(Enum):
 
 class CUDAVersion(Enum):
     """Available CUDA versions"""
-    CUDA_118 = "11.8"
-    CUDA_124 = "12.4"
-    CUDA_128 = "12.8"
+    CUDA_118 = "118"
+    CUDA_124 = "124"
+    CUDA_128 = "128"
 
+class CUDALinks(Enum):
+    """Available CUDA download links"""
+    CUDA_118 = "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/CUDA_118.7z"  
+    CUDA_124 = "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/CUDA_124.7z"  
+    CUDA_128 = "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/CUDA_128.7z"  
+
+class TOOLinks(Enum):
+    """Available tool (ffmpeg, git, python) download links"""
+    GIT_URL = "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/git.7z"
+    FFMPEG_URL = "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/ffmpeg.7z"
+    PYTHON311_URL = "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/python311.7z"
+
+@dataclass
+class CUDAPaths:
+    """CUDA installation paths"""
+    base_path: str
+    
+    def __post_init__(self):
+        slash = "\\" if os.name == "nt" else "/"
+        
+        self.cuda_bin = f"{self.base_path}{slash}bin"
+        self.cuda_lib = f"{self.base_path}{slash}lib"
+        self.cuda_include = f"{self.base_path}{slash}include"
+        self.cuda_nvml = f"{self.base_path}{slash}nvml"
+        self.cuda_nvvm = f"{self.base_path}{slash}nvvm"
+        
+        self.cuda_lib_64 = f"{self.cuda_lib}{slash}x64"
+
+        self.cuda_nvml_include = f"{self.cuda_nvml}{slash}include"
+        self.cuda_nvml_bin = f"{self.cuda_nvml}{slash}bin"
+        self.cuda_nvml_lib = f"{self.cuda_nvml}{slash}lib"
+                
+        self.cuda_nvvm_include = f"{self.cuda_nvvm}{slash}include"
+        self.cuda_nvvm_bin = f"{self.cuda_nvvm}{slash}bin"
+        self.cuda_nvvm_lib = f"{self.cuda_nvvm}{slash}lib"
 
 @dataclass
 class GPUConfig:
@@ -41,17 +77,16 @@ class GPUConfig:
     name: str = ""
     generation: GPUGeneration = GPUGeneration.UNKNOWN
     cuda_version: Optional[CUDAVersion] = None
+    cuda_paths: Optional[CUDAPaths] = None
     compute_capability: str = ""
     memory_gb: int = 0
     recommended_backend: str = "cpu"
     supports_tensorrt: bool = False
-    packages: Optional[List[str]] = None
     
     def __post_init__(self):
-        if self.packages is None:
-            self.packages = []
-        if self.cuda_version is None:
-            self.cuda_version = CUDAVersion.CUDA_118
+        # CUDA version should be set explicitly in configure_gpu method
+        # Don't set default CUDA version here to avoid overriding detection logic
+        pass
 
 
 @dataclass
@@ -64,8 +99,9 @@ class PortableSourceConfig:
     environment_setup_completed: bool = False  # Tracks if environment setup is completed
     
     def __post_init__(self):
-        if self.gpu_config is None:
-            self.gpu_config = GPUConfig()
+        # Don't create default GPUConfig here - let it be configured properly via detection
+        # if self.gpu_config is None:
+        #     self.gpu_config = GPUConfig()
         if self.environment_vars is None:
             self.environment_vars = {}
 
@@ -75,7 +111,8 @@ class ConfigManager:
 
     def __init__(self, config_path: Optional[Path] = None):
         self.config_path = config_path or Path.cwd() / "portablesource_config.json"
-        self.config = PortableSourceConfig()
+        # Don't create default config here - let it be loaded or created when needed
+        self.config = None
         
         # GPU generation patterns
         self.gpu_patterns = {
@@ -149,7 +186,7 @@ class ConfigManager:
     
     def configure_gpu(self, gpu_name: str, memory_gb: int = 0) -> GPUConfig:
         """
-        Configure GPU settings with new logic
+        Configure GPU settings
         
         Args:
             gpu_name: Name of the GPU
@@ -164,22 +201,16 @@ class ConfigManager:
         # Determine compute capability
         compute_capability = self._get_compute_capability(generation)
         
-        # Determine packages and backend based on new logic
-        packages = []
+        # Determine backend and TensorRT support
         supports_tensorrt = False
         
         gpu_name_upper = gpu_name.upper()
         if any(keyword in gpu_name_upper for keyword in ["NVIDIA", "GEFORCE", "QUADRO", "TESLA", "RTX", "GTX"]) and generation != GPUGeneration.UNKNOWN:
             # NVIDIA GPU detected with known generation
             if cuda_version:
-                # Include CUDA version in package name for proper indexing
-                packages.append(f"cudatoolkit={cuda_version.value}")
-                packages.append("cudnn")
-                
                 # Check if CUDA >= 12.4 and generation >= Turing for TensorRT
                 if (cuda_version in [CUDAVersion.CUDA_124, CUDAVersion.CUDA_128] and 
                     generation in [GPUGeneration.TURING, GPUGeneration.AMPERE, GPUGeneration.ADA_LOVELACE, GPUGeneration.BLACKWELL]):
-                    packages.append("tensorrt")
                     supports_tensorrt = True
                     backend = "cuda,tensorrt"
                 else:
@@ -193,18 +224,28 @@ class ConfigManager:
         else:
             backend = "cpu"
         
+        # Create CUDA paths if CUDA version is available
+        cuda_paths = None
+        if cuda_version and self.config and self.config.install_path:
+            cuda_base_path = Path(self.config.install_path) / "ps_env" / "CUDA"
+            cuda_paths = CUDAPaths(str(cuda_base_path))
+        
         gpu_config = GPUConfig(
             name=gpu_name,
             generation=generation,
             cuda_version=cuda_version,
+            cuda_paths=cuda_paths,
             compute_capability=compute_capability,
             memory_gb=memory_gb,
             recommended_backend=backend,
-            supports_tensorrt=supports_tensorrt,
-            packages=packages
+            supports_tensorrt=supports_tensorrt
         )
         
-        self.config.gpu_config = gpu_config
+        # Ensure config exists before setting gpu_config
+        if not self.config:
+            self._create_default_config()
+        if self.config:
+            self.config.gpu_config = gpu_config
         return gpu_config
     
     def configure_gpu_from_detection(self) -> GPUConfig:
@@ -255,7 +296,11 @@ class ConfigManager:
             Configured install path
         """
         install_path = str(Path(install_path))
-        self.config.install_path = install_path
+        # Ensure config exists before setting install_path
+        if not self.config:
+            self._create_default_config()
+        if self.config:
+            self.config.install_path = install_path
         
         return install_path
     
@@ -268,15 +313,79 @@ class ConfigManager:
         """
         env_vars = {}
         
-        if self.config.install_path:
+        # Ensure config exists
+        if not self.config:
+            self._create_default_config()
+            
+        if self.config and self.config.install_path:
             # Только базовые временные директории
             tmp_path = str(Path(self.config.install_path) / "tmp")
             env_vars["USERPROFILE"] = tmp_path
             env_vars["TEMP"] = tmp_path
             env_vars["TMP"] = tmp_path
         
-        self.config.environment_vars = env_vars
+        if self.config:
+            self.config.environment_vars = env_vars
         return env_vars
+
+    def configure_cuda_paths(self) -> None:
+        """
+        Configure CUDA paths based on installation path and GPU config
+        """
+        # Ensure config exists
+        if not self.config:
+            self._create_default_config()
+            
+        if not self.config or not self.config.install_path:
+            logger.error("Installation path not set, cannot configure CUDA paths")
+            return
+        
+        if not self.config.gpu_config or not self.config.gpu_config.cuda_version:
+            logger.warning("No CUDA version configured, skipping CUDA paths setup")
+            return
+        
+        # CUDA is installed in ps_env/CUDA directory
+        cuda_base_path = Path(self.config.install_path) / "ps_env" / "CUDA"
+        self.config.gpu_config.cuda_paths = CUDAPaths(str(cuda_base_path))
+        logger.info(f"CUDA paths configured for version {self.config.gpu_config.cuda_version.value}")
+        
+        # Save configuration after updating CUDA paths
+        self.save_config()
+    
+    def get_cuda_download_link(self, cuda_version: Optional[CUDAVersion] = None) -> Optional[str]:
+        """
+        Get download link for CUDA package based on version
+        
+        Args:
+            cuda_version: CUDA version to get link for. If None, uses GPU config version
+            
+        Returns:
+            Download link string or None if not available
+        """
+        if cuda_version is None:
+            # Ensure config exists
+            if not self.config:
+                self._create_default_config()
+                
+            if self.config and self.config.gpu_config and self.config.gpu_config.cuda_version:
+                cuda_version = self.config.gpu_config.cuda_version
+            else:
+                logger.warning("No CUDA version specified and no GPU config available")
+                return None
+        
+        # Map CUDA versions to download links
+        link_mapping = {
+            CUDAVersion.CUDA_118: CUDALinks.CUDA_118.value,
+            CUDAVersion.CUDA_124: CUDALinks.CUDA_124.value,
+            CUDAVersion.CUDA_128: CUDALinks.CUDA_128.value
+        }
+        
+        download_link = link_mapping.get(cuda_version)
+        if not download_link:
+            logger.warning(f"No download link available for CUDA version {cuda_version.value}")
+            return None
+        
+        return download_link
     
     def _get_compute_capability(self, generation: GPUGeneration) -> str:
         """
@@ -306,6 +415,14 @@ class ConfigManager:
             True if saved successfully
         """
         try:
+            # Ensure config exists
+            if not self.config:
+                self._create_default_config()
+                
+            if not self.config:
+                logger.error("No configuration to save")
+                return False
+                
             config_file_path = self._get_config_file_path()
             
             # Ensure directory exists
@@ -319,11 +436,13 @@ class ConfigManager:
                     "name": self.config.gpu_config.name,
                     "generation": self.config.gpu_config.generation.value,
                     "cuda_version": self.config.gpu_config.cuda_version.value if self.config.gpu_config.cuda_version else None,
+                    "cuda_paths": {
+                        "base_path": self.config.gpu_config.cuda_paths.base_path
+                    } if self.config.gpu_config.cuda_paths else None,
                     "compute_capability": self.config.gpu_config.compute_capability,
                     "memory_gb": self.config.gpu_config.memory_gb,
                     "recommended_backend": self.config.gpu_config.recommended_backend,
-                    "supports_tensorrt": self.config.gpu_config.supports_tensorrt,
-                    "packages": self.config.gpu_config.packages
+                    "supports_tensorrt": self.config.gpu_config.supports_tensorrt
                 } if self.config.gpu_config else None,
                 "environment_vars": self.config.environment_vars,
                 "environment_setup_completed": self.config.environment_setup_completed
@@ -348,7 +467,8 @@ class ConfigManager:
             config_file_path = self._get_config_file_path()
             
             if not config_file_path.exists():
-                logger.info("No configuration file found, using defaults")
+                logger.info("No configuration file found, creating default configuration")
+                self._create_default_config()
                 return False
             
             with open(config_file_path, 'r', encoding='utf-8') as f:
@@ -360,7 +480,20 @@ class ConfigManager:
             return True
         except Exception as e:
             logger.error(f"Failed to load configuration: {e}")
+            # Create default config as fallback
+            self._create_default_config()
             return False
+    
+    def _create_default_config(self):
+        """
+        Create default configuration without calling __post_init__
+        """
+        self.config = PortableSourceConfig.__new__(PortableSourceConfig)
+        self.config.version = ver
+        self.config.install_path = ""
+        self.config.gpu_config = None
+        self.config.environment_vars = {}
+        self.config.environment_setup_completed = False
     
     def _dict_to_config(self, config_dict: Dict[str, Any]) -> PortableSourceConfig:
         """
@@ -379,9 +512,18 @@ class ConfigManager:
                 gpu_config['generation'] = GPUGeneration(gpu_config['generation'])
             if 'cuda_version' in gpu_config and gpu_config['cuda_version'] is not None:
                 gpu_config['cuda_version'] = CUDAVersion(gpu_config['cuda_version'])
+            if 'cuda_paths' in gpu_config and gpu_config['cuda_paths'] is not None:
+                gpu_config['cuda_paths'] = CUDAPaths(gpu_config['cuda_paths']['base_path'])
         
-        # Reconstruct config object
-        config = PortableSourceConfig()
+        # Reconstruct config object without calling __post_init__
+        config = PortableSourceConfig.__new__(PortableSourceConfig)
+        
+        # Set default values manually
+        config.version = "1.0.0"
+        config.install_path = ""
+        config.gpu_config = None
+        config.environment_vars = {}
+        config.environment_setup_completed = False
         
         if 'version' in config_dict:
             config.version = config_dict['version']
@@ -412,8 +554,11 @@ class ConfigManager:
         Returns:
             True if environment setup is completed
         """
-        # Force PyRight to re-read type definitions
-        return self.config.environment_setup_completed
+        # Ensure config exists
+        if not self.config:
+            self._create_default_config()
+            
+        return self.config.environment_setup_completed if self.config else False
     
     def mark_environment_setup_completed(self, completed: bool = True) -> bool:
         """
@@ -425,8 +570,14 @@ class ConfigManager:
         Returns:
             True if saved successfully
         """
-        self.config.environment_setup_completed = completed
-        return self.save_config()
+        # Ensure config exists
+        if not self.config:
+            self._create_default_config()
+            
+        if self.config:
+            self.config.environment_setup_completed = completed
+            return self.save_config()
+        return False
 
     def get_config_summary(self) -> str:
         """
@@ -435,27 +586,34 @@ class ConfigManager:
         Returns:
             Configuration summary string
         """
+        # Ensure config exists
+        if not self.config:
+            self._create_default_config()
+            
+        if not self.config:
+            return "Configuration not available"
+            
         if self.config.gpu_config:
-            packages = ", ".join(self.config.gpu_config.packages) if self.config.gpu_config.packages else "None"
             gpu_name = self.config.gpu_config.name
             gpu_generation = self.config.gpu_config.generation.value
             cuda_version = self.config.gpu_config.cuda_version.value if self.config.gpu_config.cuda_version else 'None'
+            cuda_paths_configured = "Yes" if self.config.gpu_config.cuda_paths else "No"
             compute_capability = self.config.gpu_config.compute_capability
             memory_gb = self.config.gpu_config.memory_gb
             backend = self.config.gpu_config.recommended_backend
             tensorrt_support = self.config.gpu_config.supports_tensorrt
         else:
-            packages = "None"
             gpu_name = "Not configured"
             gpu_generation = "Unknown"
             cuda_version = "None"
+            cuda_paths_configured = "No"
             compute_capability = "Unknown"
             memory_gb = 0
             backend = "cpu"
             tensorrt_support = False
         
         env_vars_count = len(self.config.environment_vars) if self.config.environment_vars else 0
-        setup_status = "✅ Completed" if self.config.environment_setup_completed else "❌ Not completed"
+        setup_status = "[OK] Completed" if self.config.environment_setup_completed else "[ERROR] Not completed"
         
         summary = f"""
 PortableSource Configuration Summary
@@ -467,11 +625,11 @@ GPU Configuration:
   Name: {gpu_name}
   Generation: {gpu_generation}
   CUDA Version: {cuda_version}
+  CUDA Paths Configured: {cuda_paths_configured}
   Compute Capability: {compute_capability}
   Memory: {memory_gb}GB
   Backend: {backend}
   TensorRT Support: {tensorrt_support}
-  Packages: {packages}
 
 Install Path: {self.config.install_path}
 
