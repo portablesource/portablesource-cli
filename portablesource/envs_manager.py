@@ -196,6 +196,60 @@ class PortableEnvironmentManager:
         except Exception as e:
             logger.warning(f"Failed to fix nested extraction for {tool_name}: {e}")
     
+    def _fix_cuda_nested_extraction(self, extract_path: Path, cuda_version) -> None:
+        """Fix CUDA-specific nested folder structure issues"""
+        try:
+            # Common CUDA nested folder patterns to check
+            possible_nested_folders = [
+                f"CUDA_{cuda_version.value}",  # e.g., CUDA_124
+                f"cuda_{cuda_version.value}",  # e.g., cuda_124
+                "CUDA",  # Generic CUDA folder
+                "cuda"   # Generic cuda folder
+            ]
+            
+            for folder_name in possible_nested_folders:
+                nested_folder = extract_path / folder_name
+                if nested_folder.exists() and nested_folder.is_dir():
+                    # Check if this nested folder contains bin directory (CUDA content)
+                    if (nested_folder / "bin").exists():
+                        logger.info(f"Found CUDA content in nested folder: {folder_name}")
+                        
+                        # Check if extract_path is empty except for this nested folder
+                        extract_contents = [item for item in extract_path.iterdir() if item != nested_folder]
+                        
+                        if len(extract_contents) == 0:
+                            logger.info(f"Moving CUDA content from {folder_name} to parent directory")
+                            
+                            # Create a temporary directory to move contents
+                            temp_dir = extract_path.parent / f"cuda_temp_{cuda_version.value}"
+                            temp_dir.mkdir(exist_ok=True)
+                            
+                            # Move all contents from nested folder to temp directory
+                            for item in nested_folder.iterdir():
+                                shutil.move(str(item), str(temp_dir / item.name))
+                            
+                            # Remove the now-empty nested folder
+                            nested_folder.rmdir()
+                            
+                            # Move contents from temp directory to extract path
+                            for item in temp_dir.iterdir():
+                                shutil.move(str(item), str(extract_path / item.name))
+                            
+                            # Remove temp directory
+                            temp_dir.rmdir()
+                            
+                            logger.info(f"[OK] Fixed CUDA nested folder structure for {folder_name}")
+                            return  # Exit after fixing the first match
+                        else:
+                            logger.info(f"CUDA folder {folder_name} found but extract path has other contents, skipping")
+                    
+            # If no nested folders found, check if CUDA is properly extracted
+            if not (extract_path / "bin").exists():
+                logger.warning(f"CUDA extraction may be incomplete - no bin directory found in {extract_path}")
+                
+        except Exception as e:
+            logger.warning(f"Failed to fix CUDA nested extraction: {e}")
+    
     def install_tool(self, tool_name: str) -> bool:
         """Install a specific tool"""
         if tool_name not in self.tool_specs:
@@ -282,6 +336,9 @@ class PortableEnvironmentManager:
         if not self.extract_7z_archive(cuda_archive_path, cuda_extract_path):
             return False
         
+        # Handle CUDA-specific nested folder structure
+        self._fix_cuda_nested_extraction(cuda_extract_path, cuda_version)
+        
         # Clean up archive
         try:
             cuda_archive_path.unlink()
@@ -367,8 +424,8 @@ class PortableEnvironmentManager:
             if not self.extract_7z_archive(cuda_archive_path, cuda_extract_path):
                 return False
             
-            # Handle nested folder structure for CUDA
-            self._fix_nested_extraction(cuda_extract_path, "CUDA")
+            # Handle CUDA-specific nested folder structure
+            self._fix_cuda_nested_extraction(cuda_extract_path, cuda_version)
             
             # Clean up archive
             try:
@@ -579,6 +636,19 @@ class PortableEnvironmentManager:
         # Use the centralized environment setup function
         env = self.setup_environment_for_subprocess()
         
+        # Debug: Log PATH for nvcc command
+        if command and command[0] == "nvcc":
+            logger.debug(f"Running nvcc with PATH: {env.get('PATH', 'Not set')}")
+            if (self.config_manager.config and 
+                self.config_manager.config.gpu_config and 
+                self.config_manager.config.gpu_config.cuda_paths):
+                cuda_paths = self.config_manager.config.gpu_config.cuda_paths
+                cuda_bin = Path(cuda_paths.cuda_bin)
+                logger.debug(f"CUDA bin path exists: {cuda_bin.exists()} at {cuda_bin}")
+                if cuda_bin.exists():
+                    nvcc_exe = cuda_bin / "nvcc.exe"
+                    logger.debug(f"nvcc.exe exists: {nvcc_exe.exists()} at {nvcc_exe}")
+        
         # On Windows, use shell=True for better executable resolution
         import platform
         use_shell = platform.system() == "Windows"
@@ -665,24 +735,35 @@ class PortableEnvironmentManager:
             self.config_manager.config.gpu_config and 
             self.config_manager.config.gpu_config.cuda_paths):
             cuda_paths = self.config_manager.config.gpu_config.cuda_paths
-            cuda_bin = Path(cuda_paths.cuda_bin)
-            if cuda_bin.exists():
-                tool_paths.append(str(cuda_bin))
-                # Also add CUDA lib paths for runtime libraries
-                cuda_lib = Path(cuda_paths.cuda_lib)
-                if cuda_lib.exists():
-                    tool_paths.append(str(cuda_lib))
-                cuda_lib_64 = Path(cuda_paths.cuda_lib_64)
-                if cuda_lib_64.exists():
-                    tool_paths.append(str(cuda_lib_64))
-                
-                # Set CUDA environment variables
-                cuda_base = Path(cuda_paths.base_path)
-                env_vars['CUDA_PATH'] = str(cuda_base)
-                env_vars['CUDA_HOME'] = str(cuda_base)
-                env_vars['CUDA_ROOT'] = str(cuda_base)
-                env_vars['CUDA_BIN_PATH'] = str(cuda_bin)
-                env_vars['CUDA_LIB_PATH'] = str(cuda_lib_64) if cuda_lib_64.exists() else str(cuda_lib)
+            cuda_base = Path(cuda_paths.base_path)
+            
+            # Check if CUDA is actually installed
+            if cuda_base.exists():
+                cuda_bin = Path(cuda_paths.cuda_bin)
+                if cuda_bin.exists():
+                    tool_paths.append(str(cuda_bin))
+                    # Also add CUDA lib paths for runtime libraries
+                    cuda_lib = Path(cuda_paths.cuda_lib)
+                    if cuda_lib.exists():
+                        tool_paths.append(str(cuda_lib))
+                    cuda_lib_64 = Path(cuda_paths.cuda_lib_64)
+                    if cuda_lib_64.exists():
+                        tool_paths.append(str(cuda_lib_64))
+                    
+                    # Set CUDA environment variables
+                    env_vars['CUDA_PATH'] = str(cuda_base)
+                    env_vars['CUDA_HOME'] = str(cuda_base)
+                    env_vars['CUDA_ROOT'] = str(cuda_base)
+                    env_vars['CUDA_BIN_PATH'] = str(cuda_bin)
+                    env_vars['CUDA_LIB_PATH'] = str(cuda_lib_64) if cuda_lib_64.exists() else str(cuda_lib)
+                else:
+                    logger.debug(f"CUDA bin directory not found: {cuda_bin}")
+            else:
+                logger.debug(f"CUDA base directory not found: {cuda_base}. CUDA may not be installed.")
+                # Try to trigger CUDA installation if GPU supports it
+                if (self.config_manager.config.gpu_config and 
+                    self.config_manager.config.gpu_config.cuda_version):
+                    logger.info("CUDA not found but GPU supports it. You may need to run --setup-env to install CUDA.")
         
         if tool_paths:
             current_path = env_vars.get('PATH', '')
@@ -779,6 +860,29 @@ class PortableEnvironmentManager:
         
         return all_tools_working
     
+    def _check_and_suggest_cuda_installation(self) -> None:
+        """Check if CUDA should be available and suggest installation if missing"""
+        if (self.config_manager.config and 
+            self.config_manager.config.gpu_config and 
+            self.config_manager.config.gpu_config.cuda_version):
+            
+            cuda_paths = self.config_manager.config.gpu_config.cuda_paths
+            if cuda_paths:
+                cuda_base = Path(cuda_paths.base_path)
+                if not cuda_base.exists():
+                    logger.warning(f"CUDA {self.config_manager.config.gpu_config.cuda_version.value} is configured but not installed.")
+                    logger.info("To install CUDA, run: portablesource --setup-env")
+                else:
+                    cuda_bin = Path(cuda_paths.cuda_bin)
+                    if not cuda_bin.exists():
+                        logger.warning(f"CUDA installation incomplete: {cuda_bin} not found")
+                        logger.info("To reinstall CUDA, run: portablesource --setup-env")
+                    else:
+                        nvcc_exe = cuda_bin / "nvcc.exe"
+                        if not nvcc_exe.exists():
+                            logger.warning(f"nvcc.exe not found in CUDA installation: {nvcc_exe}")
+                            logger.info("To reinstall CUDA, run: portablesource --setup-env")
+    
     def check_environment_status(self) -> Dict[str, Any]:
         """Check the current status of the environment and all tools"""
         status = {
@@ -790,6 +894,9 @@ class PortableEnvironmentManager:
         if not status["environment_exists"]:
             status["overall_status"] = "Environment not found"
             return status
+        
+        # Check if CUDA should be available but isn't installed
+        self._check_and_suggest_cuda_installation()
         
         # Check individual tools
         tools_to_check = [
@@ -817,11 +924,25 @@ class PortableEnvironmentManager:
                         "version": version_output
                     }
                 else:
-                    status["tools_status"][tool_name] = {
-                        "working": False,
-                        "error": f"Exit code {result.returncode}",
-                        "stderr": result.stderr.strip() if result.stderr else None
-                    }
+                    # Special handling for nvcc errors
+                    if tool_name == "nvcc":
+                        error_msg = f"Exit code {result.returncode}"
+                        if result.stderr and "не является внутренней или внешней" in result.stderr:
+                            error_msg = "Command not found - CUDA may not be installed or not in PATH"
+                        elif result.stderr and "не удается найти указанный путь" in result.stderr:
+                            error_msg = "Path not found - CUDA installation may be incomplete"
+                        
+                        status["tools_status"][tool_name] = {
+                            "working": False,
+                            "error": error_msg,
+                            "stderr": result.stderr.strip() if result.stderr else None
+                        }
+                    else:
+                        status["tools_status"][tool_name] = {
+                            "working": False,
+                            "error": f"Exit code {result.returncode}",
+                            "stderr": result.stderr.strip() if result.stderr else None
+                        }
                     all_working = False
             except Exception as e:
                 status["tools_status"][tool_name] = {

@@ -29,8 +29,15 @@ def main():
     parser.add_argument("--check-env", action="store_true", help="Check environment status and tools")
     parser.add_argument("--install-msvc", action="store_true", help="Install MSVC Build Tools")
     parser.add_argument("--check-msvc", action="store_true", help="Check MSVC Build Tools installation")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     
     args = parser.parse_args()
+    
+    # Enable debug logging if requested
+    if args.debug:
+        import logging
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger('portablesource').setLevel(logging.DEBUG)
     
     # Create application
     app = PortableSourceApp()
@@ -100,7 +107,16 @@ def main():
                 else:
                     print(f"  [ERROR] {tool_name}: {tool_status['error']}")
                     if 'stderr' in tool_status and tool_status['stderr']:
-                        print(f"     Error details: {tool_status['stderr']}")
+                        # Clean up error message for better readability
+                        error_details = tool_status['stderr']
+                        if tool_name == "nvcc" and "не является внутренней или внешней" in error_details:
+                            print(f"     Error details: Command 'nvcc' not found in PATH")
+                            print(f"     Solution: Run 'portablesource --setup-env' to install CUDA")
+                        elif tool_name == "nvcc" and "не удается найти указанный путь" in error_details:
+                            print(f"     Error details: CUDA path not found")
+                            print(f"     Solution: Run 'portablesource --setup-env' to reinstall CUDA")
+                        else:
+                            print(f"     Error details: {error_details}")
         
         print("="*60)
     
@@ -131,6 +147,7 @@ def main():
         print("  --install-path <path>   Installation path")
         print("  --install-msvc          Install MSVC Build Tools")
         print("  --check-msvc            Check MSVC Build Tools")
+        print("  --debug                 Enable debug logging")
         print("="*50)
 
 if __name__ == "__main__":
