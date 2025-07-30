@@ -2049,6 +2049,7 @@ echo All CUDA paths added to environment"""
             # Path to the copied Python environment
             env_path = install_path / "envs" / repo_name
             python_exe = env_path / "python.exe"
+            ffmpeg_path = install_path / "ffmpeg"
             
             # Get program args from repo info
             program_args = repo_info.get('program_args', '')
@@ -2081,7 +2082,8 @@ REM === ADD COPIED PYTHON ENVIRONMENT PATHS ===
 REM Add the copied Python environment to PATH
 set PATH={env_path};%PATH%
 set PATH={env_path}\\Scripts;%PATH%
-echo Python environment paths added to PATH
+echo Python environment and ffmpeg paths added to PATH
+set PATH={ffmpeg_path};%PATH%
 
 REM Change to repository directory and run
 cd /d "{repo_path}"
