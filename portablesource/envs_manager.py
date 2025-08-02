@@ -8,11 +8,13 @@ import os
 import logging
 import shutil
 import subprocess
+import threading
 import urllib.request
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import re
+from tqdm import tqdm
 
 from .get_gpu import GPUDetector
 from .config import ConfigManager, TOOLinks
@@ -40,10 +42,12 @@ class PortableEnvironmentManager:
     
     def __init__(self, install_path: Path, config_manager: Optional[ConfigManager] = None):
         self.install_path = install_path
-        self.ps_env_path = install_path / "ps_env"  # Main environment path
+        self.ps_env_path = install_path / "ps_env"
         self.gpu_detector = GPUDetector()
         
-        # Initialize config manager with proper path if not provided
+        self._aria2c_lock = threading.Lock()
+        self._7z_lock = threading.Lock()
+        
         if config_manager is None:
             config_path = install_path / "portablesource_config.json"
             self.config_manager = ConfigManager(config_path)
@@ -51,7 +55,6 @@ class PortableEnvironmentManager:
         else:
             self.config_manager = config_manager
         
-        # Define portable tools specifications
         self.tool_specs = {
             "ffmpeg": PortableToolSpec(
                 name="ffmpeg",
@@ -73,50 +76,223 @@ class PortableEnvironmentManager:
             )
         }
 
-    def download_file(self, url: str, destination: Path, description: str = "Downloading") -> bool:
-        """Download a file with progress bar"""
+    def _setup_prerequisites(self) -> bool:
+        """Устанавливает 7z и aria2c, если их нет."""
+        self.ps_env_path.mkdir(parents=True, exist_ok=True)
+        
+        seven_zip_path = self.ps_env_path / "7z.exe"
+        if not self._verify_archive(seven_zip_path):
+            if not self._download_file_urllib("https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/7z.exe", seven_zip_path, "7-Zip"):
+                return False
+        
+        aria2c_path = self.ps_env_path / "aria2c.exe"
+        if not (aria2c_path.exists() and aria2c_path.stat().st_size > 1000):
+             if not self._download_file_urllib("https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/aria2c.exe", aria2c_path, "aria2c"):
+                return False
+        return True
+    
+    def _download_file_urllib(self, url: str, destination: Path, description: str) -> bool:
+        """Загрузчик для маленьких файлов (7z, aria2c) с чистым tqdm."""
         try:
-            # Download with progress bar if tqdm is available
-            try:
-                from tqdm import tqdm
-                response = urllib.request.urlopen(url)
-                total_size = int(response.headers.get('Content-Length', 0))
-                desc = f"Downloading {description}"
+            response = urllib.request.urlopen(url)
+            total_size = int(response.headers.get('Content-Length', 0))
+            
+            with tqdm(total=total_size, unit='B', unit_scale=True, desc=description, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt}') as pbar:
                 with open(destination, 'wb') as f:
-                    with tqdm(total=total_size, unit='B', unit_scale=True, desc=desc) as pbar:
-                        while True:
-                            chunk = response.read(16384)
-                            if not chunk:
-                                break
-                            f.write(chunk)
-                            pbar.update(len(chunk))
-            except ImportError:
-                logger.warning("tqdm not installed, downloading without progress bar")
-                urllib.request.urlretrieve(url, destination)
-
-            logger.info(f"Downloaded {description} to {destination}")
+                    for chunk in iter(lambda: response.read(16384), b''):
+                        f.write(chunk)
+                        pbar.update(len(chunk))
             return True
+        except Exception as e:
+            logger.error(f"Failed to download '{description}': {e}")
+            return False
+    
+    def _download_file_aria(self, url: str, destination: Path, description: str, skip_verification: bool = False) -> bool:
+        """Загрузчик для больших файлов с aria2c и чистым tqdm."""
+        try:
+            # Проверяем, не скачан ли файл уже полностью
+            if destination.exists() and not skip_verification:
+                # Проверяем целостность существующего файла
+                if self._verify_archive(destination):
+                    return True
+                # Если файл поврежден, удаляем его
+                destination.unlink()
+            
+            aria2c_path = self.ps_env_path / "aria2c.exe"
+            cmd = [
+                str(aria2c_path), "--continue=true", "--max-tries=0", "--retry-wait=5", "--split=5",
+                "--max-connection-per-server=5", "--min-split-size=1M", "--summary-interval=1",
+                "--dir", str(destination.parent), "--out", destination.name, url
+            ]
+            
+            progress_regex = re.compile(r"\[#\w+ (\d+\.?\d*)([KMGT]?i?B)/(\d+\.?\d*)([KMGT]?i?B)\((\d+)%\)")
+            def size_to_bytes(size, unit):
+                size = float(size)
+                if 'K' in unit: return size * 1024
+                if 'M' in unit: return size * 1024**2
+                if 'G' in unit: return size * 1024**3
+                return size
+
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace')
+            
+            pbar = None
+            initial_downloaded = None
+            
+            # Читаем вывод построчно до завершения процесса
+            for line in iter(process.stdout.readline, ''):
+                if "Download Results" in line: 
+                    break
+                
+                # Отладочный вывод для диагностики
+                if line.strip():
+                    logger.debug(f"aria2c output: {line.strip()}")
+                
+                match = progress_regex.search(line)
+                if match:
+                    downloaded_s, downloaded_u, total_s, total_u, percent = match.groups()
+                    total_bytes = size_to_bytes(total_s, total_u)
+                    downloaded_bytes = size_to_bytes(downloaded_s, downloaded_u)
+                    
+                    if pbar is None:
+                        initial_downloaded = downloaded_bytes
+                        pbar = tqdm(total=total_bytes, initial=downloaded_bytes, unit='B', unit_scale=True, unit_divisor=1024, 
+                                   desc=description, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
+                    
+                    pbar.n = downloaded_bytes
+                    pbar.refresh()
+            
+            process.wait()
+            if pbar:
+                if pbar.total: 
+                    pbar.n = pbar.total
+                pbar.close()
+
+            return process.returncode == 0
+        except Exception as e:
+            logger.error(f"An error occurred during download of '{description}': {e}")
+            return False
+
+    def _verify_archive(self, file_path: Path) -> bool:
+        """Проверяет архив, не выводя мусор в консоль."""
+        if not file_path.exists() or file_path.stat().st_size < 1024: return False
+        try:
+            seven_zip_exe = self.ps_env_path / "7z.exe"
+            result = subprocess.run([str(seven_zip_exe), "t", str(file_path)], capture_output=True, text=True, timeout=600)
+            if result.returncode != 0:
+                logger.debug(f"7z integrity test failed for {file_path.name}:\n{result.stderr}")
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _extract_archive(self, archive_path: Path, extract_to: Path) -> bool:
+        """Распаковывает архив, не выводя мусор в консоль."""
+        try:
+            seven_zip_exe = self.ps_env_path / "7z.exe"
+            result = subprocess.run([str(seven_zip_exe), "x", str(archive_path), f"-o{extract_to}", "-y"], capture_output=True, text=True)
+            if result.returncode == 0:
+                return True
+            else:
+                logger.error(f"Extraction failed for {archive_path.name}.")
+                logger.debug(f"7-Zip extraction failed. Raw stderr:\n{result.stderr}")
+                return False
+        except Exception as e:
+            logger.error(f"An unexpected error during extraction: {e}")
+            return False
+
+    def _verify_file_integrity(self, file_path: Path) -> bool:
+        """Verifies archive integrity, hiding unnecessary error details."""
+        try:
+            if not file_path.exists() or file_path.stat().st_size < 100: return False
+            if file_path.suffix.lower() not in ['.7z', '.zip', '.rar']: return True
+
+            seven_zip_exe = self.ps_env_path / "7z.exe"
+            if not seven_zip_exe.exists(): return False
+            
+            result = subprocess.run([str(seven_zip_exe), "t", str(file_path)], capture_output=True, text=True, timeout=600)
+            
+            if result.returncode != 0:
+                logger.debug(f"7z integrity test failed for {file_path.name}. Raw output:\n{result.stderr}")
+                return False
+            return True
+        except Exception:
+            return False
+
+    def download_file(self, url: str, destination: Path, description: str) -> bool:
+        """Main downloader with aria2c and beautiful progress bar."""
+        try:
+            aria2c_path = self.ps_env_path / "aria2c.exe"
+            if not aria2c_path.exists():
+                logger.error("aria2c not found. Please run prerequisite setup.")
+                return False
+
+            if destination.exists() and self._verify_file_integrity(destination):
+                logger.info(f'"{description}" already exists and is valid.')
+                return True
+
+            logger.info(f"Downloading '{description}'...")
+            
+            cmd = [
+                str(aria2c_path), "--continue=true", "--max-tries=0", "--retry-wait=5",
+                "--split=5", "--max-connection-per-server=5", "--min-split-size=1M",
+                "--file-allocation=none", "--check-integrity=true", "--summary-interval=1",
+                "--dir", str(destination.parent), "--out", destination.name, url
+            ]
+            
+            progress_regex = re.compile(r"\[#\w+ (\d+\.?\d*)([KMGT]?i?B)/(\d+\.?\d*)([KMGT]?i?B)\((\d+)%\)\]")
+
+            def size_to_bytes(size, unit):
+                size = float(size)
+                if 'K' in unit: return size * 1024
+                if 'M' in unit: return size * 1024**2
+                if 'G' in unit: return size * 1024**3
+                return size
+
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace')
+            
+            with tqdm(total=None, unit='B', unit_scale=True, unit_divisor=1024, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
+                pbar.set_description(description)
+                for line in iter(process.stdout.readline, ''):
+                    if "Download Results" in line: break
+                    match = progress_regex.search(line)
+                    if match:
+                        downloaded_size, downloaded_unit, total_size, total_unit, _ = match.groups()
+                        if pbar.total is None: pbar.total = size_to_bytes(total_size, total_unit)
+                        pbar.update(size_to_bytes(downloaded_size, downloaded_unit) - pbar.n)
+            
+            process.wait()
+
+            if process.returncode == 0:
+                if pbar.total: pbar.update(pbar.total - pbar.n)
+                logger.info(f"Successfully downloaded '{description}'.")
+                return True
+            else:
+                logger.error(f"aria2c failed to download '{description}'.")
+                return False
 
         except Exception as e:
-            logger.error(f"Error downloading {description}: {e}")
+            logger.error(f"An exception occurred during download of '{description}': {e}")
             return False
     
     def download_7z_executable(self) -> Optional[Path]:
         """Download 7z.exe if not available in system"""
         try:
-            # Check if 7z is already available in system
             if shutil.which("7z"):
-                return None  # System 7z is available
+                return None
             
-            # Download 7z.exe to ps_env directory
             seven_zip_url = "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/7z.exe"
             seven_zip_path = self.ps_env_path / "7z.exe"
             
             if seven_zip_path.exists():
-                return seven_zip_path  # Already downloaded
+                # Для 7z.exe просто проверяем размер файла
+                if seven_zip_path.stat().st_size > 500000:  # 7z.exe должен быть больше 500KB
+                    return seven_zip_path
+                else:
+                    logger.info("Existing 7z.exe is corrupted, re-downloading...")
+                    seven_zip_path.unlink()
             
             logger.info("Downloading 7z.exe...")
-            if self.download_file(seven_zip_url, seven_zip_path, "7z.exe"):
+            if self._download_file_aria(seven_zip_url, seven_zip_path, "7z.exe", skip_verification=True):
                 return seven_zip_path
             else:
                 logger.error("Failed to download 7z.exe")
@@ -127,505 +303,153 @@ class PortableEnvironmentManager:
             return None
     
     def extract_7z_archive(self, archive_path: Path, extract_to: Path) -> bool:
-        """Extract 7z archive using external 7zip"""
+        """Extracts archive, hiding error details."""
         try:
-            # First try to use system 7zip or download 7z.exe
-            seven_zip_exe = None
-            
-            if shutil.which("7z"):
-                seven_zip_exe = "7z"
-            else:
-                # Try to download 7z.exe
-                downloaded_7z = self.download_7z_executable()
-                if downloaded_7z:
-                    seven_zip_exe = str(downloaded_7z)
-            
-            if seven_zip_exe:
-                result = subprocess.run(
-                    [seven_zip_exe, "x", str(archive_path), f"-o{extract_to}", "-y"],
-                    capture_output=True, text=True
-                )
-                if result.returncode == 0:
-                    logger.info(f"Extracted {archive_path} to {extract_to} using 7zip")
-                    return True
-                else:
-                    logger.error(f"7zip extraction failed: {result.stderr}")
-                    return False
-            else:
-                logger.error("7zip executable not found and could not be downloaded")
+            seven_zip_exe = self.ps_env_path / "7z.exe"
+            if not seven_zip_exe.exists():
+                logger.error("7-Zip not found!")
                 return False
-                
+
+            logger.info(f"Extracting {archive_path.name}...")
+            result = subprocess.run([str(seven_zip_exe), "x", str(archive_path), f"-o{extract_to}", "-y"], capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                logger.info(f"Successfully extracted {archive_path.name}.")
+                return True
+            else:
+                logger.error(f"Extraction failed for {archive_path.name}.")
+                logger.debug(f"7-Zip extraction failed. Raw stderr:\n{result.stderr}")
+                return False
         except Exception as e:
-            logger.error(f"Error extracting {archive_path}: {e}")
+            logger.error(f"An unexpected error occurred during extraction: {e}")
             return False
     
     def _fix_nested_extraction(self, extract_path: Path, tool_name: str) -> None:
         """Fix nested folder structure when archive contains a subfolder with the same name"""
         try:
-            # Check if there's a nested folder with the same name as the tool
             nested_folder = extract_path / tool_name
             if nested_folder.exists() and nested_folder.is_dir():
-                # Check if the nested folder contains the actual content
                 nested_contents = list(nested_folder.iterdir())
                 extract_contents = [item for item in extract_path.iterdir() if item != nested_folder]
                 
-                # If the nested folder has content and the extract path has only the nested folder
                 if nested_contents and len(extract_contents) == 0:
-                    logger.info(f"Fixing nested folder structure for {tool_name}")
-                    
-                    # Create a temporary directory to move contents
                     temp_dir = extract_path.parent / f"{tool_name}_temp"
                     temp_dir.mkdir(exist_ok=True)
                     
-                    # Move all contents from nested folder to temp directory
                     for item in nested_contents:
                         shutil.move(str(item), str(temp_dir / item.name))
                     
-                    # Remove the now-empty nested folder
                     nested_folder.rmdir()
                     
-                    # Move contents from temp directory to extract path
                     for item in temp_dir.iterdir():
                         shutil.move(str(item), str(extract_path / item.name))
                     
-                    # Remove temp directory
                     temp_dir.rmdir()
                     
-                    logger.info(f"Fixed nested folder structure for {tool_name}")
-                    
         except Exception as e:
-            logger.warning(f"Failed to fix nested extraction for {tool_name}: {e}")
+            logger.error(f"Failed to fix nested extraction for {tool_name}: {e}")
     
     def _fix_cuda_nested_extraction(self, extract_path: Path, cuda_version) -> None:
         """Fix CUDA-specific nested folder structure issues"""
         try:
-            # Common CUDA nested folder patterns to check
             possible_nested_folders = [
-                f"CUDA_{cuda_version.value}",  # e.g., CUDA_124
-                f"cuda_{cuda_version.value}",  # e.g., cuda_124
-                "CUDA",  # Generic CUDA folder
-                "cuda"   # Generic cuda folder
+                f"CUDA_{cuda_version.value}",
+                f"cuda_{cuda_version.value}",
+                "CUDA",
+                "cuda"
             ]
             
             for folder_name in possible_nested_folders:
                 nested_folder = extract_path / folder_name
                 if nested_folder.exists() and nested_folder.is_dir():
-                    # Check if this nested folder contains bin directory (CUDA content)
                     if (nested_folder / "bin").exists():
-                        logger.info(f"Found CUDA content in nested folder: {folder_name}")
-                        
-                        # Check if extract_path is empty except for this nested folder
                         extract_contents = [item for item in extract_path.iterdir() if item != nested_folder]
                         
                         if len(extract_contents) == 0:
-                            logger.info(f"Moving CUDA content from {folder_name} to parent directory")
-                            
-                            # Create a temporary directory to move contents
                             temp_dir = extract_path.parent / f"cuda_temp_{cuda_version.value}"
                             temp_dir.mkdir(exist_ok=True)
                             
-                            # Move all contents from nested folder to temp directory
                             for item in nested_folder.iterdir():
                                 shutil.move(str(item), str(temp_dir / item.name))
                             
-                            # Remove the now-empty nested folder
                             nested_folder.rmdir()
                             
-                            # Move contents from temp directory to extract path
                             for item in temp_dir.iterdir():
                                 shutil.move(str(item), str(extract_path / item.name))
                             
-                            # Remove temp directory
                             temp_dir.rmdir()
-                            
-                            logger.info(f"[OK] Fixed CUDA nested folder structure for {folder_name}")
-                            return  # Exit after fixing the first match
-                        else:
-                            logger.info(f"CUDA folder {folder_name} found but extract path has other contents, skipping")
+                            return
                     
-            # If no nested folders found, check if CUDA is properly extracted
             if not (extract_path / "bin").exists():
-                logger.warning(f"CUDA extraction may be incomplete - no bin directory found in {extract_path}")
+                logger.error(f"CUDA extraction may be incomplete - no bin directory found in {extract_path}")
                 
         except Exception as e:
-            logger.warning(f"Failed to fix CUDA nested extraction: {e}")
+            logger.error(f"Failed to fix CUDA nested extraction: {e}")
     
     def install_tool(self, tool_name: str) -> bool:
-        """Install a specific tool"""
-        if tool_name not in self.tool_specs:
-            logger.error(f"Unknown tool: {tool_name}")
-            return False
-        
-        tool_spec = self.tool_specs[tool_name]
-        extract_path = tool_spec.get_full_extract_path(self.ps_env_path)
-        executable_path = tool_spec.get_full_executable_path(self.ps_env_path)
-        
-        # Check if tool is already installed
-        if executable_path.exists():
-            logger.info(f"{tool_name} already installed at {executable_path}")
+        """Полный цикл установки для одного инструмента."""
+        spec = self.tool_specs[tool_name]
+        if spec.get_full_executable_path(self.ps_env_path).exists():
             return True
         
-        # Create ps_env directory if it doesn't exist
-        self.ps_env_path.mkdir(parents=True, exist_ok=True)
+        archive_path = self.ps_env_path / f"{spec.name}.7z"
+        extract_path = spec.get_full_extract_path(self.ps_env_path)
         
-        # Download archive
-        archive_name = f"{tool_name}.7z"
-        archive_path = self.ps_env_path / archive_name
+        if not self._verify_archive(archive_path):
+            if not self._download_file_aria(spec.url, archive_path, spec.name): return False
         
-        logger.info(f"Downloading {tool_name}...")
-        if not self.download_file(tool_spec.url, archive_path, f"{tool_name}"):
-            return False
+        if not self._extract_archive(archive_path, extract_path): return False
         
-        # Extract archive
-        logger.info(f"Extracting {tool_name}...")
-        if not self.extract_7z_archive(archive_path, extract_path):
-            return False
-        
-        # Handle nested folder structure (when archive contains a subfolder with the same name)
         self._fix_nested_extraction(extract_path, tool_name)
         
-        # Clean up archive
-        try:
-            archive_path.unlink()
-            logger.info(f"Cleaned up {archive_name}")
-        except Exception as e:
-            logger.warning(f"Failed to clean up {archive_name}: {e}")
-        
-        # Verify installation
-        if executable_path.exists():
-            logger.info(f"[OK] {tool_name} installed successfully at {executable_path}")
-            return True
-        else:
-            logger.error(f"[ERROR] {tool_name} installation failed - executable not found at {executable_path}")
+        try: archive_path.unlink()
+        except OSError: pass
+
+        if not spec.get_full_executable_path(self.ps_env_path).exists():
+            logger.error(f"Installation of {spec.name} failed: executable not found.")
             return False
+            
+        return True
 
     def install_cuda(self) -> bool:
-        """Install CUDA based on GPU configuration"""
-        if (not self.config_manager.config or 
-            not self.config_manager.config.gpu_config or 
-            not self.config_manager.config.gpu_config.cuda_version):
-            logger.info("No CUDA version configured, skipping CUDA installation")
+        """Полный цикл установки для CUDA."""
+        gpu_config = self.config_manager.config.gpu_config
+        if not (gpu_config and gpu_config.cuda_version and "cuda" in gpu_config.recommended_backend):
             return True
-        
-        cuda_version = self.config_manager.config.gpu_config.cuda_version
-        cuda_download_link = self.config_manager.get_cuda_download_link(cuda_version)
-        
-        if not cuda_download_link:
-            logger.error(f"No download link available for CUDA version {cuda_version.value}")
-            return False
         
         cuda_extract_path = self.ps_env_path / "CUDA"
-        cuda_archive_name = f"cuda_{cuda_version.value}.7z"
-        cuda_archive_path = self.ps_env_path
-        
-        # Check if CUDA is already installed
-        if cuda_extract_path.exists() and (cuda_extract_path / "bin").exists():
-            logger.info(f"CUDA {cuda_version.value} already installed at {cuda_extract_path}")
+        if (cuda_extract_path / "bin").exists():
             return True
-        
-        # Create ps_env directory if it doesn't exist
-        self.ps_env_path.mkdir(parents=True, exist_ok=True)
-        
-        # Download CUDA archive
-        logger.info(f"Downloading CUDA {cuda_version.value}...")
-        if not self.download_file(cuda_download_link, cuda_archive_path, f"CUDA {cuda_version.value}"):
-            return False
-        
-        # Extract CUDA archive
-        logger.info(f"Extracting CUDA {cuda_version.value}...")
-        if not self.extract_7z_archive(cuda_archive_path, cuda_extract_path):
-            return False
-        
-        # Handle CUDA-specific nested folder structure
-        self._fix_cuda_nested_extraction(cuda_extract_path, cuda_version)
-        
-        # Clean up archive
-        try:
-            cuda_archive_path.unlink()
-            logger.info(f"Cleaned up {cuda_archive_name}")
-        except Exception as e:
-            logger.warning(f"Failed to clean up {cuda_archive_name}: {e}")
-        
-        # Verify CUDA installation
-        if cuda_extract_path.exists() and (cuda_extract_path / "bin").exists():
-            logger.info(f"[OK] CUDA {cuda_version.value} installed successfully at {cuda_extract_path}")
-            # Update CUDA paths in config
-            self.config_manager.configure_cuda_paths()
-            return True
-        else:
-            logger.error(f"[ERROR] CUDA {cuda_version.value} installation failed")
-            return False
-    
-    def _download_cuda_only(self, cuda_version) -> Optional[Path]:
-        """Download CUDA archive only (for parallel processing)"""
-        try:
-            cuda_download_link = self.config_manager.get_cuda_download_link(cuda_version)
-            if not cuda_download_link:
-                logger.error(f"No download link available for CUDA {cuda_version.value}")
-                return None
             
-            cuda_archive_name = f"cuda_{cuda_version.value.replace('.', '_')}.7z"
-            cuda_archive_path = self.ps_env_path / cuda_archive_name
-            
-            # Check if already downloaded
-            if cuda_archive_path.exists():
-                logger.info(f"CUDA {cuda_version.value} archive already exists")
-                return cuda_archive_path
-            
-            # Download CUDA archive
-            logger.info(f"Downloading CUDA {cuda_version.value}...")
-            if self.download_file(cuda_download_link, cuda_archive_path, f"CUDA {cuda_version.value}"):
-                return cuda_archive_path
-            else:
-                return None
-        except Exception as e:
-            logger.error(f"Failed to download CUDA: {e}")
-            return None
-    
-    def _extract_cuda(self, cuda_archive_path: Path, cuda_version) -> bool:
-        """Extract CUDA archive (for parallel processing)"""
-        try:
-            # CUDA should be extracted to ps_env/CUDA directory
-            cuda_extract_path = self.ps_env_path / "CUDA"
-            
-            # Check if already extracted
-            if cuda_extract_path.exists() and (cuda_extract_path / "bin").exists():
-                logger.info(f"CUDA {cuda_version.value} already extracted")
-                # Update CUDA paths in config
-                self.config_manager.configure_cuda_paths()
-                return True
-            
-            # Check if old versioned folder exists and rename it
-            old_cuda_path = self.ps_env_path / f"cuda_{cuda_version.value.replace('.', '_')}"
-            if old_cuda_path.exists() and (old_cuda_path / "bin").exists():
-                logger.info(f"Renaming existing CUDA folder from {old_cuda_path} to {cuda_extract_path}")
+        cuda_link = self.config_manager.get_cuda_download_link(gpu_config.cuda_version)
+        if not cuda_link: return False
+        
+        archive_path = self.ps_env_path / f"cuda_{gpu_config.cuda_version.value}.7z"
+
+        if not self._verify_archive(archive_path):
+            # Если файл заблокирован, попробуем его удалить
+            if archive_path.exists():
                 try:
-                    if cuda_extract_path.exists():
-                        import shutil
-                        shutil.rmtree(cuda_extract_path)
-                    old_cuda_path.rename(cuda_extract_path)
-                    logger.info(f"[OK] CUDA {cuda_version.value} folder renamed successfully")
-                    # Update CUDA paths in config
-                    self.config_manager.configure_cuda_paths()
-                    return True
-                except Exception as e:
-                    logger.error(f"Failed to rename CUDA folder: {e}")
-                    return False
+                    archive_path.unlink()
+                    logger.info(f"Removed corrupted/locked file: {archive_path}")
+                except OSError as e:
+                    logger.warning(f"Could not remove file {archive_path}: {e}")
             
-            # Ensure 7z.exe is available (should already be downloaded by this point)
-            import shutil
-            if not shutil.which("7z"):
-                seven_zip_path = self.ps_env_path / "7z.exe"
-                if not seven_zip_path.exists():
-                    logger.error("7z.exe not found for CUDA extraction")
-                    return False
-            
-            # Extract CUDA archive directly to CUDA folder
-            if not self.extract_7z_archive(cuda_archive_path, cuda_extract_path):
-                return False
-            
-            # Handle CUDA-specific nested folder structure
-            self._fix_cuda_nested_extraction(cuda_extract_path, cuda_version)
-            
-            # Clean up archive
-            try:
-                cuda_archive_path.unlink()
-                logger.info(f"Cleaned up CUDA archive")
-            except Exception as e:
-                logger.warning(f"Failed to clean up CUDA archive: {e}")
-            
-            # Verify CUDA installation
-            if cuda_extract_path.exists() and (cuda_extract_path / "bin").exists():
-                logger.info(f"[OK] CUDA {cuda_version.value} extracted successfully")
-                # Update CUDA paths in config
-                self.config_manager.configure_cuda_paths()
-                return True
-            else:
-                logger.error(f"[ERROR] CUDA {cuda_version.value} extraction failed")
-                return False
-        except Exception as e:
-            logger.error(f"Failed to extract CUDA: {e}")
-            return False
+            if not self._download_file_aria(cuda_link, archive_path, f"CUDA {gpu_config.cuda_version.value}"): return False
+        
+        if not self._extract_archive(archive_path, cuda_extract_path): return False
+        
+        self._fix_cuda_nested_extraction(cuda_extract_path, gpu_config.cuda_version)
+        
+        try: archive_path.unlink()
+        except OSError: pass
 
-    def _install_tools_parallel(self, tools_to_install: List[str]) -> bool:
-        """Install multiple tools in parallel with optimized download and extraction"""
-        logger.info(f"Installing tools in parallel: {', '.join(tools_to_install)}")
+        if not (cuda_extract_path / "bin").exists():
+            logger.error("CUDA installation failed: 'bin' directory not found.")
+            return False
         
-        # Pre-download 7z.exe once to avoid conflicts during parallel extraction
-        if not shutil.which("7z"):
-            seven_zip_path = self.download_7z_executable()
-            if not seven_zip_path:
-                logger.error("Failed to download 7z.exe for extraction")
-                return False
-        
-        # Phase 1: Download all archives in parallel
-        download_tasks = []
-        archive_paths = {}
-        
-        with ThreadPoolExecutor(max_workers=len(tools_to_install)) as executor:
-            for tool_name in tools_to_install:
-                if tool_name not in self.tool_specs:
-                    logger.error(f"Unknown tool: {tool_name}")
-                    return False
-                
-                tool_spec = self.tool_specs[tool_name]
-                executable_path = tool_spec.get_full_executable_path(self.ps_env_path)
-                
-                # Check if tool is already installed
-                if executable_path.exists():
-                    logger.info(f"{tool_name} already installed at {executable_path}")
-                    continue
-                
-                # Prepare download
-                archive_name = f"{tool_name}.7z"
-                archive_path = self.ps_env_path / archive_name
-                archive_paths[tool_name] = archive_path
-                
-                # Submit download task
-                future = executor.submit(self._download_tool, tool_name, tool_spec.url, archive_path)
-                download_tasks.append((tool_name, future))
-            
-            # Wait for all downloads to complete
-            download_results = {}
-            for tool_name, future in download_tasks:
-                try:
-                    download_results[tool_name] = future.result()
-                    if download_results[tool_name]:
-                        logger.info(f"[OK] {tool_name} download completed")
-                    else:
-                        logger.error(f"[ERROR] {tool_name} download failed")
-                        return False
-                except Exception as e:
-                    logger.error(f"[ERROR] {tool_name} download failed with exception: {e}")
-                    return False
-        
-        # Phase 2: Extract archives sequentially to avoid file conflicts
-        for tool_name, archive_path in archive_paths.items():
-            if tool_name in download_results and download_results[tool_name]:
-                tool_spec = self.tool_specs[tool_name]
-                extract_path = tool_spec.get_full_extract_path(self.ps_env_path)
-                
-                success = self._extract_and_verify_tool(tool_name, archive_path, extract_path)
-                if success:
-                    logger.info(f"[OK] {tool_name} extraction and verification completed")
-                else:
-                    logger.error(f"[ERROR] {tool_name} extraction or verification failed")
-                    return False
-        
-        logger.info("[OK] All tools installed successfully")
+        self.config_manager.configure_cuda_paths()
         return True
-    
-    def _download_tool(self, tool_name: str, url: str, archive_path: Path) -> bool:
-        """Download a single tool (thread-safe)"""
-        logger.info(f"Downloading {tool_name}...")
-        return self.download_file(url, archive_path, f"{tool_name}")
-    
-    def _extract_and_verify_tool(self, tool_name: str, archive_path: Path, extract_path: Path) -> bool:
-        """Extract and verify a single tool (thread-safe)"""
-        logger.info(f"Extracting {tool_name}...")
-        
-        # Extract archive
-        if not self.extract_7z_archive(archive_path, extract_path):
-            return False
-        
-        # Handle nested folder structure
-        self._fix_nested_extraction(extract_path, tool_name)
-        
-        # Clean up archive
-        try:
-            archive_path.unlink()
-            logger.info(f"Cleaned up {tool_name}.7z")
-        except Exception as e:
-            logger.warning(f"Failed to clean up {tool_name}.7z: {e}")
-        
-        # Verify installation
-        tool_spec = self.tool_specs[tool_name]
-        executable_path = tool_spec.get_full_executable_path(self.ps_env_path)
-        
-        if executable_path.exists():
-            return True
-        else:
-            logger.error(f"[ERROR] {tool_name} installation failed - executable not found at {executable_path}")
-            return False
-
-    def setup_portable_environment(self) -> bool:
-        """Setup the portable environment by downloading and extracting all tools"""
-        logger.info("Setting up portable environment...")
-        
-        # Create ps_env directory
-        self.ps_env_path.mkdir(parents=True, exist_ok=True)
-        
-        # Ensure install path is set in config
-        if not self.config_manager.config or not self.config_manager.config.install_path:
-            self.config_manager.configure_install_path(str(self.install_path))
-        
-        # Step 1: Configure GPU first to determine if we need CUDA
-        try:
-            logger.info("Configuring GPU...")
-            gpu_config = self.config_manager.configure_gpu_from_detection()
-            logger.info(f"GPU configured: {gpu_config.name} ({gpu_config.recommended_backend})")
-        except Exception as e:
-            logger.error(f"Failed to configure GPU: {e}")
-            gpu_config = None
-        
-        # Step 2: Download CUDA first if we have NVIDIA GPU
-        cuda_download_future = None
-        cuda_executor = None
-        if gpu_config:
-            logger.info(f"GPU config: backend={gpu_config.recommended_backend}, cuda_version={gpu_config.cuda_version}")
-            
-            if (gpu_config.recommended_backend and "cuda" in gpu_config.recommended_backend and 
-                gpu_config.cuda_version):
-                
-                # Check if CUDA is already installed
-                cuda_extract_path = self.ps_env_path / "CUDA"
-                if cuda_extract_path.exists() and (cuda_extract_path / "bin").exists():
-                    logger.info(f"CUDA {gpu_config.cuda_version.value} already installed at {cuda_extract_path}")
-                    # Configure CUDA paths in config
-                    self.config_manager.configure_cuda_paths()
-                else:
-                    logger.info(f"Starting CUDA {gpu_config.cuda_version.value} download...")
-                    cuda_executor = ThreadPoolExecutor(max_workers=1)
-                    cuda_download_future = cuda_executor.submit(self._download_cuda_only, gpu_config.cuda_version)
-            else:
-                logger.info("CUDA not needed for this GPU configuration")
-        else:
-            logger.info("No GPU configuration available, skipping CUDA")
-        
-        # Step 3: Install basic tools in parallel while CUDA downloads
-        tools_to_install = ["ffmpeg", "git", "python"]
-        
-        if not self._install_tools_parallel(tools_to_install):
-            logger.error("[ERROR] Failed to install basic tools")
-            return False
-        
-        # Step 4: Wait for CUDA download and extract it
-        if cuda_download_future and gpu_config and gpu_config.cuda_version:
-            try:
-                logger.info("Waiting for CUDA download to complete...")
-                cuda_archive_path = cuda_download_future.result()
-                if cuda_archive_path:
-                    logger.info(f"Extracting CUDA {gpu_config.cuda_version.value}...")
-                    if not self._extract_cuda(cuda_archive_path, gpu_config.cuda_version):
-                        logger.error("[ERROR] Failed to extract CUDA")
-                        return False
-                    logger.info(f"[OK] CUDA {gpu_config.cuda_version.value} installed successfully")
-                else:
-                    logger.error("[ERROR] CUDA download failed")
-                    return False
-            except Exception as e:
-                logger.error(f"[ERROR] CUDA installation failed: {e}")
-                return False
-            finally:
-                if cuda_executor:
-                    cuda_executor.shutdown(wait=True)
-        elif gpu_config and gpu_config.recommended_backend and "cuda" in gpu_config.recommended_backend:
-            logger.warning("CUDA was expected but download future is None")
-        
-        logger.info("[OK] Portable environment setup completed successfully")
-        return True
-
-
 
     def run_in_activated_environment(self, command: List[str], cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
         """Run a command in the portable environment with proper PATH setup"""
@@ -633,10 +457,8 @@ class PortableEnvironmentManager:
             logger.error("Base environment ps_env not found. Run --setup-env first.")
             return subprocess.CompletedProcess([], 1, "", "Base environment not found")
 
-        # Use the centralized environment setup function
         env = self.setup_environment_for_subprocess()
         
-        # Debug: Log PATH for nvcc command
         if command and command[0] == "nvcc":
             logger.debug(f"Running nvcc with PATH: {env.get('PATH', 'Not set')}")
             if (self.config_manager.config and 
@@ -649,12 +471,10 @@ class PortableEnvironmentManager:
                     nvcc_exe = cuda_bin / "nvcc.exe"
                     logger.debug(f"nvcc.exe exists: {nvcc_exe.exists()} at {nvcc_exe}")
         
-        # On Windows, use shell=True for better executable resolution
         import platform
         use_shell = platform.system() == "Windows"
         
         if use_shell:
-            # Convert command list to string for shell execution
             command_str = ' '.join(f'"{arg}"' if ' ' in arg else arg for arg in command)
             return subprocess.run(
                 command_str,
@@ -709,40 +529,35 @@ class PortableEnvironmentManager:
 
     def setup_environment_for_subprocess(self) -> Dict[str, str]:
         """Setup environment variables for subprocess execution"""
-        # Start with a copy of the current environment
-        # Use dict() to ensure we get all environment variables
         env_vars = dict(os.environ)
         
         if not self.ps_env_path.exists():
             return env_vars
         
-        # Add tool paths to PATH
         tool_paths = []
         for tool_name, tool_spec in self.tool_specs.items():
             tool_dir = self.ps_env_path / tool_spec.extract_path
             if tool_dir.exists():
-                # Add the directory containing the executable to PATH
                 executable_path = self.ps_env_path / tool_spec.executable_path
                 executable_dir = executable_path.parent
                 if executable_dir.exists():
                     tool_paths.append(str(executable_dir))
                 else:
-                    # Fallback to extract directory
                     tool_paths.append(str(tool_dir))
         
-        # Add CUDA paths if available
+
         if (self.config_manager.config and 
             self.config_manager.config.gpu_config and 
             self.config_manager.config.gpu_config.cuda_paths):
             cuda_paths = self.config_manager.config.gpu_config.cuda_paths
             cuda_base = Path(cuda_paths.base_path)
             
-            # Check if CUDA is actually installed
+
             if cuda_base.exists():
                 cuda_bin = Path(cuda_paths.cuda_bin)
                 if cuda_bin.exists():
                     tool_paths.append(str(cuda_bin))
-                    # Also add CUDA lib paths for runtime libraries
+
                     cuda_lib = Path(cuda_paths.cuda_lib)
                     if cuda_lib.exists():
                         tool_paths.append(str(cuda_lib))
@@ -750,7 +565,7 @@ class PortableEnvironmentManager:
                     if cuda_lib_64.exists():
                         tool_paths.append(str(cuda_lib_64))
                     
-                    # Set CUDA environment variables
+
                     env_vars['CUDA_PATH'] = str(cuda_base)
                     env_vars['CUDA_HOME'] = str(cuda_base)
                     env_vars['CUDA_ROOT'] = str(cuda_base)
@@ -760,7 +575,7 @@ class PortableEnvironmentManager:
                     logger.debug(f"CUDA bin directory not found: {cuda_bin}")
             else:
                 logger.debug(f"CUDA base directory not found: {cuda_base}. CUDA may not be installed.")
-                # Try to trigger CUDA installation if GPU supports it
+
                 if (self.config_manager.config.gpu_config and 
                     self.config_manager.config.gpu_config.cuda_version):
                     logger.info("CUDA not found but GPU supports it. You may need to run --setup-env to install CUDA.")
@@ -776,7 +591,7 @@ class PortableEnvironmentManager:
         if not self.ps_env_path.exists():
             return False
         
-        # Check if essential tools are available
+
         python_exe = self.get_python_executable()
         git_exe = self.get_git_executable()
         
@@ -796,12 +611,12 @@ class PortableEnvironmentManager:
             for line in lines:
                 if "nvcc:" in line or "Cuda compilation tools" in line:
                     return line.strip()
-            # If not found, try to get the last meaningful line
+
             for line in reversed(lines):
                 if line.strip() and not line.startswith("C:\\") and "SET" not in line and "set" not in line:
                     return line.strip()
         
-        # For other tools, look for version patterns
+
         version_patterns = {
             "python": ["Python "],
             "git": ["git version"],
@@ -816,7 +631,7 @@ class PortableEnvironmentManager:
                     if pattern in line:
                         return line.strip()
         
-        # Fallback: return first non-empty line that doesn't look like environment setup
+
         for line in lines:
             line = line.strip()
             if line and not line.startswith("C:\\") and "SET" not in line and "set" not in line and not line.startswith("(") and ">" not in line:
@@ -832,7 +647,7 @@ class PortableEnvironmentManager:
             ("ffmpeg", ["-version"])
         ]
         
-        # Add nvcc check if CUDA is available
+
         if self.gpu_detector.get_gpu_info():
             gpu_info = self.gpu_detector.get_gpu_info()
             if gpu_info and any(gpu.gpu_type.name == "NVIDIA" for gpu in gpu_info):
@@ -843,10 +658,10 @@ class PortableEnvironmentManager:
         for tool_name, args in tools_to_check:
             try:
                 result = self.run_in_activated_environment([tool_name] + args)
-                # Extract version info from output
+
                 version_output = self._extract_version_from_output(tool_name, result.stdout)
                 
-                # Consider tool working if we got meaningful version output, regardless of exit code
+
                 if version_output and version_output != "Unknown version":
                     logger.info(f"[OK] {tool_name}: {version_output}")
                 else:
@@ -895,17 +710,17 @@ class PortableEnvironmentManager:
             status["overall_status"] = "Environment not found"
             return status
         
-        # Check if CUDA should be available but isn't installed
+
         self._check_and_suggest_cuda_installation()
         
-        # Check individual tools
+
         tools_to_check = [
             ("python", ["--version"]),
             ("git", ["--version"]),
             ("ffmpeg", ["-version"])
         ]
         
-        # Add nvcc check if CUDA is available
+
         if self.gpu_detector.get_gpu_info():
             gpu_info = self.gpu_detector.get_gpu_info()
             if gpu_info and any(gpu.gpu_type.name == "NVIDIA" for gpu in gpu_info):
@@ -917,14 +732,14 @@ class PortableEnvironmentManager:
                 result = self.run_in_activated_environment([tool_name] + args)
                 version_output = self._extract_version_from_output(tool_name, result.stdout)
                 
-                # Consider tool working if we got meaningful version output, regardless of exit code
+
                 if version_output and version_output != "Unknown version":
                     status["tools_status"][tool_name] = {
                         "working": True,
                         "version": version_output
                     }
                 else:
-                    # Special handling for nvcc errors
+
                     if tool_name == "nvcc":
                         error_msg = f"Exit code {result.returncode}"
                         if result.stderr and "не является внутренней или внешней" in result.stderr:
@@ -958,11 +773,11 @@ class PortableEnvironmentManager:
  
     def get_environment_info(self) -> Dict[str, Any]:
         """Get information about portable environment"""
-        # Check if environment actually exists and is valid (has Python executable)
+
         python_path = self.get_ps_env_python()
         base_env_exists = self.ps_env_path.exists() and python_path and python_path.exists()
         
-        # Check installed tools
+
         installed_tools = {}
         for tool_name, tool_spec in self.tool_specs.items():
             tool_path = self.ps_env_path / tool_spec.extract_path
@@ -980,38 +795,36 @@ class PortableEnvironmentManager:
         return info
 
     def setup_environment(self) -> bool:
-        """
-        Setup the complete portable environment.
+        """Полная настройка портативной среды."""
+        logger.info("Setting up portable environment...")
         
-        Returns:
-            True if setup was successful, False otherwise
-        """
-        logger.info("Setting up PortableSource environment...")
+        self.ps_env_path.mkdir(parents=True, exist_ok=True)
         
-        # Step 1: Setup portable environment (download and extract tools)
-        if not self.setup_portable_environment():
-            logger.error("[ERROR] Failed to setup portable environment")
-            return False
+        if not self.config_manager.config or not self.config_manager.config.install_path:
+            self.config_manager.configure_install_path(str(self.install_path))
         
-        # Step 2: Verify that all tools work
         try:
-            if not self._verify_environment_tools():
-                logger.error("[ERROR] Environment verification failed - some tools are not working properly")
-                return False
+            gpu_config = self.config_manager.configure_gpu_from_detection()
+            logger.info(f"GPU configured: {gpu_config.name}")
         except Exception as e:
-            logger.warning(f"Environment verification failed: {e}")
+            logger.error(f"Failed to configure GPU: {e}")
         
-        # Step 3: Update setup status
+        if not self._setup_prerequisites(): return False
+        
+        for tool_name in self.tool_specs:
+            if not self.install_tool(tool_name): return False
+        
+        if not self.install_cuda(): return False
+        
+        if not self._verify_environment_tools(): return False
+        
         try:
             self.config_manager.mark_environment_setup_completed(True)
             if self.config_manager.config:
                 self.config_manager.config.install_path = str(self.install_path)
             self.config_manager.save_config()
-            logger.info("[OK] Environment setup status saved to configuration")
         except Exception as e:
             logger.warning(f"Failed to save setup status to config: {e}")
         
-        logger.info("[OK] Environment setup completed successfully")
-        logger.info(f"Portable environment created at: {self.ps_env_path}")
-        
+        logger.info("Portable environment setup completed successfully.")
         return True

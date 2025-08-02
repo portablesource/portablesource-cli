@@ -723,7 +723,7 @@ class RepositoryInstaller:
                 "branch": "master",
                 "main_file": "run.py",
                 "program_args": "run",
-                "special_setup": self._setup_facefusion
+                "special_setup": None
             },
             "comfyui": {
                 "url": "https://github.com/comfyanonymous/ComfyUI",
@@ -2029,41 +2029,46 @@ class RepositoryInstaller:
                 return False
             
             install_path = Path(self.config_manager.config.install_path)
-            
-            # Get CUDA paths from configuration
-            cuda_paths = None
-            cuda_paths_section = "REM CUDA paths not configured"
+            program_args = repo_info.get('program_args', '')
+
             if (self.config_manager.config and 
                 self.config_manager.config.gpu_config and 
                 self.config_manager.config.gpu_config.cuda_paths):
-                cuda_paths = self.config_manager.config.gpu_config.cuda_paths
-                cuda_paths_section = f"""set PATH={cuda_paths.cuda_bin};%PATH%
-set PATH={cuda_paths.cuda_lib};%PATH%
-set PATH={cuda_paths.cuda_lib_64};%PATH%
-set PATH={cuda_paths.cuda_nvml_bin};%PATH%
-set PATH={cuda_paths.cuda_nvml_lib};%PATH%
-set PATH={cuda_paths.cuda_nvvm_bin};%PATH%
-set PATH={cuda_paths.cuda_nvvm_lib};%PATH%
+                cuda_paths_section = f"""set tmp_path=X:\\tmp
+set cuda_bin=X:\\CUDA\\bin
+set cuda_lib=X:\\CUDA\\lib
+set cuda_lib_64=X:\\CUDA\\lib\\x64
+set cuda_nvml_bin=X:\\CUDA\\nvm\\bin
+set cuda_nvml_lib=X:\\CUDA\\nvml\\lib
+set cuda_nvvm_bin=X:\\CUDA\\nvml\\bin
+set cuda_nvvm_lib=X:\\CUDA\\nvvm\\lib
+
+set PATH=%cuda_bin%;%PATH%
+set PATH=%cuda_lib%;%PATH%
+set PATH=%cuda_lib_64%;%PATH%
+set PATH=%cuda_nvml_bin%;%PATH%
+set PATH=%cuda_nvml_lib%;%PATH%
+set PATH=%cuda_nvvm_bin%;%PATH%
+set PATH=%cuda_nvvm_lib%;%PATH%
+
 echo All CUDA paths added to environment"""
-            
-            # Path to the copied Python environment
-            env_path = install_path / "envs" / repo_name
-            python_exe = env_path / "python.exe"
-            ffmpeg_path = install_path / "ffmpeg"
-            
-            # Get program args from repo info
-            program_args = repo_info.get('program_args', '')
-            
-            # Setup tmp directory path
-            tmp_path = install_path / "tmp"
+            else:
+                cuda_paths_section = "REM No CUDA paths configured"
             
             bat_content = f"""@echo off
 echo Launch {repo_name}...
 
+subst X: {install_path}
+X:
+
+set env_path=X:\\ps_env
+set ffmpeg_path=X:\\ps_env\\ffmpeg
+set python_exe=X:\\envs\\{repo_name}\\python.exe
+set repo_path=X:\\repos\\{repo_name}
 REM Setup temporary directory
-set USERPROFILE={tmp_path}
-set TEMP={tmp_path}
-set TMP={tmp_path}
+set USERPROFILE=%tmp_path%
+set TEMP=%tmp_path%
+set TMP=%tmp_path%
 
 REM Security and compatibility settings
 set PYTHONIOENCODING=utf-8
@@ -2080,14 +2085,14 @@ REM Add all CUDA paths if available
 
 REM === ADD COPIED PYTHON ENVIRONMENT PATHS ===
 REM Add the copied Python environment to PATH
-set PATH={env_path};%PATH%
-set PATH={env_path}\\Scripts;%PATH%
+set PATH=%env_path%;%PATH%
+set PATH=%env_path%\\\\Scripts;%PATH%
 echo Python environment and ffmpeg paths added to PATH
-set PATH={ffmpeg_path};%PATH%
+set PATH=%ffmpeg_path%;%PATH%
 
 REM Change to repository directory and run
-cd /d "{repo_path}"
-"{python_exe}" -c "import sys; sys.path.insert(0, r'{repo_path}'); exec(open(r'{repo_path}\\{main_file}').read())" {program_args}
+cd /d "%repo_path%"
+"%python_exe%" {main_file} {program_args}
 set EXIT_CODE=%ERRORLEVEL%
 
 REM Check result
@@ -2101,6 +2106,9 @@ if %EXIT_CODE% neq 0 (
     echo Program finished successfully
     echo.
 )
+
+echo Cleaning up...
+subst X: /D
 
 pause
 """
