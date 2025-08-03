@@ -1,5 +1,6 @@
 # portablesource
-CLI for my GUI in future
+CLI for GUI application PortableSource
+
 
 ## License
 

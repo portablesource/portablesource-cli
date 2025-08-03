@@ -416,30 +416,24 @@ class PortableSourceApp:
         
     def initialize(self, install_path: Optional[str] = None):
         """Initialize the application"""
-        # Import here to avoid circular imports
         from .envs_manager import PortableEnvironmentManager
         from .repository_installer import RepositoryInstaller
         
-        # Determine installation path
         if install_path:
             self.install_path = Path(install_path).resolve()
             save_install_path_to_registry(self.install_path)
         else:
             self.install_path = self._get_installation_path()
         
-        # Create directory structure
         create_directory_structure(self.install_path)
         
-        # Initialize config manager with proper config path
         config_path = self.install_path / "portablesource_config.json"
         self.config_manager = ConfigManager(config_path)
         self.config_manager.load_config()
-        # Set install path in config if not already set
         if not self.config_manager.config or not self.config_manager.config.install_path:
             self.config_manager.configure_install_path(str(self.install_path))
             self.config_manager.save_config()
         
-        # Initialize managers
         self.environment_manager = PortableEnvironmentManager(self.install_path, self.config_manager)
         self.repository_installer = RepositoryInstaller(self.install_path, config_manager=self.config_manager)
     
@@ -450,7 +444,6 @@ class PortableSourceApp:
         if registry_path:
             return registry_path
         
-        # If no path in registry, request from user
         print("\n" + "="*60)
         print("PORTABLESOURCE INSTALLATION PATH SETUP")
         print("="*60)
@@ -470,7 +463,6 @@ class PortableSourceApp:
         
         print(f"\nChosen installation path: {chosen_path}")
         
-        # Check if path exists and is not empty
         if chosen_path.exists() and any(chosen_path.iterdir()):
             print(f"\nWarning: Directory {chosen_path} already exists and is not empty.")
             while True:
@@ -500,7 +492,6 @@ class PortableSourceApp:
             logger.error("Repository installer not initialized")
             return False
         
-        # Repositories should be installed in the repos subdirectory
         if not self.install_path:
             logger.error("install path is none")
             return False
@@ -533,7 +524,6 @@ class PortableSourceApp:
         check_environment_func = self.environment_manager.check_environment_availability if self.environment_manager else None
         show_system_info(self.install_path, self.environment_manager, check_environment_func, self.config_manager)
         
-        # Show repositories
         repos = self.list_installed_repositories()
         logger.info(f"  - Installed repositories: {len(repos)}")
         for repo in repos:
