@@ -110,12 +110,9 @@ class PortableEnvironmentManager:
     def _download_file_aria(self, url: str, destination: Path, description: str, skip_verification: bool = False) -> bool:
         """Загрузчик для больших файлов с aria2c и чистым tqdm."""
         try:
-            # Проверяем, не скачан ли файл уже полностью
             if destination.exists() and not skip_verification:
-                # Проверяем целостность существующего файла
                 if self._verify_archive(destination):
                     return True
-                # Если файл поврежден, удаляем его
                 destination.unlink()
             
             aria2c_path = self.ps_env_path / "aria2c.exe"
@@ -136,16 +133,13 @@ class PortableEnvironmentManager:
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace')
             
             pbar = None
-            initial_downloaded = None
-            
-            # Читаем вывод построчно до завершения процесса
+
             for line in iter(process.stdout.readline, ''):
                 if "Download Results" in line: 
                     break
                 
-                # Отладочный вывод для диагностики
-                if line.strip():
-                    logger.debug(f"aria2c output: {line.strip()}")
+                #if line.strip():
+                    #logger.debug(f"aria2c output: {line.strip()}")
                 
                 match = progress_regex.search(line)
                 if match:
@@ -154,7 +148,6 @@ class PortableEnvironmentManager:
                     downloaded_bytes = size_to_bytes(downloaded_s, downloaded_u)
                     
                     if pbar is None:
-                        initial_downloaded = downloaded_bytes
                         pbar = tqdm(total=total_bytes, initial=downloaded_bytes, unit='B', unit_scale=True, unit_divisor=1024, 
                                    desc=description, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
                     

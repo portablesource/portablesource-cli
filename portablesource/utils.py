@@ -9,6 +9,7 @@ import os
 
 from .config import logger
 from .config import ConfigManager
+from .get_gpu import GPUDetector, GPUType
 
 def save_install_path_to_registry(install_path: Path) -> bool:
     """Save installation path to Windows registry.
@@ -367,6 +368,40 @@ def check_msvc_build_tools_installed() -> bool:
         
     except Exception as e:
         logger.debug(f"Error checking MSVC Build Tools: {e}")
+        return False
+
+def check_nv_gpu() -> bool:
+    """Check if NVIDIA GPU is Pascal generation or newer.
+        
+    Returns:
+    bool: True if NVIDIA GPU is Pascal (GTX 10xx) or newer, False otherwise
+    """
+    try:
+        detector = GPUDetector()
+        gpu_info_list = detector.get_gpu_info()
+            
+        nvidia_gpus = [gpu for gpu in gpu_info_list if gpu.gpu_type == GPUType.NVIDIA]
+            
+        if not nvidia_gpus:
+            return False
+            
+        for gpu in nvidia_gpus:
+            gpu_name_upper = gpu.name.upper()
+            is_pascal_or_newer = (
+                any(model in gpu_name_upper for model in ["GTX 10"]) or
+                any(model in gpu_name_upper for model in ["GTX 16", "GTX 17", "RTX 20", "RTX 21", "RTX 22", "RTX 23", "RTX 24"]) or
+                any(model in gpu_name_upper for model in ["RTX 30", "RTX 31", "RTX 32", "RTX 33", "RTX 34"]) or
+                any(model in gpu_name_upper for model in ["RTX 40", "RTX 41", "RTX 42", "RTX 43", "RTX 44"]) or
+                any(model in gpu_name_upper for model in ["RTX 50", "RTX 51", "RTX 52", "RTX 53", "RTX 54"]) or
+                any(model in gpu_name_upper for model in ["QUADRO", "TESLA", "A100", "A40", "A30", "A10", "A6000", "A5000", "A4000"])
+            )
+                
+            if is_pascal_or_newer:
+                return True
+            
+        return False
+            
+    except Exception as e:
         return False
 
 
