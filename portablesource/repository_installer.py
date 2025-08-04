@@ -198,9 +198,16 @@ class ServerAPIClient:
             if url and not isinstance(url, str):
                 return False
             
+            # Strip whitespace from URL and validate it's not empty
+            if url:
+                url = url.strip()
+                if not url:
+                    return False
+                repository['repositoryUrl'] = url
+            
             optional_fields = ['filePath', 'programArgs', 'description']
             for field in optional_fields:
-                if field in repository and not isinstance(repository[field], str):
+                if field in repository and repository[field] is not None and not isinstance(repository[field], str):
                     return False
             
             return True
@@ -647,7 +654,12 @@ class RepositoryInstaller:
             self.base_path = Path.cwd()
             
         if config_manager is None:
-            config_path = self.base_path / "portablesource_config.json"
+            from .utils import load_install_path_from_registry
+            install_path_from_registry = load_install_path_from_registry()
+            if install_path_from_registry:
+                config_path = install_path_from_registry / "portablesource_config.json"
+            else:
+                config_path = self.base_path / "portablesource_config.json"
             self.config_manager = ConfigManager(config_path)
             self.config_manager.load_config()
         else:
@@ -1471,7 +1483,9 @@ class RepositoryInstaller:
                             package_str = package.strip().lower()
                             if package_str.startswith('onnxruntime'):
                                 special_packages['onnxruntime'].append(package)
-                            elif package_str.startswith('torch') or package_str.startswith('torchvision') or package_str.startswith('torchaudio'):
+                            elif package_str in ['torch'] or package_str.startswith('torch==') or package_str.startswith('torch>=') or package_str.startswith('torch<=') or package_str.startswith('torch>') or package_str.startswith('torch<') or package_str.startswith('torch!=') or package_str.startswith('torch~=') or \
+                                 package_str in ['torchvision'] or package_str.startswith('torchvision==') or package_str.startswith('torchvision>=') or package_str.startswith('torchvision<=') or package_str.startswith('torchvision>') or package_str.startswith('torchvision<') or package_str.startswith('torchvision!=') or package_str.startswith('torchvision~=') or \
+                                 package_str in ['torchaudio'] or package_str.startswith('torchaudio==') or package_str.startswith('torchaudio>=') or package_str.startswith('torchaudio<=') or package_str.startswith('torchaudio>') or package_str.startswith('torchaudio<') or package_str.startswith('torchaudio!=') or package_str.startswith('torchaudio~='):
                                 special_packages['torch'].append(package)
                             elif package_str.startswith('insightface'):
                                 special_packages['insightface'].append(package)
@@ -1483,7 +1497,7 @@ class RepositoryInstaller:
                             pkg_name = package.get('package_name', '').lower()
                             if pkg_name.startswith('onnxruntime'):
                                 special_packages['onnxruntime'].append(package)
-                            elif pkg_name.startswith('torch') or pkg_name.startswith('torchvision') or pkg_name.startswith('torchaudio'):
+                            elif pkg_name in ['torch', 'torchvision', 'torchaudio']:
                                 special_packages['torch'].append(package)
                             elif pkg_name.startswith('insightface'):
                                 special_packages['insightface'].append(package)
@@ -1687,7 +1701,21 @@ class RepositoryInstaller:
     
     def _add_install_flags_and_urls(self, install_cmd: list, install_flags: list, server_plan: Dict):
         """Add installation flags and index URLs to command"""
-        if server_plan.get('torch_index_url') and '--index-url' not in install_cmd:
+        # Check if this is a torch installation step by looking at the command
+        # Only add torch index URL if ALL packages are torch-related (torch, torchvision, torchaudio)
+        torch_packages = ['torch', 'torchvision', 'torchaudio']
+        package_args = [arg for arg in install_cmd if not arg.startswith('-') and '=' not in arg and 'pip' not in arg and 'install' not in arg and 'python' not in arg]
+        
+        is_pure_torch_step = package_args and all(
+            any(torch_pkg in str(arg).lower() for torch_pkg in torch_packages) 
+            for arg in package_args
+        )
+        
+        if is_pure_torch_step and '--index-url' not in install_cmd:
+            # For pure torch packages, use GPU-specific index URL
+            torch_index_url = server_plan.get('torch_index_url') or self._get_default_torch_index_url()
+            install_cmd.extend(['--index-url', torch_index_url])
+        elif server_plan.get('torch_index_url') and '--index-url' not in install_cmd:
             install_cmd.extend(['--index-url', server_plan['torch_index_url']])
         
         # Add install flags
