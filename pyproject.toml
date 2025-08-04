@@ -1,7 +1,7 @@
 [project.urls]
 GitHub    = "https://github.com/portablesource/portablesource-cli"
 Changelog = "https://github.com/portablesource/portablesource-cli/releases"
-Contact   = "contact@portables.dev"
+Contact   = "https://t.me/NeuroDonu"
 Download  = "https://github.com/portablesource/portablesource-cli/releases"
 Homepage  = "https://github.com/portablesource/portablesource-cli"
 
