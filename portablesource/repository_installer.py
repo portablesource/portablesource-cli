@@ -1917,13 +1917,13 @@ class RepositoryInstaller:
             if (self.config_manager.config and 
                 self.config_manager.config.gpu_config and 
                 self.config_manager.config.gpu_config.cuda_paths):
-                cuda_paths_section = f"""set tmp_path=X:\\tmp
+                cuda_paths_section = f"""
 set cuda_bin=X:\\CUDA\\bin
 set cuda_lib=X:\\CUDA\\lib
 set cuda_lib_64=X:\\CUDA\\lib\\x64
-set cuda_nvml_bin=X:\\CUDA\\nvm\\bin
+set cuda_nvml_bin=X:\\CUDA\\nvml\\bin
 set cuda_nvml_lib=X:\\CUDA\\nvml\\lib
-set cuda_nvvm_bin=X:\\CUDA\\nvml\\bin
+set cuda_nvvm_bin=X:\\CUDA\\nvvm\\bin
 set cuda_nvvm_lib=X:\\CUDA\\nvvm\\lib
 
 set PATH=%cuda_bin%;%PATH%
@@ -1949,6 +1949,7 @@ set ffmpeg_path=X:\\ps_env\\ffmpeg
 set python_exe=X:\\envs\\{repo_name}\\python.exe
 set repo_path=X:\\repos\\{repo_name}
 REM Setup temporary directory
+set tmp_path=X:\\tmp
 set USERPROFILE=%tmp_path%
 set TEMP=%tmp_path%
 set TMP=%tmp_path%
@@ -1976,10 +1977,10 @@ set PATH=%ffmpeg_path%;%PATH%
 REM Change to repository directory and run
 cd /d "%repo_path%"
 "%python_exe%" {main_file} {program_args}
+set EXIT_CODE=%ERRORLEVEL%
+
 echo Cleaning up...
 subst X: /D
-
-set EXIT_CODE=%ERRORLEVEL%
 
 REM Check result
 if %EXIT_CODE% neq 0 (

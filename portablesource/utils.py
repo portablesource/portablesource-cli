@@ -29,6 +29,21 @@ def save_install_path_to_registry(install_path: Path) -> bool:
         logger.error(f"Failed to save install path to registry: {e}")
         return False
 
+def delete_install_path_from_registry() -> bool:
+    """Delete installation path from Windows registry.
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\PortableSource", 0, winreg.KEY_ALL_ACCESS)
+        winreg.DeleteValue(key, "InstallPath")
+        winreg.CloseKey(key)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to delete install path from registry: {e}")
+        return False
+
 
 def load_install_path_from_registry() -> Optional[Path]:
     """Load installation path from Windows registry.

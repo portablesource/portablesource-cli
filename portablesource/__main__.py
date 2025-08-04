@@ -11,6 +11,7 @@ from .utils import (
     PortableSourceApp,
     change_installation_path,
     save_install_path_to_registry,
+    delete_install_path_from_registry,
     install_msvc_build_tools,
     check_msvc_build_tools_installed,
     check_nv_gpu
@@ -32,6 +33,8 @@ def main():
     parser.add_argument("--check-msvc", action="store_true", help="Check MSVC Build Tools installation")
     parser.add_argument("--check-gpu", action="store_true", help="Check NVIDIA GPU info")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--unregister", action="store_true", help="Unregister installation path from registry")
+    
     
     args = parser.parse_args()
     
@@ -53,6 +56,10 @@ def main():
         print(result)
         return
     
+    if args.unregister:
+        delete_install_path_from_registry()
+        return
+
     # Initialize for other commands
     app.initialize(args.install_path)
     
