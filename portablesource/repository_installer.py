@@ -1062,7 +1062,7 @@ class RepositoryInstaller:
     def _get_special_setup(self, repo_name: str):
         """Get special setup function for repository"""
         special_setups = {
-            "facefusion": self._setup_facefusion
+            "wangp": self._setup_wangp
         }
         return special_setups.get(repo_name.lower(), None)
     
@@ -1849,8 +1849,29 @@ class RepositoryInstaller:
             logger.error(f"Error executing installation plan: {e}")
             return False
     
-    def _setup_facefusion(self, repo_path: Path):
-        pass
+    def _setup_wangp(self, repo_path: Path):
+        """Special setup for wangp repository - install mmgp==3.5.6"""
+        try:
+            repo_name = repo_path.name
+            logger.info(f"Running special setup for {repo_name}: installing mmgp==3.5.6")
+            
+            # Try to use uv first, fallback to pip
+            uv_available = self._install_uv_in_venv(repo_name)
+            
+            if uv_available:
+                uv_cmd = self._get_uv_executable(repo_name)
+                install_cmd = uv_cmd + ["pip", "install", "mmgp==3.5.6"]
+                self._run_uv_with_progress(install_cmd, "Installing mmgp==3.5.6 for wangp")
+            else:
+                pip_cmd = self._get_pip_executable(repo_name)
+                install_cmd = pip_cmd + ["install", "mmgp==3.5.6"]
+                self._run_pip_with_progress(install_cmd, "Installing mmgp==3.5.6 for wangp")
+            
+            logger.info(f"Special setup for {repo_name} completed successfully")
+            
+        except Exception as e:
+            logger.error(f"Error during special setup for wangp: {e}")
+            # Don't fail the entire installation for this
     
     def _generate_startup_script(self, repo_path: Path, repo_info: Dict):
         """Generate startup script using copied Python environment with manual CUDA/library path setup.
@@ -1880,7 +1901,7 @@ class RepositoryInstaller:
                 return False
             
             install_path = Path(self.config_manager.config.install_path)
-            program_args = repo_info.get('program_args', '')
+            program_args = repo_info.get('program_args', '') or ''
 
             if (self.config_manager.config and 
                 self.config_manager.config.gpu_config and 
@@ -1944,6 +1965,9 @@ set PATH=%ffmpeg_path%;%PATH%
 REM Change to repository directory and run
 cd /d "%repo_path%"
 "%python_exe%" {main_file} {program_args}
+echo Cleaning up...
+subst X: /D
+
 set EXIT_CODE=%ERRORLEVEL%
 
 REM Check result
@@ -1957,9 +1981,6 @@ if %EXIT_CODE% neq 0 (
     echo Program finished successfully
     echo.
 )
-
-echo Cleaning up...
-subst X: /D
 
 pause
 """
