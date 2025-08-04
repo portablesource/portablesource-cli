@@ -351,7 +351,7 @@ class RequirementsAnalyzer:
         """
         line = line.split('#')[0].strip()
         
-        if '--index-url' or '--extra-index-url' in line:
+        if '--index-url' in line or '--extra-index-url' in line:
             return None
             
         if not line or line.startswith('-'):
@@ -403,7 +403,9 @@ class RequirementsAnalyzer:
         
         try:
             with open(requirements_path, 'r', encoding='utf-8') as f:
-                for line_num, line in enumerate(f, 1):
+                lines = f.readlines()
+                
+                for line_num, line in enumerate(lines, 1):
                     try:
                         package_info = self.parse_requirement_line(line)
                         if package_info:
@@ -416,6 +418,7 @@ class RequirementsAnalyzer:
             logger.error(f"Error reading requirements file {requirements_path}: {e}")
             return []
         
+        logger.info(f"Successfully parsed {len(packages)} packages from requirements")
         return packages
     
     def create_installation_plan(self, packages: List[PackageInfo], gpu_config) -> InstallationPlan:
@@ -755,20 +758,9 @@ class RepositoryInstaller:
             True if installation successful
         """
         try:
-            repo_name = self._extract_repo_name(repo_url)
-            
-            if repo_name is not None:
-                server_plan = self.server_client.get_installation_plan(repo_name)
-            
-            if server_plan and repo_name is not None:
-                success = self._install_from_server_plan_only(server_plan, repo_name, install_path)
-                if success:
-                    return True
-                else:
-                    logger.warning(f"Server plan installation failed for {repo_name}, falling back to local installation")
-                    return self._install_with_cloning(repo_url, install_path)
-            else:
-                return self._install_with_cloning(repo_url, install_path)
+            # For URL installations, always clone the repository and use local requirements.txt
+            # This ensures that the repository code is available and dependencies are installed correctly
+            return self._install_with_cloning(repo_url, install_path)
                 
         except Exception as e:
             logger.error(f"Error handling URL installation for {repo_url}: {e}")
@@ -1279,6 +1271,7 @@ class RepositoryInstaller:
         """Install dependencies in venv with new architecture - try server first, then local requirements"""
         try:
             repo_name = repo_path.name.lower()
+
             
             if not self._create_venv_environment(repo_name):
                 logger.error(f"Failed to create venv environment for {repo_name}")
@@ -1286,10 +1279,13 @@ class RepositoryInstaller:
             
             server_plan = self.server_client.get_installation_plan(repo_name)
             if server_plan:
+
                 if self._execute_server_installation_plan(server_plan, repo_path, repo_name):
                     return True
                 else:
                     logger.warning(f"Server installation failed for {repo_name}, falling back to local requirements")
+            else:
+                pass
             
             requirements_files = [
                 repo_path / "requirements.txt",
@@ -1299,13 +1295,17 @@ class RepositoryInstaller:
             
             requirements_path = None
             for req_file in requirements_files:
+
                 if req_file.exists():
                     requirements_path = req_file
+
                     break
             
             if not requirements_path:
                 logger.warning(f"No requirements.txt found in {repo_path}")
+                return True  # No requirements to install, consider it successful
             
+
             return self._install_packages_in_venv(repo_name, requirements_path)
             
         except Exception as e:
@@ -1353,6 +1353,12 @@ class RepositoryInstaller:
     def _install_packages_in_venv(self, repo_name: str, requirements_path: Path) -> bool:
         """Install packages in venv environment using uv for regular packages and pip for torch"""
         try:
+            if not requirements_path or not requirements_path.exists():
+                logger.warning(f"Requirements file not found: {requirements_path}")
+                return True  # No requirements to install, consider it successful
+                
+
+            
             if not self._install_uv_in_venv(repo_name):
                 logger.warning("Failed to install uv, falling back to pip for all packages")
                 return self._install_packages_with_pip_only(repo_name, requirements_path)
@@ -1361,6 +1367,7 @@ class RepositoryInstaller:
                 logger.warning("Failed to activate portable environment, CUDA packages may not be visible")
             
             packages = self.analyzer.analyze_requirements(requirements_path)
+            
             gpu_config_obj = self.config_manager.config.gpu_config if self.config_manager.config else None
             plan = self.analyzer.create_installation_plan(packages, gpu_config_obj)
             
@@ -1422,6 +1429,10 @@ class RepositoryInstaller:
     def _install_packages_with_pip_only(self, repo_name: str, requirements_path: Path) -> bool:
         """Fallback method to install all packages with pip only"""
         try:
+            if not requirements_path or not requirements_path.exists():
+                logger.warning(f"Requirements file not found: {requirements_path}")
+                return True  # No requirements to install, consider it successful
+                
             return self._install_package_with_progress(
                 ["-r", str(requirements_path)], 
                 f"Installing packages for {repo_name}", 
