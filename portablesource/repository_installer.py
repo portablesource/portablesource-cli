@@ -1361,13 +1361,14 @@ class RepositoryInstaller:
                 logger.warning("Failed to activate portable environment, CUDA packages may not be visible")
             
             packages = self.analyzer.analyze_requirements(requirements_path)
-            plan = self.analyzer.create_installation_plan(packages, None)
+            gpu_config_obj = self.config_manager.config.gpu_config if self.config_manager.config else None
+            plan = self.analyzer.create_installation_plan(packages, gpu_config_obj)
             
             pip_exe = self._get_pip_executable(repo_name)
             uv_cmd = self._get_uv_executable(repo_name)
             
             if plan.torch_packages:
-                torch_cmd = pip_exe + ["install"]
+                torch_cmd = pip_exe + ["install", "--force-reinstall"]
                 
                 for package in plan.torch_packages:
                     torch_cmd.append(str(package))
@@ -1583,7 +1584,7 @@ class RepositoryInstaller:
     
     def _prepare_install_command(self, step_type: str, repo_name: str, pip_exe: List[str]) -> tuple:
         """Prepare the base installation command based on step type"""
-        if step_type in ['regular_only', 'onnxruntime', 'insightface', 'triton']:
+        if step_type in ['regular_only', 'onnxruntime', 'insightface', 'triton', 'torch']:
             uv_available = self._install_uv_in_venv(repo_name)
             
             if uv_available:
@@ -1704,17 +1705,32 @@ class RepositoryInstaller:
         # Check if this is a torch installation step by looking at the command
         # Only add torch index URL if ALL packages are torch-related (torch, torchvision, torchaudio)
         torch_packages = ['torch', 'torchvision', 'torchaudio']
-        package_args = [arg for arg in install_cmd if not arg.startswith('-') and '=' not in arg and 'pip' not in arg and 'install' not in arg and 'python' not in arg]
+        package_args = [arg for arg in install_cmd if not arg.startswith('-') and 'pip' not in arg and 'install' not in arg and 'python' not in arg and 'uv' not in arg]
         
-        is_pure_torch_step = package_args and all(
-            any(torch_pkg in str(arg).lower() for torch_pkg in torch_packages) 
-            for arg in package_args
+        # Extract package names from version specifications like "torch>=2.4.0"
+        package_names = []
+        for arg in package_args:
+            # Split by common version operators
+            for op in ['>=', '<=', '==', '!=', '>', '<', '~=']:
+                if op in arg:
+                    package_names.append(arg.split(op)[0].strip())
+                    break
+            else:
+                package_names.append(arg.strip())
+        
+        is_pure_torch_step = package_names and all(
+            pkg_name.lower() in torch_packages for pkg_name in package_names
         )
         
-        if is_pure_torch_step and '--index-url' not in install_cmd:
-            # For pure torch packages, use GPU-specific index URL
+        # Check if any torch packages are being installed
+        has_torch_packages = any(pkg_name.lower() in torch_packages for pkg_name in package_names)
+        
+        if has_torch_packages and '--index-url' not in install_cmd:
+            # For any torch packages, use GPU-specific index URL and force reinstall
             torch_index_url = server_plan.get('torch_index_url') or self._get_default_torch_index_url()
             install_cmd.extend(['--index-url', torch_index_url])
+            if '--force-reinstall' not in install_cmd:
+                install_cmd.append('--force-reinstall')
         elif server_plan.get('torch_index_url') and '--index-url' not in install_cmd:
             install_cmd.extend(['--index-url', server_plan['torch_index_url']])
         
@@ -2277,7 +2293,7 @@ pause
             
             if install_flags:
                 install_cmd.extend(install_flags)
-            
+                
             self._run_pip_with_progress(install_cmd, description)
             return True
             
