@@ -12,7 +12,8 @@ from .utils import (
     change_installation_path,
     save_install_path_to_registry,
     install_msvc_build_tools,
-    check_msvc_build_tools_installed
+    check_msvc_build_tools_installed,
+    check_nv_gpu
 )
 
 def main():
@@ -29,6 +30,7 @@ def main():
     parser.add_argument("--check-env", action="store_true", help="Check environment status and tools")
     parser.add_argument("--install-msvc", action="store_true", help="Install MSVC Build Tools")
     parser.add_argument("--check-msvc", action="store_true", help="Check MSVC Build Tools installation")
+    parser.add_argument("--check-gpu", action="store_true", help="Check NVIDIA GPU info")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     
     args = parser.parse_args()
@@ -42,9 +44,13 @@ def main():
     # Create application
     app = PortableSourceApp()
     
-    # For path change command, full initialization is not needed
     if args.change_path:
         change_installation_path()
+        return
+    
+    if args.check_gpu:
+        result = check_nv_gpu()
+        print(result)
         return
     
     # Initialize for other commands
@@ -131,6 +137,8 @@ def main():
         status = "Installed" if is_installed else "Not installed"
         logger.info(f"MSVC Build Tools: {status}")
     
+    # check_gpu is handled earlier to avoid initialization
+        
     # If no arguments, show help
     if len(sys.argv) == 1:
         app.show_system_info_with_repos()
