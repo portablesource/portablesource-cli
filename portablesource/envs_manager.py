@@ -10,6 +10,8 @@ import shutil
 import subprocess
 import threading
 import urllib.request
+import time
+import requests
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
@@ -116,11 +118,19 @@ class PortableEnvironmentManager:
                 destination.unlink()
             
             aria2c_path = self.ps_env_path / "aria2c.exe"
+            logger.info(f"Checking aria2c at {aria2c_path}")
+            if not aria2c_path.exists():
+                logger.error(f"aria2c.exe not found at {aria2c_path}. Please ensure prerequisites are installed.")
+                return False
             cmd = [
                 str(aria2c_path), "--continue=true", "--max-tries=0", "--retry-wait=5", "--split=5",
                 "--max-connection-per-server=5", "--min-split-size=1M", "--summary-interval=1",
                 "--dir", str(destination.parent), "--out", destination.name, url
             ]
+            
+            logger.info(f"Starting aria2c with command: {' '.join(cmd)}")
+            logger.info(f"Download URL: {url}")
+            logger.info(f"Destination: {destination}")
             
             progress_regex = re.compile(r"\[#\w+ (\d+\.?\d*)([KMGT]?i?B)/(\d+\.?\d*)([KMGT]?i?B)\((\d+)%\)")
             def size_to_bytes(size, unit):
@@ -130,39 +140,145 @@ class PortableEnvironmentManager:
                 if 'G' in unit: return size * 1024**3
                 return size
 
+            logger.info("Starting aria2c process...")
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace')
             
             pbar = None
+            last_progress_time = None
 
-            for line in iter(process.stdout.readline, ''):
-                if "Download Results" in line: 
-                    break
+            try:
+                download_completed = False
+                no_output_count = 0
+                max_no_output = 100  # Maximum iterations without output before considering download complete
                 
-                #if line.strip():
-                    #logger.debug(f"aria2c output: {line.strip()}")
-                
-                match = progress_regex.search(line)
-                if match:
-                    downloaded_s, downloaded_u, total_s, total_u, percent = match.groups()
-                    total_bytes = size_to_bytes(total_s, total_u)
-                    downloaded_bytes = size_to_bytes(downloaded_s, downloaded_u)
+                while True:
+                    if process.poll() is not None:
+                        break
                     
-                    if pbar is None:
-                        pbar = tqdm(total=total_bytes, initial=downloaded_bytes, unit='B', unit_scale=True, unit_divisor=1024, 
-                                   desc=description, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
+                    try:
+                        line = process.stdout.readline()
+                    except ValueError:
+                        break
+                        
+                    if not line:
+                        no_output_count += 1
+                        time.sleep(0.1)
+                        
+                        # If no output for a while and process is still running, check if download is complete
+                        if no_output_count > max_no_output:
+                            logger.info(f"No output from aria2c for {no_output_count} iterations, process poll: {process.poll()}")
+                            if process.poll() is not None:
+                                break
+                            # Force terminate if hanging too long
+                            logger.warning(f"No output from aria2c for too long, terminating process")
+                            process.terminate()
+                            time.sleep(2)
+                            break
+                        continue
+                    else:
+                        no_output_count = 0  # Reset counter when we get output
                     
-                    pbar.n = downloaded_bytes
-                    pbar.refresh()
+                    line_stripped = line.strip()
+                    
+                    # Check for completion indicators
+                    completion_indicators = [
+                        "Download Results", "Download complete", "download completed",
+                        "Status Legend", "gid", "stat", "avg speed", "path/URI"
+                    ]
+                    
+                    for indicator in completion_indicators:
+                        if indicator in line_stripped:
+                            logger.info(f"Found completion indicator '{indicator}' in line: {line_stripped}")
+                            download_completed = True
+                            break
+                    
+                    if download_completed:
+                        logger.info("Download marked as completed, waiting for process to finish...")
+                        # Give aria2c a moment to finish writing and exit
+                        time.sleep(1)
+                        if process.poll() is not None:
+                            logger.info("Process finished naturally")
+                            break
+                        # If still running after completion message, terminate
+                        logger.info("Process still running, terminating...")
+                        process.terminate()
+                        time.sleep(1)
+                        break
+                    
+                    if line_stripped:
+                        logger.info(f"aria2c: {line_stripped}")
+                    
+                    match = progress_regex.search(line)
+                    if match:
+                        downloaded_s, downloaded_u, total_s, total_u, percent = match.groups()
+                        total_bytes = size_to_bytes(total_s, total_u)
+                        downloaded_bytes = size_to_bytes(downloaded_s, downloaded_u)
+                        last_progress_time = time.time()
+                        
+                        if pbar is None:
+                            pbar = tqdm(total=total_bytes, initial=downloaded_bytes, unit='B', unit_scale=True, unit_divisor=1024, 
+                                       desc=description, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
+                        
+                        pbar.n = downloaded_bytes
+                        pbar.refresh()
+                        
+                        # Check if download is 100% complete
+                        if downloaded_bytes >= total_bytes and total_bytes > 0:
+                            download_completed = True
+                            # Give aria2c a moment to finish
+                            time.sleep(2)
+                            if process.poll() is not None:
+                                break
+                            # If still running after 100% completion, terminate
+                            process.terminate()
+                            time.sleep(1)
+                            break
+                    
+                    # Timeout check - but be more lenient if we've seen recent progress
+                    if last_progress_time and time.time() - last_progress_time > 60:  # Increased from 30 to 60 seconds
+                        logger.warning(f"Download timeout for {description}, terminating process")
+                        process.terminate()
+                        time.sleep(2)
+                        break
             
-            process.wait()
+            except KeyboardInterrupt:
+                logger.info("Download interrupted by user")
+                process.terminate()
+                if pbar:
+                    pbar.close()
+                return False
+            
+            # Wait for process to finish, but don't wait too long
+            try:
+                process.wait(timeout=5)  # Reduced timeout since we already handled completion
+            except subprocess.TimeoutExpired:
+                logger.warning(f"Process did not terminate gracefully, killing it")
+                process.kill()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    logger.error(f"Failed to kill process, may be zombie")
+            
             if pbar:
-                if pbar.total: 
+                if pbar.total and download_completed: 
                     pbar.n = pbar.total
                 pbar.close()
 
-            return process.returncode == 0
+            # Consider download successful if we detected completion, even if process had issues
+            if download_completed or process.returncode == 0:
+                return True
+            else:
+                logger.error(f"Download failed for {description} with exit code {process.returncode}")
+                return False
+                
+        except FileNotFoundError as e:
+            logger.error(f"aria2c executable not found: {e}")
+            return False
+        except subprocess.SubprocessError as e:
+            logger.error(f"Subprocess error during download of '{description}': {e}")
+            return False
         except Exception as e:
-            logger.error(f"An error occurred during download of '{description}': {e}")
+            logger.error(f"Unexpected error during download of '{description}': {e}")
             return False
 
     def _verify_archive(self, file_path: Path) -> bool:
@@ -211,57 +327,220 @@ class PortableEnvironmentManager:
         except Exception:
             return False
 
-    def download_file(self, url: str, destination: Path, description: str) -> bool:
-        """Main downloader with aria2c and beautiful progress bar."""
+    def _download_file_requests(self, url: str, destination: Path, description: str) -> bool:
+        """Download file using requests with progress bar and timeout detection."""
         try:
-            aria2c_path = self.ps_env_path / "aria2c.exe"
-            if not aria2c_path.exists():
-                logger.error("aria2c not found. Please run prerequisite setup.")
-                return False
-
+            logger.info(f"Downloading '{description}' using requests...")
+            
+            # Check if file already exists and is valid
             if destination.exists() and self._verify_file_integrity(destination):
                 logger.info(f'"{description}" already exists and is valid.')
                 return True
-
-            logger.info(f"Downloading '{description}'...")
             
-            cmd = [
-                str(aria2c_path), "--continue=true", "--max-tries=0", "--retry-wait=5",
-                "--split=5", "--max-connection-per-server=5", "--min-split-size=1M",
-                "--file-allocation=none", "--check-integrity=true", "--summary-interval=1",
-                "--dir", str(destination.parent), "--out", destination.name, url
-            ]
+            # Start download with streaming
+            response = requests.get(url, stream=True, timeout=30)
+            response.raise_for_status()
             
-            progress_regex = re.compile(r"\[#\w+ (\d+\.?\d*)([KMGT]?i?B)/(\d+\.?\d*)([KMGT]?i?B)\((\d+)%\)\]")
-
-            def size_to_bytes(size, unit):
-                size = float(size)
-                if 'K' in unit: return size * 1024
-                if 'M' in unit: return size * 1024**2
-                if 'G' in unit: return size * 1024**3
-                return size
-
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace')
+            total_size = int(response.headers.get('content-length', 0))
             
-            with tqdm(total=None, unit='B', unit_scale=True, unit_divisor=1024, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
-                pbar.set_description(description)
-                for line in iter(process.stdout.readline, ''):
-                    if "Download Results" in line: break
-                    match = progress_regex.search(line)
-                    if match:
-                        downloaded_size, downloaded_unit, total_size, total_unit, _ = match.groups()
-                        if pbar.total is None: pbar.total = size_to_bytes(total_size, total_unit)
-                        pbar.update(size_to_bytes(downloaded_size, downloaded_unit) - pbar.n)
+            with open(destination, 'wb') as file, tqdm(
+                total=total_size,
+                unit='B',
+                unit_scale=True,
+                unit_divisor=1024,
+                desc=description,
+                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'
+            ) as pbar:
+                
+                downloaded = 0
+                last_progress_time = time.time()
+                stall_count = 0
+                
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        file.write(chunk)
+                        chunk_size = len(chunk)
+                        downloaded += chunk_size
+                        pbar.update(chunk_size)
+                        
+                        # Check for stalling (no progress for 20 seconds)
+                        current_time = time.time()
+                        if current_time - last_progress_time > 20:
+                            stall_count += 1
+                            logger.warning(f"Download stalled for 20 seconds (count: {stall_count})")
+                            if stall_count >= 1:  # Fail after first 20-second stall
+                                logger.error("Download stalled, switching to aria2c fallback")
+                                return False
+                        else:
+                            stall_count = 0
+                            last_progress_time = current_time
             
-            process.wait()
+            logger.info(f"Successfully downloaded '{description}' using requests")
+            return True
+            
+        except Exception as e:
+            logger.warning(f"Requests download failed for '{description}': {e}")
+            return False
+    
+    def _download_file_aria_with_stall_detection(self, url, destination, description="file"):
+        """Download a file using aria2c with stall detection and fallback to requests."""
+        aria2c_path = self.ps_env_path / "aria2c.exe"
+        
+        if not aria2c_path.exists():
+            logger.error(f"aria2c not found at {aria2c_path}.")
+            return False
 
-            if process.returncode == 0:
-                if pbar.total: pbar.update(pbar.total - pbar.n)
-                logger.info(f"Successfully downloaded '{description}'.")
+        command = [
+            str(aria2c_path),
+            "--continue=true",
+            "--max-tries=5",
+            "--retry-wait=3",
+            "--timeout=30",
+            "--connect-timeout=10",
+            "--max-connection-per-server=4",
+            "--split=4",
+            "--min-split-size=1M",
+            "--file-allocation=none",
+            "--allow-overwrite=true",
+            "--auto-file-renaming=false",
+            "--summary-interval=1",
+            "--download-result=hide",
+            "--console-log-level=info",
+            "--log-level=info",
+            "--human-readable=true",
+            "--show-console-readout=true",
+            url,
+            "-d", str(destination.parent),
+            "-o", destination.name
+        ]
+        
+
+
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+            
+            #logger.info(f"aria2c process started with PID: {process.pid}")
+
+            download_completed = False
+            no_progress_count = 0
+            max_no_progress_seconds = 10  # 10 seconds without download progress before switching to requests
+            has_started_download = False
+
+            while True:
+                output = process.stdout.readline()
+                if output:
+                    stripped_output = output.strip()
+                    
+                    # Check for immediate switch conditions first
+                    if "Not considered:" in stripped_output or "fe80::" in stripped_output:
+                        logger.warning("aria2c is outputting network interface info, switching to requests immediately...")
+                        try:
+                            process.terminate()
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                        return False  # Signal to fallback to requests
+                    
+                    # Only log progress lines, not info messages
+                    if any(indicator in stripped_output for indicator in [
+                        "MiB", "KiB", "GiB", "MB", "KB", "GB", "%", "ETA:", "DL:"
+                    ]):
+                        logger.info(f"aria2c: {stripped_output}")
+                    
+                    # Check if download has actually started (contains progress indicators)
+                    if any(indicator in stripped_output for indicator in [
+                        "MiB", "KiB", "GiB", "MB", "KB", "GB", "%", "ETA:", "DL:", "CN:"
+                    ]) and not "0B/0B" in stripped_output:
+                        has_started_download = True
+                        no_progress_count = 0
+                    
+                    # Check for stall pattern (0B/0B) or no download progress
+                    elif "0B/0B" in stripped_output or (not has_started_download and "[INFO]" in stripped_output):
+                        no_progress_count += 1
+                        
+                        if no_progress_count >= max_no_progress_seconds:
+                            logger.warning(f"aria2c shows no download progress for {max_no_progress_seconds} seconds, switching to requests...")
+                            try:
+                                process.terminate()
+                                process.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                process.kill()
+                            return False  # Signal to fallback to requests
+                    
+                    # Check for completion indicators
+                    if any(indicator in stripped_output.lower() for indicator in [
+                        "download complete", "download completed", "finished", 
+                        "100%", "download successful", "successfully downloaded"
+                    ]):
+                        logger.info(f"Download completed successfully")
+                        download_completed = True
+                        break
+                else:
+                    if process.poll() is not None:
+                        break
+                
+                time.sleep(1)
+
+        except KeyboardInterrupt:
+            logger.info("Download interrupted by user")
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+            return False
+        
+        except Exception as e:
+            logger.error(f"An error occurred during download: {e}")
+            return False
+        
+        finally:
+            # Ensure the process is cleaned up
+            try:
+                if process.poll() is None:
+                    process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        
+        # Determine success
+        if download_completed or (process.returncode == 0 and destination.exists()):
+            logger.info(f"Successfully downloaded '{description}' to {destination}")
+            return True
+        else:
+            logger.error(f"aria2c failed to download '{description}'. Return code: {process.returncode}")
+            return False
+
+    def download_file(self, url: str, destination: Path, description: str) -> bool:
+        """Main downloader with aria2c primary and requests fallback."""
+        try:
+            # Check if file already exists and is valid
+            if destination.exists() and self._verify_file_integrity(destination):
                 return True
-            else:
-                logger.error(f"aria2c failed to download '{description}'.")
-                return False
+            
+            # Check if aria2c has failed before for this session
+            if not hasattr(self, '_aria2c_failed'):
+                self._aria2c_failed = False
+            
+            # If aria2c failed before, skip directly to requests
+            if self._aria2c_failed:
+                return self._download_file_requests(url, destination, description)
+            
+            # Try aria2c first with stall detection
+            if self._download_file_aria_with_stall_detection(url, destination, description):
+                return True
+            
+            # Mark aria2c as failed and fallback to requests
+            self._aria2c_failed = True
+            logger.info(f"Falling back to requests for '{description}'...")
+            return self._download_file_requests(url, destination, description)
 
         except Exception as e:
             logger.error(f"An exception occurred during download of '{description}': {e}")
@@ -381,67 +660,102 @@ class PortableEnvironmentManager:
     
     def install_tool(self, tool_name: str) -> bool:
         """Полный цикл установки для одного инструмента."""
-        spec = self.tool_specs[tool_name]
-        if spec.get_full_executable_path(self.ps_env_path).exists():
-            return True
-        
-        archive_path = self.ps_env_path / f"{spec.name}.7z"
-        extract_path = spec.get_full_extract_path(self.ps_env_path)
-        
-        if not self._verify_archive(archive_path):
-            if not self._download_file_aria(spec.url, archive_path, spec.name): return False
-        
-        if not self._extract_archive(archive_path, extract_path): return False
-        
-        self._fix_nested_extraction(extract_path, tool_name)
-        
-        try: archive_path.unlink()
-        except OSError: pass
-
-        if not spec.get_full_executable_path(self.ps_env_path).exists():
-            logger.error(f"Installation of {spec.name} failed: executable not found.")
-            return False
+        try:
+            spec = self.tool_specs[tool_name]
+            if spec.get_full_executable_path(self.ps_env_path).exists():
+                return True
             
-        return True
+            archive_path = self.ps_env_path / f"{spec.name}.7z"
+            extract_path = spec.get_full_extract_path(self.ps_env_path)
+            
+            if not self._verify_archive(archive_path):
+                if not self.download_file(spec.url, archive_path, spec.name): 
+                    logger.error(f"Failed to download {spec.name}")
+                    return False
+            
+            if not self._extract_archive(archive_path, extract_path): 
+                logger.error(f"Failed to extract {spec.name}")
+                return False
+            
+            self._fix_nested_extraction(extract_path, tool_name)
+            
+            try: archive_path.unlink()
+            except OSError as e: 
+                logger.warning(f"Could not remove archive {archive_path}: {e}")
+
+            if not spec.get_full_executable_path(self.ps_env_path).exists():
+                logger.error(f"Installation of {spec.name} failed: executable not found at {spec.get_full_executable_path(self.ps_env_path)}")
+                return False
+            
+            # logger.info(f"{spec.name} installed successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Unexpected error during installation of {tool_name}: {e}")
+            return False
 
     def install_cuda(self) -> bool:
         """Полный цикл установки для CUDA."""
+        # logger.info("Starting CUDA installation process...")
         gpu_config = self.config_manager.config.gpu_config
         if not (gpu_config and gpu_config.cuda_version and "cuda" in gpu_config.recommended_backend):
+            # logger.info("CUDA installation skipped - not required for current GPU configuration")
             return True
         
         cuda_extract_path = self.ps_env_path / "CUDA"
         if (cuda_extract_path / "bin").exists():
+            # logger.info("CUDA already installed, skipping...")
             return True
             
+        # logger.info(f"Getting CUDA download link for version {gpu_config.cuda_version.value}...")
         cuda_link = self.config_manager.get_cuda_download_link(gpu_config.cuda_version)
-        if not cuda_link: return False
+        if not cuda_link: 
+            logger.error("Failed to get CUDA download link")
+            return False
         
         archive_path = self.ps_env_path / f"cuda_{gpu_config.cuda_version.value}.7z"
+        # logger.info(f"Checking CUDA archive at {archive_path}...")
 
         if not self._verify_archive(archive_path):
+            # logger.info("CUDA archive verification failed, need to download...")
             # Если файл заблокирован, попробуем его удалить
             if archive_path.exists():
                 try:
                     archive_path.unlink()
-                    logger.info(f"Removed corrupted/locked file: {archive_path}")
+                    # logger.info(f"Removed corrupted/locked file: {archive_path}")
                 except OSError as e:
                     logger.warning(f"Could not remove file {archive_path}: {e}")
             
-            if not self._download_file_aria(cuda_link, archive_path, f"CUDA {gpu_config.cuda_version.value}"): return False
+            if not self.download_file(cuda_link, archive_path, f"CUDA {gpu_config.cuda_version.value}"): 
+                logger.error("CUDA download failed")
+                return False
+        else:
+            pass
+            # logger.info("CUDA archive verified, skipping download")
         
-        if not self._extract_archive(archive_path, cuda_extract_path): return False
+        # logger.info(f"Extracting CUDA to {cuda_extract_path}...")
+        if not self._extract_archive(archive_path, cuda_extract_path): 
+            logger.error("CUDA extraction failed")
+            return False
+        # logger.info("CUDA extraction completed")
         
+        # logger.info("Fixing CUDA nested extraction...")
         self._fix_cuda_nested_extraction(cuda_extract_path, gpu_config.cuda_version)
+        # logger.info("CUDA nested extraction fix completed")
         
+        # logger.info("Cleaning up CUDA archive...")
         try: archive_path.unlink()
         except OSError: pass
 
+        # logger.info("Verifying CUDA installation...")
         if not (cuda_extract_path / "bin").exists():
             logger.error("CUDA installation failed: 'bin' directory not found.")
             return False
         
+        # logger.info("Configuring CUDA paths...")
         self.config_manager.configure_cuda_paths()
+        # logger.info("CUDA installation completed successfully")
+        logger.info("Successfully processed CUDA")
         return True
 
     def run_in_activated_environment(self, command: List[str], cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
@@ -798,24 +1112,35 @@ class PortableEnvironmentManager:
         
         try:
             gpu_config = self.config_manager.configure_gpu_from_detection()
-            logger.info(f"GPU configured: {gpu_config.name}")
+            logger.info(f"GPU: {gpu_config.name}")
         except Exception as e:
             logger.error(f"Failed to configure GPU: {e}")
         
         if not self._setup_prerequisites(): return False
         
         for tool_name in self.tool_specs:
-            if not self.install_tool(tool_name): return False
+            try:
+                if not self.install_tool(tool_name): 
+                    logger.error(f"Failed to install {tool_name}, aborting setup")
+                    return False
+            except Exception as e:
+                logger.error(f"Exception during installation of {tool_name}: {e}")
+                return False
         
-        if not self.install_cuda(): return False
+        # logger.info("Installing CUDA...")
+        if not self.install_cuda(): 
+            logger.error("Failed to install CUDA, aborting setup")
+            return False
+        # logger.info("Successfully processed CUDA")
         
-        if not self._verify_environment_tools(): return False
+        # logger.info("Verifying environment tools...")
+        if not self._verify_environment_tools(): 
+            logger.error("Environment tools verification failed, aborting setup")
+            return False
+        # logger.info("Environment tools verification completed")
         
         try:
             self.config_manager.mark_environment_setup_completed(True)
-            if self.config_manager.config:
-                self.config_manager.config.install_path = str(self.install_path)
-            self.config_manager.save_config()
         except Exception as e:
             logger.warning(f"Failed to save setup status to config: {e}")
         

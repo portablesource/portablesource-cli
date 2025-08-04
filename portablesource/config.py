@@ -37,15 +37,15 @@ class CUDAVersion(Enum):
 
 class CUDALinks(Enum):
     """Available CUDA download links"""
-    CUDA_118 = "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/CUDA_118.7z"  
-    CUDA_124 = "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/CUDA_124.7z"  
-    CUDA_128 = "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/CUDA_128.7z"  
+    CUDA_118 = "https://files.portables.dev/CUDA/CUDA_118.7z"  
+    CUDA_124 = "https://files.portables.dev/CUDA/CUDA_124.7z"  
+    CUDA_128 = "https://files.portables.dev/CUDA/CUDA_128.7z"  
 
 class TOOLinks(Enum):
     """Available tool (ffmpeg, git, python) download links"""
-    GIT_URL = "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/git.7z"
-    FFMPEG_URL = "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/ffmpeg.7z"
-    PYTHON311_URL = "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/python311.7z"
+    GIT_URL = "https://files.portables.dev/git.7z"
+    FFMPEG_URL = "https://files.portables.dev/ffmpeg.7z"
+    PYTHON311_URL = "https://files.portables.dev/python311.7z"
 
 @dataclass
 class CUDAPaths:
@@ -278,10 +278,11 @@ class ConfigManager:
         # Convert memory from MB to GB
         memory_gb = primary_gpu.memory // 1024 if primary_gpu.memory else 0
         
-        logger.info(f"Detected GPU: {primary_gpu.name} ({memory_gb}GB)")
-        logger.info(f"GPU Type: {primary_gpu.gpu_type.value}")
+        #logger.info(f"Detected GPU: {primary_gpu.name} ({memory_gb}GB)")
+        #logger.info(f"GPU Type: {primary_gpu.gpu_type.value}")
         if primary_gpu.cuda_version:
-            logger.info(f"Recommended CUDA: {primary_gpu.cuda_version.value}")
+            pass
+            #logger.info(f"Recommended CUDA: {primary_gpu.cuda_version.value}")
         
         return self.configure_gpu(primary_gpu.name, memory_gb)
     
@@ -332,8 +333,10 @@ class ConfigManager:
         """
         Configure CUDA paths based on installation path and GPU config
         """
+        # logger.info("Starting CUDA paths configuration...")
         # Ensure config exists
         if not self.config:
+            # logger.info("Config not found, creating default config...")
             self._create_default_config()
             
         if not self.config or not self.config.install_path:
@@ -344,13 +347,17 @@ class ConfigManager:
             logger.warning("No CUDA version configured, skipping CUDA paths setup")
             return
         
+        # logger.info(f"Configuring CUDA paths for install path: {self.config.install_path}")
+        # logger.info(f"CUDA version: {self.config.gpu_config.cuda_version.value}")
+        
         # CUDA is installed in ps_env/CUDA directory
         cuda_base_path = Path(self.config.install_path) / "ps_env" / "CUDA"
-        self.config.gpu_config.cuda_paths = CUDAPaths(str(cuda_base_path))
-        logger.info(f"CUDA paths configured for version {self.config.gpu_config.cuda_version.value}")
+        # logger.info(f"Setting CUDA base path to: {cuda_base_path}")
         
-        # Save configuration after updating CUDA paths
-        self.save_config()
+        # logger.info("Creating CUDAPaths object...")
+        self.config.gpu_config.cuda_paths = CUDAPaths(str(cuda_base_path))
+        # logger.info(f"CUDA paths configured successfully for version {self.config.gpu_config.cuda_version.value}")
+        # logger.info("CUDA paths configuration completed")
     
     def get_cuda_download_link(self, cuda_version: Optional[CUDAVersion] = None) -> Optional[str]:
         """
