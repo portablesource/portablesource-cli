@@ -10,6 +10,7 @@ import os
 from .config import logger
 from .config import ConfigManager
 from .get_gpu import GPUDetector, GPUType
+from .Version import __version__
 
 def save_install_path_to_registry(install_path: Path) -> bool:
     """Save installation path to Windows registry.
@@ -44,6 +45,8 @@ def delete_install_path_from_registry() -> bool:
         logger.error(f"Failed to delete install path from registry: {e}")
         return False
 
+def show_version() -> None:
+    print(f"PortableSource version: {__version__}")
 
 def load_install_path_from_registry() -> Optional[Path]:
     """Load installation path from Windows registry.

@@ -1918,13 +1918,14 @@ class RepositoryInstaller:
                 self.config_manager.config.gpu_config and 
                 self.config_manager.config.gpu_config.cuda_paths):
                 cuda_paths_section = f"""
-set cuda_bin=X:\\CUDA\\bin
-set cuda_lib=X:\\CUDA\\lib
-set cuda_lib_64=X:\\CUDA\\lib\\x64
-set cuda_nvml_bin=X:\\CUDA\\nvml\\bin
-set cuda_nvml_lib=X:\\CUDA\\nvml\\lib
-set cuda_nvvm_bin=X:\\CUDA\\nvvm\\bin
-set cuda_nvvm_lib=X:\\CUDA\\nvvm\\lib
+set cuda_bin=%env_path%\\CUDA\\bin
+set cuda_lib=%env_path%\\CUDA\\lib
+set cuda_lib_64=%env_path%\\CUDA\\lib\\x64
+set cuda_nvml_bin=%env_path%\\CUDA\\nvml\\bin
+set cuda_nvml_lib=%env_path%\\CUDA\\nvml\\lib
+set cuda_nvvm_bin=%env_path%\\CUDA\\nvvm\\bin
+set cuda_nvvm_lib=%env_path%\\CUDA\\nvvm\\lib
+
 
 set PATH=%cuda_bin%;%PATH%
 set PATH=%cuda_lib%;%PATH%

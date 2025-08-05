@@ -14,7 +14,8 @@ from .utils import (
     delete_install_path_from_registry,
     install_msvc_build_tools,
     check_msvc_build_tools_installed,
-    check_nv_gpu
+    check_nv_gpu,
+    show_version
 )
 
 def main():
@@ -34,7 +35,7 @@ def main():
     parser.add_argument("--check-gpu", action="store_true", help="Check NVIDIA GPU info")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--unregister", action="store_true", help="Unregister installation path from registry")
-    
+    parser.add_argument("--version", action="store_true", help="Show version")
     
     args = parser.parse_args()
     
@@ -58,6 +59,10 @@ def main():
     
     if args.unregister:
         delete_install_path_from_registry()
+        return
+
+    if args.version:
+        show_version()
         return
 
     # Initialize for other commands
