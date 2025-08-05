@@ -1955,17 +1955,21 @@ echo Launch {repo_name}...
 subst X: {install_path}
 X:
 
-set env_path=X:\\ps_env
+set env_path=X:\ps_env
+set envs_path=X:\envs
+set repos_path=X:\\repos
 set ffmpeg_path=%env_path%\\ffmpeg
-set python_path = %env_path%\\python
-set python_exe=%env_path%\\{repo_name}\\python.exe
+set python_path=%envs_path%\\{repo_name}
+set python_exe=%python_path%\\python.exe
 set repo_path=%env_path%\\{repo_name}
 
 REM Setup temporary directory
 set tmp_path=X:\\tmp
 set USERPROFILE=%tmp_path%
-set TEMP=%tmp_path%
-set TMP=%tmp_path%
+set TEMP=%tmp_path%\Temp
+set TMP=%tmp_path%\Temp
+set APPDATA=%tmp_path%\AppData\Roaming
+set LOCALAPPDATA=%tmp_path%\AppData\Local
 
 REM Security and compatibility settings
 set PYTHONIOENCODING=utf-8
