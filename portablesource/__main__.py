@@ -24,17 +24,21 @@ def main():
     parser.add_argument("--install-path", type=str, help="Installation path")
     parser.add_argument("--setup-env", action="store_true", help="Setup environment (Portable)")
     parser.add_argument("--setup-reg", action="store_true", help="Register installation path in registry")
+    parser.add_argument("--unregister", action="store_true", help="Unregister installation path from registry")
     parser.add_argument("--change-path", action="store_true", help="Change installation path")
+
     parser.add_argument("--install-repo", type=str, help="Install repository")
     parser.add_argument("--update-repo", type=str, help="Update repository")
+    parser.add_argument("--delete-repo", type=str, help="Delete repository")
     parser.add_argument("--list-repos", action="store_true", help="Show installed repositories")
+    
     parser.add_argument("--system-info", action="store_true", help="Show system information")
     parser.add_argument("--check-env", action="store_true", help="Check environment status and tools")
     parser.add_argument("--install-msvc", action="store_true", help="Install MSVC Build Tools")
     parser.add_argument("--check-msvc", action="store_true", help="Check MSVC Build Tools installation")
-    parser.add_argument("--check-gpu", action="store_true", help="Check NVIDIA GPU info")
+    parser.add_argument("--check-gpu", action="store_true", help="Show True if gpu nvidia. Else False")
+
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-    parser.add_argument("--unregister", action="store_true", help="Unregister installation path from registry")
     parser.add_argument("--version", action="store_true", help="Show version")
     
     args = parser.parse_args()
@@ -89,12 +93,16 @@ def main():
     if args.update_repo:
         app.update_repository(args.update_repo)
     
+    if args.delete_repo:
+        app.delete_repository(args.delete_repo)
+
     if args.list_repos:
         repos = app.list_installed_repositories()
         logger.info(f"Installed repositories: {len(repos)}")
         for repo in repos:
             launcher_status = "[OK]" if repo['has_launcher'] else "[ERROR]"
-            logger.info(f"  * {repo['name']} {launcher_status}")
+            from_url_status = " [From github]" if repo.get('from_url', False) else ""
+            logger.info(f"  * {repo['name']} {launcher_status}{from_url_status}")
     
     if args.system_info:
         app.show_system_info_with_repos()

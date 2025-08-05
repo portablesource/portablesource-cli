@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Union
 from urllib.parse import urlparse
 from dataclasses import dataclass, field
 from enum import Enum
-
+import shutil
 from tqdm import tqdm
 
 from .config import ConfigManager, SERVER_DOMAIN
@@ -916,6 +916,16 @@ class RepositoryInstaller:
             
             if not self._clone_or_update_repository(repo_info, repo_path):
                 return False
+            
+            # Create URL marker file for repositories installed from URL
+            if repo_name is not None:
+                url_marker_file = repo_path / f"ps_repo_{repo_name}_url.txt"
+                try:
+                    with open(url_marker_file, 'w', encoding='utf-8') as f:
+                        f.write(repo_url)
+                    logger.debug(f"Created URL marker file: {url_marker_file}")
+                except Exception as e:
+                    logger.warning(f"Failed to create URL marker file: {e}")
             
             if not self._install_dependencies(repo_path):
                 return False
@@ -2425,7 +2435,7 @@ pause
             self._current_repo_name = repo_name
             
             try:
-                git_exe = self.base_path / "ps_env" / "Library" / "cmd" / "git.exe"
+                git_exe = self.base_path / "ps_env" / "git" / "cmd" / "git.exe"
                 result = subprocess.run(
                     [str(git_exe), "pull"],
                     cwd=repo_path,
@@ -2449,6 +2459,47 @@ pause
             logger.error(f"Error updating repository {repo_name}: {e}")
             return False
     
+    def delete_repository(self, repo_name: str) -> bool:
+        """Delete a repository.
+        
+        Args:
+            repo_name: Name of the repository to delete
+            
+        Returns:
+            True if delete successful, False otherwise
+        """
+        try:
+            logger.info(f"Deleting repository: {repo_name}")
+            
+            repos_path = self.base_path / "repos"
+            repos_env = self.base_path / "envs"
+            repo_path = repos_path / repo_name
+            repo_env = repos_env / repo_name
+            
+            if not repo_path.exists():
+                logger.error(f"Repository {repo_name} not found at {repo_path}")
+                return False
+            
+            # Delete the repository directory with force removal for read-only files
+            def remove_readonly(func, path, exc_info):
+                """Error handler for removing read-only files on Windows"""
+                import stat
+                os.chmod(path, stat.S_IWRITE)
+                func(path)
+            
+            if repo_path.exists():
+                shutil.rmtree(repo_path, onexc=remove_readonly)
+            
+            if repo_env.exists():
+                shutil.rmtree(repo_env, onexc=remove_readonly)
+                
+            logger.info(f"[OK] Repository {repo_name} deleted successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error deleting repository {repo_name}: {e}")
+            return False
+
     def list_installed_repositories(self) -> list:
         """Get list of installed repositories.
         
@@ -2457,28 +2508,53 @@ pause
         """
         repos = []
         repos_path = self.base_path / "repos"
+        envs_path = self.base_path / "envs"
         
         if not repos_path.exists():
             logger.info("No repositories directory found")
             return repos
         
+        if not envs_path.exists():
+            logger.info("No environments directory found")
+            return repos
+        
+        # Get list of directories in both repos and envs
+        repo_dirs = set()
+        env_dirs = set()
+        
         for item in repos_path.iterdir():
-            item: Path
             if item.is_dir() and not item.name.startswith('.'):
-                bat_file = item / f"start_{item.name}.bat"
-                sh_file = item / f"start_{item.name}.sh"
-                has_launcher = bat_file.exists() or sh_file.exists()
-                
-                repo_info = {
-                    'name': item.name,
-                    'path': str(item),
-                    'has_launcher': has_launcher
-                }
-                repos.append(repo_info)
+                repo_dirs.add(item.name)
+        
+        for item in envs_path.iterdir():
+            if item.is_dir() and not item.name.startswith('.'):
+                env_dirs.add(item.name)
+        
+        # Find repositories that exist in both repos and envs
+        installed_repos = repo_dirs.intersection(env_dirs)
+        
+        for repo_name in installed_repos:
+            repo_path = repos_path / repo_name
+            bat_file = repo_path / f"start_{repo_name}.bat"
+            sh_file = repo_path / f"start_{repo_name}.sh"
+            has_launcher = bat_file.exists() or sh_file.exists()
+            
+            # Check if repository was installed from URL
+            url_marker_file = repo_path / f"ps_repo_{repo_name}_url.txt"
+            is_from_url = url_marker_file.exists()
+            
+            repo_info = {
+                'name': repo_name,
+                'path': str(repo_path),
+                'has_launcher': has_launcher,
+                'from_url': is_from_url
+            }
+            repos.append(repo_info)
         
         logger.info(f"Found repositories: {len(repos)}")
         for repo in repos:
             launcher_status = "[OK]" if repo['has_launcher'] else "[ERROR]"
-            logger.info(f"  - {repo['name']} {launcher_status}")
+            url_status = " [From github]" if repo['from_url'] else ""
+            logger.info(f"  - {repo['name']} {launcher_status}{url_status}")
         
         return repos

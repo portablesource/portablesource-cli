@@ -525,6 +525,13 @@ class PortableSourceApp:
         
         return self.repository_installer.update_repository(repo_name)
     
+    def delete_repository(self, repo_name:str ) -> bool:
+        """Delete repository"""
+        if not self.repository_installer:
+            logger.error("Repository installer not initialized")
+            return False
+        return self.repository_installer.delete_repository(repo_name)
+
     def list_installed_repositories(self):
         """List installed repositories"""
         if not self.repository_installer:
@@ -546,4 +553,5 @@ class PortableSourceApp:
         logger.info(f"  - Installed repositories: {len(repos)}")
         for repo in repos:
             launcher_status = "[OK]" if repo['has_launcher'] else "[ERROR]"
-            logger.info(f"    * {repo['name']} {launcher_status}")
+            from_url_status = " [From github]" if repo.get('from_url', False) else ""
+            logger.info(f"    * {repo['name']} {launcher_status}{from_url_status}")
