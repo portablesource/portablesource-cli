@@ -1961,7 +1961,7 @@ set repos_path=X:\\repos
 set ffmpeg_path=%env_path%\\ffmpeg
 set python_path=%envs_path%\\{repo_name}
 set python_exe=%python_path%\\python.exe
-set repo_path=%env_path%\\{repo_name}
+set repo_path=%repos_path%\\{repo_name}
 
 REM Setup temporary directory
 set tmp_path=X:\\tmp
