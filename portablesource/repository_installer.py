@@ -1956,9 +1956,11 @@ subst X: {install_path}
 X:
 
 set env_path=X:\\ps_env
-set ffmpeg_path=X:\\ps_env\\ffmpeg
-set python_exe=X:\\envs\\{repo_name}\\python.exe
-set repo_path=X:\\repos\\{repo_name}
+set ffmpeg_path=%env_path%\\ffmpeg
+set python_path = %env_path%\\python
+set python_exe=%env_path%\\{repo_name}\\python.exe
+set repo_path=%env_path%\\{repo_name}
+
 REM Setup temporary directory
 set tmp_path=X:\\tmp
 set USERPROFILE=%tmp_path%
@@ -1980,8 +1982,8 @@ REM Add all CUDA paths if available
 
 REM === ADD COPIED PYTHON ENVIRONMENT PATHS ===
 REM Add the copied Python environment to PATH
-set PATH=%env_path%;%PATH%
-set PATH=%env_path%\\\\Scripts;%PATH%
+set PATH=%python_path%;%PATH%
+set PATH=%python_path%\\Scripts;%PATH%
 echo Python environment and ffmpeg paths added to PATH
 set PATH=%ffmpeg_path%;%PATH%
 
