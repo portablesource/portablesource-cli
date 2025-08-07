@@ -1725,16 +1725,24 @@ class RepositoryInstaller:
         """Add installation flags and index URLs to command"""
         # Check if this is a torch installation step by looking at the command
         # Only add torch index URL if ALL packages are torch-related (torch, torchvision, torchaudio)
-        torch_packages = ['torch', 'torchvision', 'torchaudio']
+        torch_packages = ['torch', 'torchvision', 'torchaudio', 'xformers']
         package_args = [arg for arg in install_cmd if not arg.startswith('-') and 'pip' not in arg and 'install' not in arg and 'python' not in arg and 'uv' not in arg]
         
-        # Extract package names from version specifications like "torch>=2.4.0"
+        # Extract package names from version specifications like "torch>=2.4.0" and remove versions for torch packages
         package_names = []
-        for arg in package_args:
+        for i, arg in enumerate(package_args):
             # Split by common version operators
             for op in ['>=', '<=', '==', '!=', '>', '<', '~=']:
                 if op in arg:
-                    package_names.append(arg.split(op)[0].strip())
+                    pkg_name = arg.split(op)[0].strip()
+                    package_names.append(pkg_name)
+                    # Remove version specification for torch packages
+                    if pkg_name.lower() in torch_packages:
+                        # Find the index of this package in install_cmd and replace it
+                        for j, cmd_arg in enumerate(install_cmd):
+                            if cmd_arg == arg:
+                                install_cmd[j] = pkg_name
+                                break
                     break
             else:
                 package_names.append(arg.strip())
@@ -1970,6 +1978,9 @@ set TEMP=%tmp_path%\Temp
 set TMP=%tmp_path%\Temp
 set APPDATA=%tmp_path%\AppData\Roaming
 set LOCALAPPDATA=%tmp_path%\AppData\Local
+set HF_HOME=%tmp_path%\huggingface
+set XDG_CACHE_HOME=%tmp_path%
+set HF_DATASETS_CACHE=%HF_HOME%\datasets
 
 REM Security and compatibility settings
 set PYTHONIOENCODING=utf-8
