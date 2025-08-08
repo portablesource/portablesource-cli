@@ -37,13 +37,13 @@ impl PortableEnvironmentManager {
         let ps_env_path = install_path.join("ps_env");
         let config_manager = ConfigManager::new(None).expect("ConfigManager init failed");
         let tool_specs = Self::build_tool_specs();
-        Self {
-            install_path,
-            ps_env_path,
-            config_manager,
-            gpu_detector: GpuDetector::new(),
-            tool_specs,
-        }
+        Self { install_path, ps_env_path, config_manager, gpu_detector: GpuDetector::new(), tool_specs }
+    }
+
+    pub fn with_config(install_path: PathBuf, config_manager: ConfigManager) -> Self {
+        let ps_env_path = install_path.join("ps_env");
+        let tool_specs = Self::build_tool_specs();
+        Self { install_path, ps_env_path, config_manager, gpu_detector: GpuDetector::new(), tool_specs }
     }
 
     fn build_tool_specs() -> HashMap<String, PortableToolSpec> {
@@ -522,6 +522,127 @@ impl PortableEnvironmentManager {
         if !self.verify_environment_tools()? { return Err(PortableSourceError::environment("Environment tools verification failed")); }
 
         // Mark completed
+        cfgm.mark_environment_setup_completed(true)?;
+        Ok(())
+    }
+
+    /// Setup environment with progress callback.
+    /// The callback receives `(tool_key, steps_done, total_steps)`.
+    /// tool_key is one of: "python", "git", "ffmpeg", "cuda".
+    pub async fn setup_environment_with_progress<F>(&self, progress_cb: F) -> Result<()>
+    where
+        F: Fn(String, usize, usize) + Send + Sync + 'static,
+    {
+        log::info!("Setting up portable environment...");
+        fs::create_dir_all(&self.ps_env_path)?;
+        let mut cfgm = self.config_manager.clone();
+        if cfgm.get_config().install_path.as_os_str().is_empty() {
+            cfgm.set_install_path(self.install_path.clone())?;
+        }
+
+        let _ = cfgm.configure_gpu_from_detection();
+        let cfg_now = cfgm.get_config().clone();
+
+        let completed = Arc::new(AtomicUsize::new(0));
+        let cb_arc: Arc<dyn Fn(String, usize, usize) + Send + Sync> = Arc::new(progress_cb);
+        let mut total_steps: usize = 0;
+
+        // CUDA plan detection same as in setup_environment
+        let mut cuda_plan: Option<(String, String)> = None; // (download_link, expected_folder)
+        if let Some(gpu) = &cfg_now.gpu_config {
+            if let Some(cuda_ver) = &gpu.cuda_version {
+                if gpu.recommended_backend.contains("cuda") {
+                    if let Some(link) = self.config_manager.get_cuda_download_link(Some(cuda_ver)) {
+                        total_steps += 2; // download + extract
+                        let version_debug = format!("{:?}", cuda_ver).to_lowercase();
+                        let cleaned = version_debug.replace("cuda", "").replace(['_', '"'], "");
+                        let expected_folder = format!("cuda_{}", cleaned);
+                        cuda_plan = Some((link, expected_folder));
+                    }
+                }
+            }
+        }
+        // python, git, ffmpeg each: download + extract
+        total_steps += 2 * 3;
+
+        // Tell UI initial total
+        cb_arc.clone()("init".to_string(), 0, total_steps);
+
+        let mut handles = Vec::new();
+        let total_c = total_steps;
+        let cb_cuda = cb_arc.clone();
+        if let Some((link, expected_folder)) = cuda_plan {
+            let ps_env = self.ps_env_path.clone();
+            let archive_path = ps_env.join(format!(
+                "CUDA_{}.7z",
+                expected_folder.trim_start_matches("cuda_").to_uppercase()
+            ));
+            let completed_c = completed.clone();
+            handles.push(tokio::task::spawn_blocking(move || {
+                // Step: CUDA download
+                let done_now = completed_c.load(Ordering::SeqCst);
+                cb_cuda("cuda".to_string(), done_now, total_c);
+                PortableEnvironmentManager::download_with_resume_static(link, archive_path.clone())?;
+                completed_c.fetch_add(1, Ordering::SeqCst);
+                // Step: CUDA extract
+                let done_now = completed_c.load(Ordering::SeqCst);
+                cb_cuda("cuda".to_string(), done_now, total_c);
+                let temp_extract = ps_env.join("__cuda_extract_temp__");
+                if temp_extract.exists() { let _ = fs::remove_dir_all(&temp_extract); }
+                PortableEnvironmentManager::extract_7z_static(archive_path.clone(), temp_extract.clone())?;
+                let extracted_sub = temp_extract.join(&expected_folder);
+                let cuda_dir = ps_env.join("CUDA");
+                if cuda_dir.exists() { let _ = fs::remove_dir_all(&cuda_dir); }
+                if !extracted_sub.exists() { return Err(PortableSourceError::environment("Expected CUDA folder missing after extraction")); }
+                fs::rename(&extracted_sub, &cuda_dir)?;
+                let _ = fs::remove_dir_all(&temp_extract);
+                let _ = fs::remove_file(&archive_path);
+                completed_c.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), PortableSourceError>(())
+            }));
+        }
+
+        // Other tools in parallel
+        for key in ["python", "git", "ffmpeg"] {
+            if let Some(spec) = self.tool_specs.get(key) {
+                let url = spec.url.clone();
+                let archive_name = Url::parse(&url)
+                    .ok()
+                    .and_then(|u| u.path_segments().and_then(|mut s| s.next_back()).map(|s| s.to_string()))
+                    .unwrap_or_else(|| format!("{}.7z", spec.name));
+                let ps_env = self.ps_env_path.clone();
+                let exe_rel = spec.executable_path.clone();
+                let completed_t = completed.clone();
+                let cb_t = cb_arc.clone();
+                handles.push(tokio::task::spawn_blocking(move || {
+                    // Step: download
+                    let done_now = completed_t.load(Ordering::SeqCst);
+                    cb_t(key.to_string(), done_now, total_c);
+                    let archive_path = ps_env.join(&archive_name);
+                    PortableEnvironmentManager::download_with_resume_static(url, archive_path.clone())?;
+                    completed_t.fetch_add(1, Ordering::SeqCst);
+                    // Step: extract
+                    let done_now = completed_t.load(Ordering::SeqCst);
+                    cb_t(key.to_string(), done_now, total_c);
+                    PortableEnvironmentManager::extract_7z_static(archive_path.clone(), ps_env.clone())?;
+                    let _ = fs::remove_file(&archive_path);
+                    let exe_path = ps_env.join(&exe_rel);
+                    if !exe_path.exists() {
+                        return Err(PortableSourceError::environment(format!("Executable not found: {:?}", exe_path)));
+                    }
+                    completed_t.fetch_add(1, Ordering::SeqCst);
+                    Ok::<(), PortableSourceError>(())
+                }));
+            }
+        }
+
+        for h in handles {
+            let res = h.await.map_err(|e| PortableSourceError::environment(format!("Join error: {}", e)))?;
+            if let Err(err) = res { return Err(err); }
+        }
+
+        if let Some(gpu) = &cfg_now.gpu_config { if gpu.cuda_version.is_some() && gpu.recommended_backend.contains("cuda") { cfgm.configure_cuda_paths(); } }
+        if !self.verify_environment_tools()? { return Err(PortableSourceError::environment("Environment tools verification failed")); }
         cfgm.mark_environment_setup_completed(true)?;
         Ok(())
     }

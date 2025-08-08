@@ -26,7 +26,7 @@ pub struct RepositoryInstaller {
 
 impl RepositoryInstaller {
     pub fn new(install_path: PathBuf, mut config_manager: ConfigManager) -> Self {
-        let env_manager = PortableEnvironmentManager::new(install_path.clone());
+        let env_manager = PortableEnvironmentManager::with_config(install_path.clone(), config_manager.clone());
         let server_client = ServerApiClient::new(format!("https://{}", SERVER_DOMAIN));
         let main_file_finder = MainFileFinder::new(server_client.clone());
         let fallback_repositories = default_fallback_repositories();
@@ -59,18 +59,34 @@ impl RepositoryInstaller {
     /// Update an existing repository
     pub async fn update_repository(&mut self, repo_name: &str) -> Result<()> {
         log::info!("Updating repository: {}", repo_name);
-        
+
         let repo_path = self.install_path.join("repos").join(repo_name);
-        
+
         if !repo_path.exists() {
             return Err(PortableSourceError::repository(
                 format!("Repository '{}' not found", repo_name)
             ));
         }
-        
-        // TODO: Implement repository update logic
-        log::warn!("Repository update not fully implemented yet");
-        
+
+        // 1) Fetch + reset --hard to remote main/master, then pull
+        let git_exe = self.get_git_executable();
+        {
+            let mut cmd = std::process::Command::new(&git_exe);
+            cmd.current_dir(&repo_path).arg("fetch").arg("--all");
+            let _ = run_with_progress(cmd, Some("Fetching from remote"));
+        }
+        if reset_hard_to(&git_exe, &repo_path, "origin/main").is_err() {
+            let _ = reset_hard_to(&git_exe, &repo_path, "origin/master");
+        }
+        {
+            let mut cmd = std::process::Command::new(&git_exe);
+            cmd.current_dir(&repo_path).arg("pull");
+            let _ = run_with_progress(cmd, Some("Pulling latest changes"));
+        }
+
+        // 2) Reinstall deps (install_dependencies сам пересоздаст venv)
+        let _ = self.install_dependencies(&repo_path).await;
+
         Ok(())
     }
     
@@ -79,17 +95,29 @@ impl RepositoryInstaller {
         log::info!("Deleting repository: {}", repo_name);
         
         let repo_path = self.install_path.join("repos").join(repo_name);
+        let env_path = self.install_path.join("envs").join(repo_name);
         
-        if !repo_path.exists() {
+        if !repo_path.exists() && !env_path.exists() {
             return Err(PortableSourceError::repository(
                 format!("Repository '{}' not found", repo_name)
             ));
         }
         
-        std::fs::remove_dir_all(&repo_path)
-            .map_err(|e| PortableSourceError::repository(
-                format!("Failed to delete repository '{}': {}", repo_name, e)
-            ))?;
+        // Delete repo folder if present
+        if repo_path.exists() {
+            std::fs::remove_dir_all(&repo_path)
+                .map_err(|e| PortableSourceError::repository(
+                    format!("Failed to delete repository '{}': {}", repo_name, e)
+                ))?;
+        }
+
+        // Delete corresponding env folder if present
+        if env_path.exists() {
+            std::fs::remove_dir_all(&env_path)
+                .map_err(|e| PortableSourceError::repository(
+                    format!("Failed to delete environment for '{}': {}", repo_name, e)
+                ))?;
+        }
         
         log::info!("Repository '{}' deleted successfully", repo_name);
         Ok(())
@@ -265,45 +293,53 @@ impl ServerApiClient {
 
     fn is_server_available(&self) -> bool {
         let url = format!("{}/api/repositories", self.server_url);
-        match reqwest::blocking::Client::new().get(&url).timeout(std::time::Duration::from_secs(self.timeout_secs)).send() {
-            Ok(resp) => resp.status().is_success(),
-            Err(_) => false,
-        }
+        let timeout = self.timeout_secs;
+        std::thread::spawn(move || {
+            match reqwest::blocking::Client::new()
+                .get(&url)
+                .timeout(std::time::Duration::from_secs(timeout))
+                .send() {
+                Ok(resp) => resp.status().is_success(),
+                Err(_) => false,
+            }
+        }).join().unwrap_or(false)
     }
 
     fn get_repository_info(&self, name: &str) -> Result<Option<RepositoryInfo>> {
         let url = format!("{}/api/repositories/{}", self.server_url, name.to_lowercase());
-        let resp = reqwest::blocking::Client::new().get(&url)
-            .timeout(std::time::Duration::from_secs(self.timeout_secs))
-            .send();
-        match resp {
-            Ok(r) => {
-                if r.status().is_success() {
-                    let v: serde_json::Value = r.json().unwrap_or(serde_json::json!({}));
-                    if v.get("success").and_then(|b| b.as_bool()).unwrap_or(false) {
-                        if let Some(repo) = v.get("repository") {
-                            let url = repo.get("repositoryUrl").and_then(|s| s.as_str()).map(|s| s.trim().to_string());
-                            let main_file = repo.get("filePath").and_then(|s| s.as_str()).map(|s| s.to_string());
-                            let program_args = repo.get("programArgs").and_then(|s| s.as_str()).map(|s| s.to_string());
-                            return Ok(Some(RepositoryInfo { url, main_file, program_args }));
+        let timeout = self.timeout_secs;
+        let res = std::thread::spawn(move || {
+            let resp = reqwest::blocking::Client::new()
+                .get(&url)
+                .timeout(std::time::Duration::from_secs(timeout))
+                .send();
+            match resp {
+                Ok(r) => {
+                    if r.status().is_success() {
+                        let v: serde_json::Value = r.json().unwrap_or(serde_json::json!({}));
+                        if v.get("success").and_then(|b| b.as_bool()).unwrap_or(false) {
+                            if let Some(repo) = v.get("repository") {
+                                let url = repo.get("repositoryUrl").and_then(|s| s.as_str()).map(|s| s.trim().to_string());
+                                let main_file = repo.get("filePath").and_then(|s| s.as_str()).map(|s| s.to_string());
+                                let program_args = repo.get("programArgs").and_then(|s| s.as_str()).map(|s| s.to_string());
+                                return Ok(Some(RepositoryInfo { url, main_file, program_args }));
+                            }
+                        } else {
+                            // legacy format
+                            let url = v.get("url").and_then(|s| s.as_str()).map(|s| s.to_string());
+                            let main_file = v.get("main_file").and_then(|s| s.as_str()).map(|s| s.to_string());
+                            let program_args = v.get("program_args").and_then(|s| s.as_str()).map(|s| s.to_string());
+                            if url.is_some() || main_file.is_some() {
+                                return Ok(Some(RepositoryInfo { url, main_file, program_args }));
+                            }
                         }
-                    } else {
-                        // legacy format
-                        let url = v.get("url").and_then(|s| s.as_str()).map(|s| s.to_string());
-                        let main_file = v.get("main_file").and_then(|s| s.as_str()).map(|s| s.to_string());
-                        let program_args = v.get("program_args").and_then(|s| s.as_str()).map(|s| s.to_string());
-                        if url.is_some() || main_file.is_some() {
-                            return Ok(Some(RepositoryInfo { url, main_file, program_args }));
-                        }
-                    }
-                    Ok(None)
-                } else if r.status().as_u16() == 404 { Ok(None) } else { Ok(None) }
+                        Ok(None)
+                    } else if r.status().as_u16() == 404 { Ok(None) } else { Ok(None) }
+                }
+                Err(_) => Ok(None)
             }
-            Err(e) => {
-                warn!("Server error get_repository_info: {}", e);
-                Ok(None)
-            }
-        }
+        }).join().unwrap_or(Ok(None));
+        res
     }
 
     fn search_repositories(&self, _name: &str) -> Vec<serde_json::Value> {
@@ -313,21 +349,25 @@ impl ServerApiClient {
 
     fn get_installation_plan(&self, name: &str) -> Result<Option<serde_json::Value>> {
         let url = format!("{}/api/repositories/{}/install-plan", self.server_url, name.to_lowercase());
-        let resp = reqwest::blocking::Client::new().get(&url)
-            .timeout(std::time::Duration::from_secs(self.timeout_secs))
-            .send();
-        match resp {
-            Ok(r) => {
-                if r.status().is_success() {
-                    let v: serde_json::Value = r.json().unwrap_or(serde_json::json!({}));
-                    if v.get("success").and_then(|b| b.as_bool()).unwrap_or(false) {
-                        if let Some(plan) = v.get("installation_plan") { return Ok(Some(plan.clone())); }
-                    }
-                    Ok(None)
-                } else { Ok(None) }
+        let timeout = self.timeout_secs;
+        std::thread::spawn(move || {
+            let resp = reqwest::blocking::Client::new()
+                .get(&url)
+                .timeout(std::time::Duration::from_secs(timeout))
+                .send();
+            match resp {
+                Ok(r) => {
+                    if r.status().is_success() {
+                        let v: serde_json::Value = r.json().unwrap_or(serde_json::json!({}));
+                        if v.get("success").and_then(|b| b.as_bool()).unwrap_or(false) {
+                            if let Some(plan) = v.get("installation_plan") { return Ok(Some(plan.clone())); }
+                        }
+                        Ok(None)
+                    } else { Ok(None) }
+                }
+                Err(e) => { warn!("Server error get_installation_plan: {}", e); Ok(None) }
             }
-            Err(e) => { warn!("Server error get_installation_plan: {}", e); Ok(None) }
-        }
+        }).join().unwrap_or(Ok(None))
     }
 
     fn send_download_stats(&self, repo_name: &str) -> Result<()> {
@@ -337,8 +377,14 @@ impl ServerApiClient {
             "success": true,
             "timestamp": serde_json::Value::Null,
         });
-        let _ = reqwest::blocking::Client::new().post(&url).json(&body)
-            .timeout(std::time::Duration::from_secs(self.timeout_secs)).send();
+        let timeout = self.timeout_secs;
+        let _ = std::thread::spawn(move || {
+            let _ = reqwest::blocking::Client::new()
+                .post(&url)
+                .json(&body)
+                .timeout(std::time::Duration::from_secs(timeout))
+                .send();
+        }).join();
         Ok(())
     }
 }
@@ -419,7 +465,7 @@ impl RepositoryInstaller {
             "wangp" => {
                 // Install mmgp==3.5.6 into this repo env
                 if self.install_uv_in_venv(repo_name).unwrap_or(false) {
-                    let mut uv_cmd = self.get_uv_executable(repo_name);
+            let mut uv_cmd = self.get_uv_executable(repo_name);
                     uv_cmd.extend(["pip".into(), "install".into(), "mmgp==3.5.6".into()]);
                     let _ = run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing mmgp for wangp"));
                 } else {
@@ -678,7 +724,7 @@ impl RepositoryInstaller {
         Ok(())
     }
 
-    fn add_install_flags_and_urls(&self, repo_name: &str, cmd: &mut Vec<String>, step: &serde_json::Value) -> Result<()> {
+    fn add_install_flags_and_urls(&self, _repo_name: &str, cmd: &mut Vec<String>, step: &serde_json::Value) -> Result<()> {
         if let Some(flags) = step.get("install_flags").and_then(|s| s.as_array()) {
             for f in flags { if let Some(s) = f.as_str() { cmd.push(s.to_string()); } }
         }
@@ -784,6 +830,12 @@ impl RepositoryInstaller {
         }
         Ok(None)
     }
+}
+
+fn reset_hard_to(git_exe: &str, repo_path: &Path, target: &str) -> Result<()> {
+    let mut cmd = std::process::Command::new(git_exe);
+    cmd.current_dir(repo_path).arg("reset").arg("--hard").arg(target);
+    run_with_progress(cmd, Some(&format!("Reset to {}", target)))
 }
 
 // ===== Requirements analysis (Rust port of Python logic) =====
