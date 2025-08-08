@@ -1,6 +1,5 @@
 # portablesource
-CLI for GUI application PortableSource
-
+Rust library for GUI
 
 ## License
 

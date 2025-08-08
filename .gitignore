@@ -165,3 +165,7 @@ server/
 test*/
 test*.*
 PS_demo/
+
+# Added by cargo
+
+/target
