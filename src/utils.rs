@@ -6,8 +6,12 @@ use crate::envs_manager::PortableEnvironmentManager;
 use crate::repository_installer::RepositoryInstaller;
 use crate::gpu::{GpuDetector, GpuType};
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
 use winreg::enums::*;
+#[cfg(windows)]
 use winreg::RegKey;
+#[cfg(unix)]
+use libc;
 use std::process::Command;
 use std::fs;
 use std::time::Duration;
@@ -15,20 +19,34 @@ use std::time::Duration;
 const REGISTRY_KEY: &str = r"Software\PortableSource";
 const INSTALL_PATH_VALUE: &str = "InstallPath";
 
-/// Save installation path to Windows registry
+/// Save installation path (Windows: registry; Linux: /etc file)
+#[cfg(windows)]
 pub fn save_install_path_to_registry(install_path: &Path) -> Result<()> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let (key, _) = hkcu.create_subkey(REGISTRY_KEY)
         .map_err(|e| PortableSourceError::Registry(format!("Failed to create registry key: {}", e)))?;
-    
     key.set_value(INSTALL_PATH_VALUE, &install_path.to_string_lossy().to_string())
         .map_err(|e| PortableSourceError::Registry(format!("Failed to set registry value: {}", e)))?;
-    
     log::info!("Installation path saved to registry: {:?}", install_path);
     Ok(())
 }
 
+#[cfg(unix)]
+pub fn save_install_path_to_registry(install_path: &Path) -> Result<()> {
+    // Emulate registry with file
+    if unsafe { libc::geteuid() } != 0 {
+        return Err(PortableSourceError::Registry("Must be root to save install path on Linux".into()));
+    }
+    let path_file = std::path::Path::new("/etc/portablesource").join("install_path");
+    if let Some(parent) = path_file.parent() { std::fs::create_dir_all(parent)?; }
+    std::fs::write(&path_file, install_path.to_string_lossy().as_bytes())
+        .map_err(|e| PortableSourceError::Registry(format!("Failed to write {}: {}", path_file.display(), e)))?;
+    log::info!("Installation path saved to {}", path_file.display());
+    Ok(())
+}
+
 /// Delete installation path from Windows registry
+#[cfg(windows)]
 pub fn delete_install_path_from_registry() -> Result<()> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     
@@ -46,7 +64,19 @@ pub fn delete_install_path_from_registry() -> Result<()> {
     }
 }
 
+#[cfg(unix)]
+pub fn delete_install_path_from_registry() -> Result<()> {
+    if unsafe { libc::geteuid() } != 0 {
+        return Err(PortableSourceError::Registry("Must be root to delete install path on Linux".into()));
+    }
+    let path_file = std::path::Path::new("/etc/portablesource").join("install_path");
+    if path_file.exists() { let _ = std::fs::remove_file(&path_file); }
+    log::info!("Installation path deleted: {}", path_file.display());
+    Ok(())
+}
+
 /// Load installation path from Windows registry
+#[cfg(windows)]
 pub fn load_install_path_from_registry() -> Result<Option<PathBuf>> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     
@@ -63,6 +93,16 @@ pub fn load_install_path_from_registry() -> Result<Option<PathBuf>> {
         }
         Err(_) => Ok(None),
     }
+}
+
+#[cfg(unix)]
+pub fn load_install_path_from_registry() -> Result<Option<PathBuf>> {
+    let path_file = std::path::Path::new("/etc/portablesource").join("install_path");
+    if !path_file.exists() { return Ok(None); }
+    let content = std::fs::read_to_string(&path_file)
+        .map_err(|e| PortableSourceError::Registry(format!("Failed to read {}: {}", path_file.display(), e)))?;
+    let p = PathBuf::from(content.trim());
+    Ok(Some(p))
 }
 
 /// Validate and create directory if it doesn't exist
@@ -98,8 +138,14 @@ pub fn validate_and_get_path(path_str: &str) -> Result<PathBuf> {
 
 /// Create necessary directory structure for PortableSource
 pub fn create_directory_structure(install_path: &Path) -> Result<()> {
+    #[cfg(windows)]
     let directories = [
         install_path.join("ps_env"),
+        install_path.join("repos"),
+        install_path.join("envs"),
+    ];
+    #[cfg(unix)]
+    let directories = [
         install_path.join("repos"),
         install_path.join("envs"),
     ];
@@ -278,6 +324,168 @@ pub fn install_msvc_build_tools_with_path(install_path: &Path) -> Result<()> {
 /// Show version information
 pub fn show_version() {
     println!("PortableSource version: {}", crate::config::VERSION);
+}
+
+#[cfg(unix)]
+pub fn prepare_linux_system() -> Result<()> {
+    use std::process::Command;
+    // Ожидается запуск от root для установки пакетов
+    let is_root = unsafe { libc::geteuid() } == 0;
+    if !is_root {
+        log::warn!("Not running as root. Skipping package installation. Some steps may fail.");
+        return Ok(());
+    }
+
+    // 1) Определяем пакетный менеджер
+    let pm = linux_detect_package_manager();
+    if matches!(pm, LinuxPackageManager::Unknown) {
+        log::warn!("Unsupported package manager. Skipping package installation.");
+        return Ok(());
+    }
+
+    // 2) Проверяем требования и формируем отчёт
+    let missing = linux_check_requirements(pm.clone());
+    println!("\n=== Linux requirements check ===");
+    for (tool, status) in linux_collect_tool_status() {
+        println!("- {}: {}", tool.0, status);
+    }
+    if missing.is_empty() {
+        println!("All required packages are present.");
+        return Ok(());
+    }
+    println!("\nMissing packages to install ({}):", missing.len());
+    for (_tool, pkg) in &missing { println!("  - {}", pkg); }
+
+    // 3) Устанавливаем только недостающие
+    install_linux_packages(pm, &missing)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn prepare_linux_system() -> Result<()> { Ok(()) }
+
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LinuxPackageManager { Apt, Dnf, Yum, Pacman, Unknown }
+
+#[cfg(unix)]
+fn linux_detect_package_manager() -> LinuxPackageManager {
+    if which::which("apt-get").is_ok() { return LinuxPackageManager::Apt; }
+    if which::which("dnf").is_ok() { return LinuxPackageManager::Dnf; }
+    if which::which("yum").is_ok() { return LinuxPackageManager::Yum; }
+    if which::which("pacman").is_ok() { return LinuxPackageManager::Pacman; }
+    LinuxPackageManager::Unknown
+}
+
+#[cfg(unix)]
+fn linux_collect_tool_status() -> Vec<((&'static str), String)> {
+    use std::process::Command;
+    let mut out = Vec::new();
+    let has = |bin: &str| which::which(bin).is_ok();
+    out.push(("git", if has("git") { "OK".to_string() } else { "Missing".to_string() }));
+    out.push(("python3", if has("python3") { "OK".to_string() } else { "Missing".to_string() }));
+    // venv module
+    let venv_ok = Command::new("python3").arg("-c").arg("import venv").status().map(|s| s.success()).unwrap_or(false);
+    out.push(("python3-venv", if venv_ok { "OK".to_string() } else { "Missing".to_string() }));
+    // pip3
+    let pip_ok = has("pip3") || Command::new("python3").arg("-m").arg("pip").arg("--version").status().map(|s| s.success()).unwrap_or(false);
+    out.push(("python3-pip", if pip_ok { "OK".to_string() } else { "Missing".to_string() }));
+    // dev headers: python3-dev / python3-devel / (arch: part of python)
+    let pyconf_ok = has("python3-config") || Command::new("python3").arg("-c").arg("import sysconfig;print(sysconfig.get_config_var('INCLUDEPY') or '')").status().map(|s| s.success()).unwrap_or(false);
+    out.push(("python3-dev", if pyconf_ok { "OK".to_string() } else { "Missing".to_string() }));
+    out.push(("ffmpeg", if has("ffmpeg") { "OK".to_string() } else { "Missing".to_string() }));
+    // optional nvcc
+    let nvcc_ok = has("nvcc");
+    out.push(("nvcc (optional)", if nvcc_ok { "OK".to_string() } else { "Not found".to_string() }));
+    out
+}
+
+#[cfg(unix)]
+fn linux_check_requirements(pm: LinuxPackageManager) -> Vec<(String, String)> {
+    // Возвращаем список (tool, pm_package_name) которых не хватает
+    let statuses = linux_collect_tool_status();
+    let mut missing: Vec<(String, String)> = Vec::new();
+    let map_pkg = |tool: &str| -> Option<&'static str> {
+        match pm {
+            LinuxPackageManager::Apt => match tool {
+                "git" => Some("git"),
+                // prefer meta package on Debian/Ubuntu
+                "python3" => Some("python3-full"),
+                "python3-venv" => Some("python3-venv"),
+                "python3-pip" => Some("python3-pip"),
+                "python3-dev" => Some("python3-dev"),
+                "ffmpeg" => Some("ffmpeg"),
+                _ => None,
+            },
+            LinuxPackageManager::Dnf | LinuxPackageManager::Yum => match tool {
+                "git" => Some("git"),
+                "python3" => Some("python3"),
+                "python3-venv" => None, // в dnf/yum venv обычно внутри python3
+                "python3-pip" => Some("python3-pip"),
+                "python3-dev" => Some("python3-devel"),
+                "ffmpeg" => Some("ffmpeg"),
+                _ => None,
+            },
+            LinuxPackageManager::Pacman => match tool {
+                "git" => Some("git"),
+                "python3" => Some("python"),
+                "python3-venv" => None, // в Arch venv в составе python
+                "python3-pip" => Some("python-pip"),
+                "python3-dev" => None, // dev headers идут в составе python в Arch
+                "ffmpeg" => Some("ffmpeg"),
+                _ => None,
+            },
+            LinuxPackageManager::Unknown => None,
+        }
+    };
+    for (tool, status) in statuses {
+        if status == "Missing" {
+            if let Some(pkg) = map_pkg(tool) {
+                missing.push((tool.to_string(), pkg.to_string()));
+            }
+        }
+    }
+    missing
+}
+
+#[cfg(unix)]
+fn install_linux_packages(pm: LinuxPackageManager, missing: &Vec<(String, String)>) -> Result<()> {
+    use std::process::Command;
+    if missing.is_empty() { return Ok(()); }
+    let pkgs: Vec<String> = missing.iter().map(|(_, p)| p.clone()).collect();
+    match pm {
+        LinuxPackageManager::Apt => {
+            let _ = Command::new("apt-get").arg("update").status();
+            let mut cmd = Command::new("apt-get");
+            cmd.arg("install").arg("-y");
+            for p in &pkgs { cmd.arg(p); }
+            let st = cmd.status().map_err(|e| PortableSourceError::environment(format!("apt-get failed: {}", e)))?;
+            if !st.success() { return Err(PortableSourceError::environment("apt-get install failed")); }
+        }
+        LinuxPackageManager::Dnf => {
+            let mut cmd = Command::new("dnf");
+            cmd.arg("install").arg("-y");
+            for p in &pkgs { cmd.arg(p); }
+            let st = cmd.status().map_err(|e| PortableSourceError::environment(format!("dnf failed: {}", e)))?;
+            if !st.success() { return Err(PortableSourceError::environment("dnf install failed")); }
+        }
+        LinuxPackageManager::Yum => {
+            let mut cmd = Command::new("yum");
+            cmd.arg("install").arg("-y");
+            for p in &pkgs { cmd.arg(p); }
+            let st = cmd.status().map_err(|e| PortableSourceError::environment(format!("yum failed: {}", e)))?;
+            if !st.success() { return Err(PortableSourceError::environment("yum install failed")); }
+        }
+        LinuxPackageManager::Pacman => {
+            let mut cmd = Command::new("pacman");
+            cmd.arg("-Sy").arg("--noconfirm");
+            for p in &pkgs { cmd.arg(p); }
+            let st = cmd.status().map_err(|e| PortableSourceError::environment(format!("pacman failed: {}", e)))?;
+            if !st.success() { return Err(PortableSourceError::environment("pacman install failed")); }
+        }
+        LinuxPackageManager::Unknown => {}
+    }
+    Ok(())
 }
 
 /// Get system information

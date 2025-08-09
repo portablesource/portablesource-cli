@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use crate::{Result, PortableSourceError};
 use crate::gpu::GpuDetector;
 use log::{info, warn, error};
-use std::process::Command;
 
 // Constants
 pub const SERVER_DOMAIN: &str = "portables.dev";
@@ -387,17 +386,21 @@ impl ConfigManager {
             }
         }
 
-        // If nvidia-smi reports CUDA version, set it
-        if let Some(cuda_ver) = detect_cuda_version_from_nvidia_smi() {
-            if let Some(ref mut gpu_cfg) = self.config.gpu_config {
-                gpu_cfg.cuda_version = Some(cuda_ver);
-            } else {
-                let mut gpu_cfg = GpuConfig::default();
-                gpu_cfg.cuda_version = Some(cuda_ver);
-                self.config.gpu_config = Some(gpu_cfg);
+        // Linux-only: попытка определить системную версию CUDA (Windows использует портативную CUDA)
+        #[cfg(unix)]
+        {
+            let cuda_from_nvcc = detect_cuda_version_from_nvcc();
+            let cuda_from_fs = detect_cuda_version_from_filesystem();
+            if let Some(cuda_ver) = cuda_from_nvcc.or(cuda_from_fs) {
+                if let Some(ref mut gpu_cfg) = self.config.gpu_config {
+                    gpu_cfg.cuda_version = Some(cuda_ver);
+                } else {
+                    let mut gpu_cfg = GpuConfig::default();
+                    gpu_cfg.cuda_version = Some(cuda_ver);
+                    self.config.gpu_config = Some(gpu_cfg);
+                }
+                // На Linux не настраиваем CUDA_PATH — используем системную CUDA как есть
             }
-            // After setting version, ensure CUDA paths
-            self.configure_cuda_paths();
         }
 
         // Mark environment as setup if core tools exist
@@ -569,20 +572,46 @@ impl ConfigManager {
     
 }
 
-fn detect_cuda_version_from_nvidia_smi() -> Option<CudaVersion> {
-    // Try `nvidia-smi --query-gpu=cuda_version --format=csv,noheader`
-    let output = Command::new("nvidia-smi")
-        .arg("--query-gpu=cuda_version")
-        .arg("--format=csv,noheader")
+// Detect CUDA version by parsing `nvcc --version` output (Linux)
+#[cfg(unix)]
+fn detect_cuda_version_from_nvcc() -> Option<CudaVersion> {
+    let output = std::process::Command::new("nvcc")
+        .arg("--version")
         .output()
         .ok()?;
     if !output.status.success() { return None; }
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    // stdout could be like "12.4" or "12.8"; map to enum
-    match stdout {
-        s if s.starts_with("12.8") => Some(CudaVersion::Cuda128),
-        s if s.starts_with("12.4") => Some(CudaVersion::Cuda124),
-        s if s.starts_with("11.8") => Some(CudaVersion::Cuda118),
-        _ => None,
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Typical line: "Cuda compilation tools, release 12.4, V12.4.131"
+    for line in stdout.lines() {
+        let l = line.to_lowercase();
+        if l.contains("release") && l.contains("cuda compilation tools") {
+            // extract number after 'release '
+            if let Some(pos) = l.find("release") {
+                let rest = &l[pos + "release".len()..];
+                let rest = rest.trim().trim_start_matches(':').trim_start_matches(',').trim();
+                // rest starts like "12.4, v12.4.131"
+                let ver = rest.split(|c| c == ',' || c == ' ').next().unwrap_or("");
+                if ver.starts_with("12.8") { return Some(CudaVersion::Cuda128); }
+                if ver.starts_with("12.4") { return Some(CudaVersion::Cuda124); }
+                if ver.starts_with("11.8") { return Some(CudaVersion::Cuda118); }
+            }
+        }
     }
+    None
+}
+
+// Fallback: detect CUDA Toolkit installed on filesystem
+#[cfg(unix)]
+fn detect_cuda_version_from_filesystem() -> Option<CudaVersion> {
+    use std::fs;
+    use std::path::Path;
+    let vt = Path::new("/usr/local/cuda/version.txt");
+    if let Ok(content) = fs::read_to_string(vt) {
+        let lower = content.to_lowercase();
+        // lines like: CUDA Version 12.4.0
+        if lower.contains("12.8") { return Some(CudaVersion::Cuda128); }
+        if lower.contains("12.4") { return Some(CudaVersion::Cuda124); }
+        if lower.contains("11.8") { return Some(CudaVersion::Cuda118); }
+    }
+    None
 }

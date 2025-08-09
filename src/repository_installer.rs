@@ -217,7 +217,8 @@ impl RepositoryInstaller {
         // Install dependencies
         self.install_dependencies(&repo_path).await?;
 
-        // Generate startup script
+        // Generate startup script (Windows only for now)
+        #[cfg(windows)]
         self.generate_startup_script(&repo_path, &repo_info)?;
 
         // Send stats (non-fatal)
@@ -248,10 +249,13 @@ impl RepositoryInstaller {
         let _ = self._config_manager.save_config();
         self.install_dependencies(&repo_path).await?;
 
-        println!("[PortableSource] Generating start script...");
-        // Final save after script generation
-        let _ = self._config_manager.save_config();
-        self.generate_startup_script(&repo_path, &repo_info)?;
+        #[cfg(windows)]
+        {
+            println!("[PortableSource] Generating start script...");
+            // Final save after script generation
+            let _ = self._config_manager.save_config();
+            self.generate_startup_script(&repo_path, &repo_info)?;
+        }
 
         let _ = self.server_client.send_download_stats(&name);
 
@@ -261,24 +265,24 @@ impl RepositoryInstaller {
         Ok(())
     }
     
-    async fn clone_repository(&self, repo_url: &str, repo_path: &Path) -> Result<()> {
-        info!("Cloning repository to: {:?}", repo_path);
-        println!("[PortableSource] git clone {} -> {:?}", repo_url, repo_path);
-        let git_exe = self.get_git_executable();
-        let parent = repo_path.parent().ok_or_else(|| PortableSourceError::repository("Invalid repo path"))?;
-        fs::create_dir_all(parent)?;
-        // Clone directly into target directory to avoid nested folder names
-        let mut cmd = Command::new(git_exe);
-        cmd.current_dir(parent).arg("clone").arg(repo_url).arg(repo_path.file_name().unwrap());
-        run_with_progress(cmd, Some("Cloning repository"))?;
-        Ok(())
-    }
+    // Note: kept for potential future use
+    // async fn clone_repository(&self, repo_url: &str, repo_path: &Path) -> Result<()> {
+    //     info!("Cloning repository to: {:?}", repo_path);
+    //     println!("[PortableSource] git clone {} -> {:?}", repo_url, repo_path);
+    //     let git_exe = self.get_git_executable();
+    //     let parent = repo_path.parent().ok_or_else(|| PortableSourceError::repository("Invalid repo path"))?;
+    //     fs::create_dir_all(parent)?;
+    //     let mut cmd = Command::new(git_exe);
+    //     cmd.current_dir(parent).arg("clone").arg(repo_url).arg(repo_path.file_name().unwrap());
+    //     run_with_progress(cmd, Some("Cloning repository"))?;
+    //     Ok(())
+    // }
     
     async fn install_dependencies(&self, repo_path: &Path) -> Result<()> {
         info!("Installing dependencies for: {:?}", repo_path);
         let repo_name = repo_path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
 
-        // Ensure copied python environment exists
+        // Ensure project environment exists (Windows: copy portable python; Linux: create venv)
         self.create_venv_environment(&repo_name)?;
 
         // Try server installation plan
@@ -344,6 +348,7 @@ impl ServerApiClient {
         Self { server_url: server_url.trim_end_matches('/').to_string(), timeout_secs: 10 }
     }
 
+    #[allow(dead_code)]
     fn is_server_available(&self) -> bool {
         let url = format!("{}/api/repositories", self.server_url);
         let timeout = self.timeout_secs;
@@ -395,6 +400,7 @@ impl ServerApiClient {
         res
     }
 
+    #[allow(dead_code)]
     fn search_repositories(&self, _name: &str) -> Vec<serde_json::Value> {
         // Optional enhancement: implement when server supports search endpoint
         Vec::new()
@@ -489,6 +495,7 @@ impl MainFileFinder {
 struct RepositoryInfo { url: Option<String>, main_file: Option<String>, program_args: Option<String> }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct FallbackRepo { url: String, branch: Option<String>, main_file: Option<String>, program_args: Option<String> }
 
 fn default_fallback_repositories() -> HashMap<String, FallbackRepo> {
@@ -601,13 +608,27 @@ impl RepositoryInstaller {
         let install_path = cfg.install_path.clone();
         let envs_path = install_path.join("envs");
         let venv_path = envs_path.join(repo_name);
-        let ps_env_python = install_path.join("ps_env").join("python");
-        if !ps_env_python.exists() { return Err(PortableSourceError::installation(format!("Portable Python not found at: {:?}", ps_env_python))); }
         if venv_path.exists() { fs::remove_dir_all(&venv_path)?; }
-        info!("Creating environment by copying portable Python: {:?} -> {:?}", ps_env_python, venv_path);
-        copy_dir_recursive(&ps_env_python, &venv_path)?;
-        let python_exe = if cfg!(windows) { venv_path.join("python.exe") } else { venv_path.join("bin").join("python") };
-        if !python_exe.exists() { return Err(PortableSourceError::installation(format!("Python executable not found in {:?}", venv_path))); }
+
+        if cfg!(windows) {
+            // Windows: копируем портативный Python в envs/{repo}
+            let ps_env_python = install_path.join("ps_env").join("python");
+            if !ps_env_python.exists() { return Err(PortableSourceError::installation(format!("Portable Python not found at: {:?}", ps_env_python))); }
+            info!("Creating environment by copying portable Python: {:?} -> {:?}", ps_env_python, venv_path);
+            copy_dir_recursive(&ps_env_python, &venv_path)?;
+            let python_exe = venv_path.join("python.exe");
+            if !python_exe.exists() { return Err(PortableSourceError::installation(format!("Python executable not found in {:?}", venv_path))); }
+        } else {
+            // Linux: создаём venv при помощи системного python3
+            fs::create_dir_all(&envs_path)?;
+            let status = std::process::Command::new("python3")
+                .args(["-m", "venv", venv_path.to_string_lossy().as_ref()])
+                .status()
+                .map_err(|e| PortableSourceError::environment(format!("Failed to create venv: {}", e)))?;
+            if !status.success() {
+                return Err(PortableSourceError::environment("python3 -m venv failed"));
+            }
+        }
         Ok(())
     }
 
@@ -665,7 +686,8 @@ impl RepositoryInstaller {
             run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing PyTorch packages"))?;
         }
 
-        // 4) Triton (если присутствует)
+        // 4) Triton (если присутствует) — пропускаем на Linux, т.к. ставится безболезненно
+        #[cfg(windows)]
         if !plan.triton_packages.is_empty() {
             for pkg in &plan.triton_packages {
                 let mut pip_cmd = self.get_pip_executable(repo_name);
@@ -675,7 +697,8 @@ impl RepositoryInstaller {
             }
         }
 
-        // 5) InsightFace — строго в самом конце, с -U для согласования numpy
+        // 5) InsightFace — строго в самом конце, с -U для согласования numpy — пропускаем на Linux
+        #[cfg(windows)]
         if !plan.insightface_packages.is_empty() {
             for _p in &plan.insightface_packages {
                 self.handle_insightface_package(repo_name)?;
@@ -688,7 +711,11 @@ impl RepositoryInstaller {
     fn get_python_in_env(&self, repo_name: &str) -> PathBuf {
         let cfg = self._config_manager.get_config();
         let venv_path = cfg.install_path.join("envs").join(repo_name);
-        if cfg!(windows) { venv_path.join("python.exe") } else { venv_path.join("bin").join("python") }
+        if cfg!(windows) {
+            venv_path.join("python.exe")
+        } else {
+            venv_path.join("bin").join("python")
+        }
     }
 
     fn get_pip_executable(&self, repo_name: &str) -> Vec<String> {
@@ -802,9 +829,21 @@ impl RepositoryInstaller {
 
     fn get_default_torch_index_url(&self) -> String {
         let cfg = self._config_manager.get_config();
-        if let Some(gpu) = &cfg.gpu_config { if let Some(cuda) = &gpu.cuda_version {
-            return match cuda { crate::config::CudaVersion::Cuda128 => "https://download.pytorch.org/whl/cu128".into(), crate::config::CudaVersion::Cuda124 => "https://download.pytorch.org/whl/cu124".into(), crate::config::CudaVersion::Cuda118 => "https://download.pytorch.org/whl/cu118".into() };
-        }}
+        if let Some(gpu) = &cfg.gpu_config {
+            // Blackwell (RTX 50xx) — использовать nightly cu128
+            let name_up = gpu.name.to_uppercase();
+            let is_blackwell = name_up.contains("RTX 50") || format!("{:?}", gpu.generation).to_lowercase().contains("blackwell");
+            if is_blackwell {
+                return "https://download.pytorch.org/whl/nightly/cu128".into();
+            }
+            if let Some(cuda) = &gpu.cuda_version {
+                return match cuda {
+                    crate::config::CudaVersion::Cuda128 => "https://download.pytorch.org/whl/cu128".into(),
+                    crate::config::CudaVersion::Cuda124 => "https://download.pytorch.org/whl/cu124".into(),
+                    crate::config::CudaVersion::Cuda118 => "https://download.pytorch.org/whl/cu118".into(),
+                };
+            }
+        }
         "https://download.pytorch.org/whl/cpu".into()
     }
 
@@ -900,6 +939,7 @@ fn reset_hard_to(git_exe: &str, repo_path: &Path, target: &str) -> Result<()> {
 enum PackageType { Regular, Torch, Onnxruntime, Insightface, Triton }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct PackageInfo {
     name: String,
     version: Option<String>,
@@ -941,7 +981,7 @@ impl<'a> RequirementsAnalyzer<'a> {
     }
 
     fn parse_requirement_line(&self, line_in: &str) -> Option<PackageInfo> {
-        let mut line = line_in.split('#').next().unwrap_or("").trim().to_string();
+        let line = line_in.split('#').next().unwrap_or("").trim().to_string();
         if line.is_empty() || line.starts_with('-') || line.contains("--index-url") || line.contains("--extra-index-url") { return None; }
         // basic parse: name[extras]==version
         let (name_part, version) = if let Some(idx) = line.find(|c: char| "=><!~".contains(c)) {

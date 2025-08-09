@@ -1277,6 +1277,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "indicatif",
+ "libc",
  "log",
  "regex",
  "reqwest",

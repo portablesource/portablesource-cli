@@ -42,19 +42,35 @@ async fn run(cli: Cli) -> Result<()> {
         config_manager.set_install_path(validated_path.clone())?;
         validated_path
     } else {
-        // Default to current directory + portablesource
+        // Default path: Windows -> current_dir/portablesource; Linux -> /root/portablesource
+        #[cfg(windows)]
         let default_path = std::env::current_dir()?.join("portablesource");
+        #[cfg(unix)]
+        let default_path = PathBuf::from("/root/portablesource");
         let validated_path = utils::validate_and_create_path(&default_path)?;
         config_manager.set_install_path(validated_path.clone())?;
         validated_path
     };
     
     // Ensure config file is anchored to install_path, not AppData
+    // На Linux временно не используем конфиг-файл (по требованию)
+    #[cfg(windows)]
     config_manager.set_config_path_to_install_dir();
     info!("Using install path: {:?}", install_path);
+    #[cfg(not(windows))]
+    {
+        // На Linux работаем как менеджер репозиториев без постоянного конфига
+        // (используем только в памяти ConfigManager)
+    }
     // Hydrate config from current environment (no extra save here)
     ensure_config_initialized(&mut config_manager)?;
     config_manager.hydrate_from_existing_env()?;
+
+    // Linux: best-effort подготовка системы (root предпочтителен)
+    #[cfg(unix)]
+    {
+        let _ = utils::prepare_linux_system();
+    }
     
     // Handle commands
     match cli.command.as_ref() {
