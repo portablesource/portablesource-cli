@@ -1,6 +1,6 @@
 [package]
 name = "portablesource-rs"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 authors = ["NeuroDonu <admin@neurodonu.dev>"]
 description = "Portable AI/ML Environment Manager - Rust implementation"
