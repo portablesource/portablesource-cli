@@ -78,7 +78,7 @@ async fn run(cli: Cli) -> Result<()> {
             install_repository(repo, &install_path, &config_manager).await
         }
         Some(Commands::UpdateRepo { repo }) => {
-            update_repository(repo, &install_path, &config_manager).await
+            update_repository(repo.clone(), &install_path, &config_manager).await
         }
         Some(Commands::DeleteRepo { repo }) => {
             delete_repository(repo, &install_path, &config_manager)
@@ -163,9 +163,38 @@ async fn install_repository(repo: &str, install_path: &PathBuf, config_manager: 
     installer.install_repository(repo).await
 }
 
-async fn update_repository(repo: &str, install_path: &PathBuf, config_manager: &ConfigManager) -> Result<()> {
+async fn update_repository(repo: Option<String>, install_path: &PathBuf, config_manager: &ConfigManager) -> Result<()> {
     let mut installer = RepositoryInstaller::new(install_path.clone(), config_manager.clone());
-    installer.update_repository(repo).await
+    if let Some(name) = repo {
+        return installer.update_repository(&name).await;
+    }
+
+    // Simple TUI: показать список и выбрать номер
+    let labeled = installer.list_repositories_labeled()?;
+    let names: Vec<String> = labeled.iter().map(|(raw, _)| raw.clone()).collect();
+    if names.is_empty() {
+        println!("No repositories installed");
+        return Ok(());
+    }
+
+    println!("Select repository to update:\n");
+    for (i, item) in labeled.iter().enumerate() {
+        println!("  [{}] {}", i + 1, item.1);
+    }
+    println!("\nEnter number (or 0 to cancel): ");
+
+    use std::io;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).ok();
+    let trimmed = input.trim();
+    let choice: usize = trimmed.parse().unwrap_or(0);
+    if choice == 0 || choice > names.len() {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    let selected = &names[choice - 1];
+    installer.update_repository(selected).await
 }
 
 fn delete_repository(repo: &str, install_path: &PathBuf, config_manager: &ConfigManager) -> Result<()> {

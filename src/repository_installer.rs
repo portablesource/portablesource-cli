@@ -123,7 +123,7 @@ impl RepositoryInstaller {
         Ok(())
     }
     
-    /// List installed repositories
+    /// List installed repositories with source suffixes
     pub fn list_repositories(&self) -> Result<Vec<String>> {
         let repos_path = self.install_path.join("repos");
         
@@ -137,13 +137,65 @@ impl RepositoryInstaller {
             let entry = entry?;
             if entry.file_type()?.is_dir() {
                 if let Some(name) = entry.file_name().to_str() {
-                    repositories.push(name.to_string());
+                    let repo_dir = entry.path();
+                    let link_file = repo_dir.join("link.txt");
+                    let suffix = if link_file.exists() {
+                        let link = fs::read_to_string(&link_file).unwrap_or_default();
+                        let link_lower = link.to_lowercase();
+                        if link_lower.contains("github.com") { " [From github]" } else { " [From git]" }
+                    } else {
+                        " [From server]"
+                    };
+                    repositories.push(format!("{}{}", name, suffix));
                 }
             }
         }
         
         repositories.sort();
         Ok(repositories)
+    }
+
+    /// List raw repository folder names (no suffixes)
+    pub fn list_repository_names_raw(&self) -> Result<Vec<String>> {
+        let repos_path = self.install_path.join("repos");
+        if !repos_path.exists() { return Ok(Vec::new()); }
+        let mut repositories = Vec::new();
+        for entry in std::fs::read_dir(&repos_path)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                if let Some(name) = entry.file_name().to_str() {
+                    repositories.push(name.to_string());
+                }
+            }
+        }
+        repositories.sort();
+        Ok(repositories)
+    }
+
+    /// List repositories with labels, preserving mapping to raw names, sorted by name
+    pub fn list_repositories_labeled(&self) -> Result<Vec<(String, String)>> {
+        let repos_path = self.install_path.join("repos");
+        if !repos_path.exists() { return Ok(Vec::new()); }
+        let mut items: Vec<(String, String)> = Vec::new();
+        for entry in std::fs::read_dir(&repos_path)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                if let Some(name) = entry.file_name().to_str() {
+                    let repo_dir = entry.path();
+                    let link_file = repo_dir.join("link.txt");
+                    let suffix = if link_file.exists() {
+                        let link = fs::read_to_string(&link_file).unwrap_or_default();
+                        let link_lower = link.to_lowercase();
+                        if link_lower.contains("github.com") { " [From github]" } else { " [From git]" }
+                    } else {
+                        " [From server]"
+                    };
+                    items.push((name.to_string(), format!("{}{}", name, suffix)));
+                }
+            }
+        }
+        items.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(items)
     }
     
     async fn install_from_url(&mut self, repo_url: &str) -> Result<()> {
@@ -158,8 +210,9 @@ impl RepositoryInstaller {
         let repo_info = RepositoryInfo { url: Some(repo_url.to_string()), main_file: None, program_args: None };
         self.clone_or_update_repository(&repo_info, &repo_path).await?;
 
-        // Create URL marker
+        // Create URL marker and link.txt (source)
         let _ = create_url_marker(&repo_path, &repo_name, repo_url);
+        let _ = write_link_file(&repo_path, repo_url);
 
         // Install dependencies
         self.install_dependencies(&repo_path).await?;
@@ -459,6 +512,13 @@ fn create_url_marker(repo_path: &Path, repo_name: &str, repo_url: &str) -> Resul
     Ok(())
 }
 
+fn write_link_file(repo_path: &Path, link: &str) -> Result<()> {
+    let marker = repo_path.join("link.txt");
+    let mut f = fs::File::create(marker)?;
+    f.write_all(link.as_bytes())?;
+    Ok(())
+}
+
 impl RepositoryInstaller {
     fn apply_special_setup(&self, repo_name: &str, _repo_path: &Path) -> Result<()> {
         match repo_name.to_lowercase().as_str() {
@@ -560,53 +620,8 @@ impl RepositoryInstaller {
         // Ensure uv if available
         let uv_available = self.install_uv_in_venv(repo_name).unwrap_or(false);
 
-        // Torch packages via pip with forced reinstall and index-url
-        if !plan.torch_packages.is_empty() {
-            let mut pip_cmd = self.get_pip_executable(repo_name);
-            pip_cmd.push("install".into());
-            pip_cmd.push("--force-reinstall".into());
-            // torch index url
-            if let Some(index) = plan.torch_index_url.as_ref() {
-                pip_cmd.push("--index-url".into());
-                pip_cmd.push(index.clone());
-            }
-            for p in &plan.torch_packages { pip_cmd.push(p.to_string()); }
-            run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing PyTorch packages"))?;
-        }
-
-        // ONNX package via pip; possibly pinned name
-        if !plan.onnx_packages.is_empty() {
-            let package_name = plan.onnx_package_name.clone().unwrap_or_else(|| "onnxruntime".into());
-            // if one of onnx packages has version, use it
-            let mut version_suffix = String::new();
-            if let Some(pkg) = plan.onnx_packages.iter().find(|p| p.name == "onnxruntime" && p.version.is_some()) {
-                version_suffix = format!("=={}", pkg.version.clone().unwrap());
-            }
-            let mut pip_cmd = self.get_pip_executable(repo_name);
-            pip_cmd.extend(["install".into(), format!("{}{}", package_name, version_suffix)]);
-            run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing ONNX package"))?;
-        }
-
-        // InsightFace special handling
-        if !plan.insightface_packages.is_empty() {
-            for _p in &plan.insightface_packages {
-                self.handle_insightface_package(repo_name)?;
-            }
-        }
-
-        // Triton packages basic handling
-        if !plan.triton_packages.is_empty() {
-            for pkg in &plan.triton_packages {
-                let mut pip_cmd = self.get_pip_executable(repo_name);
-                let spec = if let Some(v) = &pkg.version { format!("{}=={}", pkg.name, v) } else { pkg.name.clone() };
-                pip_cmd.extend(["install".into(), spec]);
-                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing Triton package"))?;
-            }
-        }
-
-        // Regular packages via uv if available, else pip -r
+        // 1) Regular packages via uv (prefer) или pip -r — сначала базовые зависимости
         if !plan.regular_packages.is_empty() {
-            // write temp requirements with regular packages
             let tmp = requirements.parent().unwrap_or_else(|| Path::new(".")).join("requirements_regular_temp.txt");
             {
                 let mut file = fs::File::create(&tmp)?;
@@ -621,9 +636,50 @@ impl RepositoryInstaller {
                 pip_cmd.extend(["install".into(), "-r".into(), tmp.to_string_lossy().to_string()]);
                 run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing regular packages with pip"))
             };
-            // cleanup
             let _ = fs::remove_file(&tmp);
             res?;
+        }
+
+        // 2) ONNX пакеты
+        if !plan.onnx_packages.is_empty() {
+            let package_name = plan.onnx_package_name.clone().unwrap_or_else(|| "onnxruntime".into());
+            let mut version_suffix = String::new();
+            if let Some(pkg) = plan.onnx_packages.iter().find(|p| p.name == "onnxruntime" && p.version.is_some()) {
+                version_suffix = format!("=={}", pkg.version.clone().unwrap());
+            }
+            let mut pip_cmd = self.get_pip_executable(repo_name);
+            pip_cmd.extend(["install".into(), format!("{}{}", package_name, version_suffix)]);
+            run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing ONNX package"))?;
+        }
+
+        // 3) Torch пакеты (через pip) с нужным индексом
+        if !plan.torch_packages.is_empty() {
+            let mut pip_cmd = self.get_pip_executable(repo_name);
+            pip_cmd.push("install".into());
+            pip_cmd.push("--force-reinstall".into());
+            if let Some(index) = plan.torch_index_url.as_ref() {
+                pip_cmd.push("--index-url".into());
+                pip_cmd.push(index.clone());
+            }
+            for p in &plan.torch_packages { pip_cmd.push(p.to_string()); }
+            run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing PyTorch packages"))?;
+        }
+
+        // 4) Triton (если присутствует)
+        if !plan.triton_packages.is_empty() {
+            for pkg in &plan.triton_packages {
+                let mut pip_cmd = self.get_pip_executable(repo_name);
+                let spec = if let Some(v) = &pkg.version { format!("{}=={}", pkg.name, v) } else { pkg.name.clone() };
+                pip_cmd.extend(["install".into(), spec]);
+                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing Triton package"))?;
+            }
+        }
+
+        // 5) InsightFace — строго в самом конце, с -U для согласования numpy
+        if !plan.insightface_packages.is_empty() {
+            for _p in &plan.insightface_packages {
+                self.handle_insightface_package(repo_name)?;
+            }
         }
 
         Ok(())
@@ -944,11 +1000,11 @@ impl RepositoryInstaller {
         // Windows prebuilt wheel; fallback to pip package
         if cfg!(windows) {
             let mut pip_cmd = self.get_pip_executable(repo_name);
-            pip_cmd.extend(["install".into(), "https://huggingface.co/hanamizuki-ai/pypi-wheels/resolve/main/insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl".into()]);
+            pip_cmd.extend(["install".into(), "-U".into(), "https://huggingface.co/hanamizuki-ai/pypi-wheels/resolve/main/insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl".into()]);
             run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing insightface wheel"))
         } else {
             let mut pip_cmd = self.get_pip_executable(repo_name);
-            pip_cmd.extend(["install".into(), "insightface".into()]);
+            pip_cmd.extend(["install".into(), "-U".into(), "insightface".into()]);
             run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing insightface"))
         }
     }

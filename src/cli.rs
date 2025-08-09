@@ -42,8 +42,8 @@ pub enum Commands {
     
     /// Update repository
     UpdateRepo {
-        /// Repository name
-        repo: String,
+        /// Repository name (optional; if omitted, a TUI selector will be shown)
+        repo: Option<String>,
     },
     
     /// Delete repository
