@@ -152,10 +152,13 @@ async fn setup_environment(install_path: &PathBuf, config_manager: &mut ConfigMa
         warn!("No GPU detected, using CPU backend");
     }
     
-    // Mark environment as setup
+    // Mark environment as setup (сохранение один раз в конце)
     config_manager.get_config_mut().environment_setup_completed = true;
-    config_manager.save_config()?;
+    // Не сохраняем здесь повторно: итоговый save будет ниже, после GPU-конфига
     
+    // Сохранение конфигурации ровно один раз после всех шагов
+    config_manager.save_config()?;
+
     println!("Environment setup completed successfully!");
     Ok(())
 }

@@ -7,7 +7,7 @@ use crate::{Result, PortableSourceError};
 use crate::config::{ConfigManager, ToolLinks};
 use url::Url;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Seek, SeekFrom};
+use std::io::{self, Seek, SeekFrom, Read, BufRead, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use crate::gpu::GpuDetector;
@@ -15,6 +15,8 @@ use std::collections::HashMap;
 use std::path::{PathBuf};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use indicatif::{ProgressBar, ProgressStyle};
+use std::time::Instant;
 
 #[derive(Clone, Debug)]
 struct PortableToolSpec {
@@ -97,7 +99,7 @@ impl PortableEnvironmentManager {
     // --- Downloads ---
     fn download_with_resume(&self, url: &str, destination: &Path) -> Result<()> {
         use reqwest::blocking::Client;
-        use reqwest::header::{RANGE};
+        use reqwest::header::{RANGE, CONTENT_RANGE};
 
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(600))
@@ -127,7 +129,22 @@ impl PortableEnvironmentManager {
                 // truncate file
                 let _ = fs::remove_file(destination);
                 let mut f = OpenOptions::new().create(true).write(true).open(destination)?;
-                io::copy(&mut resp, &mut f)?;
+                // Setup progress bar
+                let total_opt = resp.content_length();
+                let file_name = destination.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "download".into());
+                let pb = create_download_progress_bar(total_opt, &format!("Downloading {}", file_name));
+                let mut downloaded: u64 = 0;
+                let start = Instant::now();
+                let mut buf = [0u8; 64 * 1024];
+                loop {
+                    let n = resp.read(&mut buf)?;
+                    if n == 0 { break; }
+                    f.write_all(&buf[..n])?;
+                    downloaded += n as u64;
+                    if let Some(total) = total_opt { pb.set_position(downloaded.min(total)); } else { pb.set_position(downloaded); }
+                    update_download_pb_message(&pb, downloaded, total_opt, start);
+                }
+                finish_progress(pb, &format!("Downloaded {}", file_name));
                 return Ok(());
             } else {
                 return Err(PortableSourceError::environment(format!(
@@ -144,14 +161,33 @@ impl PortableEnvironmentManager {
         } else {
             OpenOptions::new().create(true).write(true).open(destination)?
         };
-        io::copy(&mut resp, &mut file)?;
+        // Setup progress bar with total length if available
+        let total_opt = match resp.headers().get(CONTENT_RANGE) {
+            Some(hv) => parse_total_from_content_range(hv.to_str().unwrap_or("")),
+            None => resp.content_length().map(|len| existing_len + len),
+        };
+        let file_name = destination.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "download".into());
+        let pb = create_download_progress_bar(total_opt, &format!("Downloading {}", file_name));
+        if let Some(total) = total_opt { pb.set_position(existing_len.min(total)); }
+        let mut downloaded = existing_len;
+        let start = Instant::now();
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = resp.read(&mut buf)?;
+            if n == 0 { break; }
+            file.write_all(&buf[..n])?;
+            downloaded += n as u64;
+            if let Some(total) = total_opt { pb.set_position(downloaded.min(total)); } else { pb.set_position(downloaded); }
+            update_download_pb_message(&pb, downloaded, total_opt, start);
+        }
+        finish_progress(pb, &format!("Downloaded {}", file_name));
         Ok(())
     }
 
     // Static helpers for parallel tasks
     fn download_with_resume_static(url: String, destination: PathBuf) -> Result<()> {
         use reqwest::blocking::Client;
-        use reqwest::header::RANGE;
+        use reqwest::header::{RANGE, CONTENT_RANGE};
         let client = Client::builder().timeout(std::time::Duration::from_secs(600)).build()?;
         if let Some(parent) = destination.parent() { fs::create_dir_all(parent)?; }
         let existing_len: u64 = if destination.exists() { destination.metadata()?.len() } else { 0 };
@@ -165,7 +201,21 @@ impl PortableEnvironmentManager {
             }
             let _ = fs::remove_file(&destination);
             let mut f = OpenOptions::new().create(true).write(true).open(&destination)?;
-            std::io::copy(&mut resp, &mut f)?;
+            let total_opt = resp.content_length();
+            let file_name = destination.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "download".into());
+            let pb = create_download_progress_bar(total_opt, &format!("Downloading {}", file_name));
+            let mut downloaded: u64 = 0;
+            let start = Instant::now();
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                let n = resp.read(&mut buf)?;
+                if n == 0 { break; }
+                f.write_all(&buf[..n])?;
+                downloaded += n as u64;
+                if let Some(total) = total_opt { pb.set_position(downloaded.min(total)); } else { pb.set_position(downloaded); }
+                update_download_pb_message(&pb, downloaded, total_opt, start);
+            }
+            finish_progress(pb, &format!("Downloaded {}", file_name));
             return Ok(());
         }
         let mut file = if destination.exists() && existing_len > 0 {
@@ -173,7 +223,25 @@ impl PortableEnvironmentManager {
             use std::io::Seek; use std::io::SeekFrom;
             f.seek(SeekFrom::End(0))?; f
         } else { OpenOptions::new().create(true).write(true).open(&destination)? };
-        std::io::copy(&mut resp, &mut file)?;
+        let total_opt = match resp.headers().get(CONTENT_RANGE) {
+            Some(hv) => parse_total_from_content_range(hv.to_str().unwrap_or("")),
+            None => resp.content_length().map(|len| existing_len + len),
+        };
+        let file_name = destination.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "download".into());
+        let pb = create_download_progress_bar(total_opt, &format!("Downloading {}", file_name));
+        if let Some(total) = total_opt { pb.set_position(existing_len.min(total)); }
+        let mut downloaded = existing_len;
+        let start = Instant::now();
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = resp.read(&mut buf)?;
+            if n == 0 { break; }
+            file.write_all(&buf[..n])?;
+            downloaded += n as u64;
+            if let Some(total) = total_opt { pb.set_position(downloaded.min(total)); } else { pb.set_position(downloaded); }
+            update_download_pb_message(&pb, downloaded, total_opt, start);
+        }
+        finish_progress(pb, &format!("Downloaded {}", file_name));
         Ok(())
     }
 
@@ -200,15 +268,36 @@ impl PortableEnvironmentManager {
 
     fn extract_with_7z_binary(&self, archive_path: &Path, extract_to: &Path) -> Result<()> {
         let seven_zip = self.ensure_7z_binary()?;
+        // Progress bar (0-100%)
+        let file_label = archive_path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "archive".into());
+        let pb = create_extract_progress_bar(&format!("Extracting {}", file_label));
         // 7z.exe prefers order: x <archive> -y -o<dir>
-        let status = Command::new(&seven_zip)
+        let mut child = Command::new(&seven_zip)
             .arg("x")
             .arg(archive_path.to_string_lossy().to_string())
             .arg("-y")
             .arg(format_7z_out_arg(extract_to))
-            .stdout(Stdio::null()).stderr(Stdio::null())
-            .status()?;
-        if status.success() { Ok(()) } else { Err(PortableSourceError::environment("7z.exe extraction failed")) }
+            .arg("-bsp1") // show progress to stdout
+            .arg("-bso1") // route normal output to stdout
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        if let Some(out) = child.stdout.take() {
+            let mut reader = io::BufReader::new(out);
+            let mut buf = String::new();
+            while reader.read_line(&mut buf).unwrap_or(0) > 0 {
+                if let Some(p) = extract_percent(&buf) { pb.set_position(p as u64); }
+                buf.clear();
+            }
+        }
+        let status = child.wait()?;
+        if status.success() {
+            finish_progress(pb, &format!("Extracted {}", file_label));
+            Ok(())
+        } else {
+            pb.abandon_with_message(format!("Extraction failed for {}", file_label));
+            Err(PortableSourceError::environment("7z.exe extraction failed"))
+        }
     }
 
     fn extract_with_7z_binary_static(archive_path: &Path, extract_to: &Path) -> Result<()> {
@@ -219,15 +308,36 @@ impl PortableEnvironmentManager {
             let url = crate::config::ToolLinks::SevenZip.url();
             Self::download_with_resume_static(url.to_string(), seven_zip_path.clone())?;
         }
+        // Progress bar (0-100%)
+        let file_label = archive_path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "archive".into());
+        let pb = create_extract_progress_bar(&format!("Extracting {}", file_label));
         // 7z.exe prefers order: x <archive> -y -o<dir>
-        let status = Command::new(&seven_zip_path)
+        let mut child = Command::new(&seven_zip_path)
             .arg("x")
             .arg(archive_path.to_string_lossy().to_string())
             .arg("-y")
             .arg(format_7z_out_arg(extract_to))
-            .stdout(Stdio::null()).stderr(Stdio::null())
-            .status()?;
-        if status.success() { Ok(()) } else { Err(PortableSourceError::environment("7z.exe extraction failed")) }
+            .arg("-bsp1")
+            .arg("-bso1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        if let Some(out) = child.stdout.take() {
+            let mut reader = io::BufReader::new(out);
+            let mut buf = String::new();
+            while reader.read_line(&mut buf).unwrap_or(0) > 0 {
+                if let Some(p) = extract_percent(&buf) { pb.set_position(p as u64); }
+                buf.clear();
+            }
+        }
+        let status = child.wait()?;
+        if status.success() {
+            finish_progress(pb, &format!("Extracted {}", file_label));
+            Ok(())
+        } else {
+            pb.abandon_with_message(format!("Extraction failed for {}", file_label));
+            Err(PortableSourceError::environment("7z.exe extraction failed"))
+        }
     }
     
     fn install_portable_tool(&self, key: &str) -> Result<()> {
@@ -341,27 +451,34 @@ impl PortableEnvironmentManager {
     }
 
     fn verify_environment_tools(&self) -> Result<bool> {
-        let mut tools: Vec<(&str, Vec<&str>)> = vec![
-            ("python", vec!["--version"]),
-            ("git", vec!["--version"]),
-            ("ffmpeg", vec!["-version"]),
+        // Формируем команды с приоритетом на портативные бинарники
+        let mut tools: Vec<(&str, Vec<&str>, Option<PathBuf>)> = vec![
+            ("python", vec!["--version"], self.get_python_executable()),
+            ("git", vec!["--version"], self.get_git_executable()),
+            ("ffmpeg", vec!["-version"], self.get_ffmpeg_executable()),
         ];
-        if let Ok(list) = self.gpu_detector.detect_gpu_wmi() {
-            if list.iter().any(|g| g.gpu_type == crate::gpu::GpuType::Nvidia) {
-                // Добавляем nvcc в проверку только если он реально присутствует
-                let nvcc_path = self.ps_env_path.join("CUDA").join("bin").join(if cfg!(windows) { "nvcc.exe" } else { "nvcc" });
-                if nvcc_path.exists() { tools.push(("nvcc", vec!["--version"])); }
-            }
+        // Определяем ожидание CUDA (по конфигу) и наличие портативной CUDA
+        let mut expect_cuda = false;
+        if let Some(gpu) = &self.config_manager.get_config().gpu_config {
+            if gpu.recommended_backend.contains("cuda") { expect_cuda = true; }
+        }
+        let nvcc_path = self.ps_env_path.join("CUDA").join("bin").join(if cfg!(windows) { "nvcc.exe" } else { "nvcc" });
+        if nvcc_path.exists() {
+            tools.push(("nvcc", vec!["--version"], Some(nvcc_path)));
         }
 
         let mut all_ok = true;
-        for (tool, args) in tools {
-            let cmd: Vec<String> = std::iter::once(tool.to_string()).chain(args.into_iter().map(|s| s.to_string())).collect();
+        for (tool, args, override_path) in tools {
+            let cmd: Vec<String> = match override_path {
+                Some(path) => std::iter::once(path.to_string_lossy().to_string()).chain(args.into_iter().map(|s| s.to_string())).collect(),
+                None => std::iter::once(tool.to_string()).chain(args.into_iter().map(|s| s.to_string())).collect(),
+            };
             match self.run_in_activated_environment(&cmd, None) {
                 Ok(output) => {
                     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                    let version = self.extract_version_from_output(tool, &stdout);
+                    let text = if stdout.trim().is_empty() { &stderr } else { &stdout };
+                    let version = self.extract_version_from_output(tool, text);
                     if version != "Unknown version" {
                         log::info!("[OK] {}: {}", tool, version);
                     } else {
@@ -374,6 +491,15 @@ impl PortableEnvironmentManager {
                     log::error!("[ERROR] {}: Exception occurred - {}", tool, e);
                     all_ok = false;
                 }
+            }
+        }
+
+        // Явная проверка CUDA, даже если nvcc отсутствует
+        if expect_cuda {
+            let cuda_dir = self.ps_env_path.join("CUDA");
+            if !cuda_dir.exists() || !cuda_dir.join("bin").exists() {
+                log::warn!("[WARN] cuda: CUDA not installed in {:?}", cuda_dir);
+                all_ok = false;
             }
         }
         Ok(all_ok)
@@ -431,32 +557,29 @@ impl PortableEnvironmentManager {
             println!("[Setup] Total steps: {}", total_steps);
         }
 
-        // Create task handles
-        let mut handles = Vec::new();
-        let total_c = total_steps; // captured total for closures
+        // Переходим на последовательную установку для стабильного вывода прогресса
+        let total_c = total_steps; // используем для сообщений
 
         if let Some((link, expected_folder)) = cuda_plan {
             // Skip CUDA task if already installed
             if !self.is_cuda_installed() {
-            let ps_env = self.ps_env_path.clone();
-            let archive_path = ps_env.join(format!(
-                "CUDA_{}.7z",
-                expected_folder.trim_start_matches("cuda_").to_uppercase()
-            ));
-            let completed_c = completed.clone();
-            let print_lock_c = print_lock.clone();
-            handles.push(tokio::task::spawn_blocking(move || {
+                let ps_env = self.ps_env_path.clone();
+                let archive_path = ps_env.join(format!(
+                    "CUDA_{}.7z",
+                    expected_folder.trim_start_matches("cuda_").to_uppercase()
+                ));
                 {
-                    let _g = print_lock_c.lock().unwrap();
-                    let done = completed_c.load(Ordering::SeqCst);
+                    let _g = print_lock.lock().unwrap();
+                    let done = completed.load(Ordering::SeqCst);
                     println!("[Setup] Downloading CUDA archive... (step {}/{})", done + 1, total_c);
                 }
                 PortableEnvironmentManager::download_with_resume_static(link, archive_path.clone())?;
-                completed_c.fetch_add(1, Ordering::SeqCst);
+                completed.fetch_add(1, Ordering::SeqCst);
                 {
-                    let _g = print_lock_c.lock().unwrap();
-                    println!("[Setup] CUDA downloaded.");
-                    println!("[Setup] Extracting CUDA... (next step)");
+                    let _g = print_lock.lock().unwrap();
+                    let done = completed.load(Ordering::SeqCst);
+                    println!("[Setup] Progress: {}/{} ({:.0}%)", done, total_c, (done as f32/ total_c as f32)*100.0);
+                    println!("[Setup] CUDA downloaded.\n[Setup] Extracting CUDA... (next step)");
                 }
                 let temp_extract = ps_env.join("__cuda_extract_temp__");
                 if temp_extract.exists() { let _ = fs::remove_dir_all(&temp_extract); }
@@ -468,19 +591,17 @@ impl PortableEnvironmentManager {
                 fs::rename(&extracted_sub, &cuda_dir)?;
                 let _ = fs::remove_dir_all(&temp_extract);
                 let _ = fs::remove_file(&archive_path);
-                completed_c.fetch_add(1, Ordering::SeqCst);
+                completed.fetch_add(1, Ordering::SeqCst);
                 {
-                    let _g = print_lock_c.lock().unwrap();
+                    let _g = print_lock.lock().unwrap();
+                    let done = completed.load(Ordering::SeqCst);
                     println!("[Setup] CUDA extracted.");
+                    println!("[Setup] Progress: {}/{} ({:.0}%)", done, total_c, (done as f32/ total_c as f32)*100.0);
                 }
-                // Emit final progress update for CUDA step completion
-                let _ = completed_c.load(Ordering::SeqCst);
-                Ok::<(), PortableSourceError>(())
-            }));
             }
         }
 
-        // Other tools in parallel
+        // Other tools — последовательная установка для корректного отображения прогресса
         for key in tools_to_install {
             if let Some(spec) = self.tool_specs.get(key) {
                 let url = spec.url.clone();
@@ -490,51 +611,43 @@ impl PortableEnvironmentManager {
                     .unwrap_or_else(|| format!("{}.7z", spec.name));
                 let ps_env = self.ps_env_path.clone();
                 let exe_rel = spec.executable_path.clone();
-                let completed_t = completed.clone();
-                let print_lock_t = print_lock.clone();
-                handles.push(tokio::task::spawn_blocking(move || {
-                    {
-                        let _g = print_lock_t.lock().unwrap();
-                        let done = completed_t.load(Ordering::SeqCst);
-                        println!("[Setup] Downloading {}... (step {}/{})", archive_name, done + 1, total_c);
-                    }
-                    let archive_path = ps_env.join(&archive_name);
-                    PortableEnvironmentManager::download_with_resume_static(url, archive_path.clone())?;
-                    completed_t.fetch_add(1, Ordering::SeqCst);
-                    {
-                        let _g = print_lock_t.lock().unwrap();
-                        println!("[Setup] Extracting {}...", archive_name);
-                    }
-                    PortableEnvironmentManager::extract_7z_static(archive_path.clone(), ps_env.clone())?;
-                    let _ = fs::remove_file(&archive_path);
-                    let exe_path = ps_env.join(&exe_rel);
-                    if !exe_path.exists() {
-                        return Err(PortableSourceError::environment(format!("Executable not found: {:?}", exe_path)));
-                    }
-                    completed_t.fetch_add(1, Ordering::SeqCst);
-                    {
-                        let _g = print_lock_t.lock().unwrap();
-                        println!("[Setup] {} installed.", exe_rel);
-                    }
-                    // No callback here (this variant prints to stdout only)
-                    Ok::<(), PortableSourceError>(())
-                }));
+                {
+                    let _g = print_lock.lock().unwrap();
+                    let done = completed.load(Ordering::SeqCst);
+                    println!("[Setup] Downloading {}... (step {}/{})", archive_name, done + 1, total_c);
+                }
+                let archive_path = ps_env.join(&archive_name);
+                PortableEnvironmentManager::download_with_resume_static(url, archive_path.clone())?;
+                completed.fetch_add(1, Ordering::SeqCst);
+                {
+                    let _g = print_lock.lock().unwrap();
+                    let done = completed.load(Ordering::SeqCst);
+                    println!("[Setup] Progress: {}/{} ({:.0}%)", done, total_c, (done as f32/ total_c as f32)*100.0);
+                    println!("[Setup] Extracting {}...", archive_name);
+                }
+                PortableEnvironmentManager::extract_7z_static(archive_path.clone(), ps_env.clone())?;
+                let _ = fs::remove_file(&archive_path);
+                let exe_path = ps_env.join(&exe_rel);
+                if !exe_path.exists() {
+                    return Err(PortableSourceError::environment(format!("Executable not found: {:?}", exe_path)));
+                }
+                completed.fetch_add(1, Ordering::SeqCst);
+                {
+                    let _g = print_lock.lock().unwrap();
+                    let done = completed.load(Ordering::SeqCst);
+                    println!("[Setup] {} installed.", exe_rel);
+                    println!("[Setup] Progress: {}/{} ({:.0}%)", done, total_c, (done as f32/ total_c as f32)*100.0);
+                }
             }
         }
 
-        // Await all tasks with progress print (avoid duplicate prints)
+        // Итоговая печать прогресса (только если не было 100%)
         let total = total_steps;
-        let mut last_printed_done: usize = 0;
-        for h in handles {
-            let res = h.await.map_err(|e| PortableSourceError::environment(format!("Join error: {}", e)))?;
-            if let Err(err) = res { return Err(err); }
-            let done = completed.load(Ordering::SeqCst);
-            if done != last_printed_done {
-                last_printed_done = done;
-                let pct = if total > 0 { (done as f32 / total as f32) * 100.0 } else { 100.0 };
-                let _g = print_lock.lock().unwrap();
-                println!("[Setup] Progress: {}/{} ({:.0}%)", done, total, pct);
-            }
+        let done = completed.load(Ordering::SeqCst);
+        if done < total {
+            let pct = if total > 0 { (done as f32 / total as f32) * 100.0 } else { 100.0 };
+            let _g = print_lock.lock().unwrap();
+            println!("[Setup] Progress: {}/{} ({:.0}%)", done, total, pct);
         }
 
         // Ensure final 100% line if not printed
@@ -547,14 +660,16 @@ impl PortableEnvironmentManager {
             }
         }
 
+        //
+
         // Configure CUDA paths if present
         if let Some(gpu) = &cfg_now.gpu_config { if gpu.cuda_version.is_some() && gpu.recommended_backend.contains("cuda") { cfgm.configure_cuda_paths(); } }
 
         // Verify tools
         if !self.verify_environment_tools()? { return Err(PortableSourceError::environment("Environment tools verification failed")); }
 
-        // Mark completed
-        cfgm.mark_environment_setup_completed(true)?;
+        // Mark completed (без немедленного сохранения)
+        cfgm.get_config_mut().environment_setup_completed = true;
         Ok(())
     }
 
@@ -915,6 +1030,83 @@ fn sanitize_windows_path_for_7z(path: &Path) -> String {
 fn format_7z_out_arg(path: &Path) -> String {
     let s = sanitize_windows_path_for_7z(path);
     if s.contains(' ') { format!("-o\"{}\"", s) } else { format!("-o{}", s) }
+}
+
+// ===== Progress helpers =====
+fn create_download_progress_bar(total_opt: Option<u64>, prefix: &str) -> ProgressBar {
+    match total_opt {
+        Some(total) if total > 0 => {
+            let pb = ProgressBar::new(total);
+            let style = ProgressStyle::with_template("{prefix:.bold} [{bar:40.cyan/blue}] {percent:>3}% {msg} ETA {eta}")
+                .unwrap()
+                .progress_chars("=>-");
+            pb.set_style(style);
+            pb.set_prefix(prefix.to_string());
+            pb
+        }
+        _ => {
+            let pb = ProgressBar::new_spinner();
+            pb.set_style(ProgressStyle::with_template("{prefix:.bold} {spinner} {msg}").unwrap());
+            pb.set_prefix(prefix.to_string());
+            pb.enable_steady_tick(std::time::Duration::from_millis(120));
+            pb
+        }
+    }
+}
+
+fn create_extract_progress_bar(prefix: &str) -> ProgressBar {
+    let pb = ProgressBar::new(100);
+    let style = ProgressStyle::with_template("{prefix:.bold} [{bar:40.magenta/blue}] {pos:>3}% ETA {eta}")
+        .unwrap()
+        .progress_chars("=>-");
+    pb.set_style(style);
+    pb.set_prefix(prefix.to_string());
+    pb
+}
+
+fn finish_progress(pb: ProgressBar, msg: &str) {
+    pb.finish_with_message(msg.to_string());
+}
+
+fn parse_total_from_content_range(hv: &str) -> Option<u64> {
+    // Expected like: "bytes start-end/total"
+    if let Some(slash_pos) = hv.rfind('/') {
+        let total_str = hv[slash_pos + 1..].trim();
+        if let Ok(total) = total_str.parse::<u64>() { return Some(total); }
+    }
+    None
+}
+
+fn extract_percent(line: &str) -> Option<u32> {
+    if let Some(pidx) = line.rfind('%') {
+        let digits_rev: String = line[..pidx]
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if digits_rev.is_empty() { return None; }
+        let digits: String = digits_rev.chars().rev().collect();
+        if let Ok(v) = digits.parse::<u32>() { return Some(v.min(100)); }
+    }
+    None
+}
+
+fn update_download_pb_message(pb: &ProgressBar, downloaded: u64, total_opt: Option<u64>, start: Instant) {
+    let elapsed = start.elapsed().as_secs_f64();
+    let mb_downloaded = bytes_to_mb(downloaded);
+    let speed_mb_s = if elapsed > 0.0 { bytes_to_mb((downloaded as f64 / elapsed) as u64) } else { 0.0 };
+    let msg = match total_opt {
+        Some(total) if total > 0 => {
+            let total_mb = bytes_to_mb(total);
+            format!("{:.2} MB/{:.2} MB @ {:.2} MB/s", mb_downloaded, total_mb, speed_mb_s)
+        }
+        _ => format!("{:.2} MB @ {:.2} MB/s", mb_downloaded, speed_mb_s),
+    };
+    pb.set_message(msg);
+}
+
+fn bytes_to_mb(bytes: u64) -> f64 {
+    (bytes as f64) / 1_000_000.0
 }
 
 // Data structures for detailed status/info
