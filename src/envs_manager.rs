@@ -46,6 +46,21 @@ impl PortableEnvironmentManager {
         Self { install_path, ps_env_path, config_manager, gpu_detector: GpuDetector::new(), tool_specs }
     }
 
+    /// Check if portable tool with given key is already installed (by executable presence)
+    fn is_tool_installed(&self, key: &str) -> bool {
+        if let Some(spec) = self.tool_specs.get(key) {
+            let exe_path = self.ps_env_path.join(&spec.executable_path);
+            return exe_path.exists();
+        }
+        false
+    }
+
+    /// Check if CUDA is already installed (by CUDA/bin presence)
+    fn is_cuda_installed(&self) -> bool {
+        let cuda_dir = self.ps_env_path.join("CUDA");
+        cuda_dir.join("bin").exists()
+    }
+
     fn build_tool_specs() -> HashMap<String, PortableToolSpec> {
         let mut map = HashMap::new();
         let is_windows = cfg!(windows);
@@ -333,7 +348,9 @@ impl PortableEnvironmentManager {
         ];
         if let Ok(list) = self.gpu_detector.detect_gpu_wmi() {
             if list.iter().any(|g| g.gpu_type == crate::gpu::GpuType::Nvidia) {
-                tools.push(("nvcc", vec!["--version"]));
+                // Добавляем nvcc в проверку только если он реально присутствует
+                let nvcc_path = self.ps_env_path.join("CUDA").join("bin").join(if cfg!(windows) { "nvcc.exe" } else { "nvcc" });
+                if nvcc_path.exists() { tools.push(("nvcc", vec!["--version"])); }
             }
         }
 
@@ -387,7 +404,10 @@ impl PortableEnvironmentManager {
             if let Some(cuda_ver) = &gpu.cuda_version {
                 if gpu.recommended_backend.contains("cuda") {
                     if let Some(link) = self.config_manager.get_cuda_download_link(Some(cuda_ver)) {
-                        total_steps += 2; // CUDA download + extract
+                        // count CUDA steps only if not installed
+                        if !self.is_cuda_installed() {
+                            total_steps += 2; // CUDA download + extract
+                        }
                         let version_debug = format!("{:?}", cuda_ver).to_lowercase();
                         let cleaned = version_debug.replace("cuda", "").replace(['_', '"'], "");
                         let expected_folder = format!("cuda_{}", cleaned);
@@ -396,8 +416,14 @@ impl PortableEnvironmentManager {
                 }
             }
         }
-        // Each tool: download + extract
-        total_steps += 2 * 3; // python, git, ffmpeg
+        // Each tool: download + extract (only for missing ones)
+        let mut tools_to_install: Vec<&str> = Vec::new();
+        for key in ["python", "git", "ffmpeg"] {
+            if !self.is_tool_installed(key) {
+                total_steps += 2;
+                tools_to_install.push(key);
+            }
+        }
 
         // Announce total steps
         {
@@ -410,6 +436,8 @@ impl PortableEnvironmentManager {
         let total_c = total_steps; // captured total for closures
 
         if let Some((link, expected_folder)) = cuda_plan {
+            // Skip CUDA task if already installed
+            if !self.is_cuda_installed() {
             let ps_env = self.ps_env_path.clone();
             let archive_path = ps_env.join(format!(
                 "CUDA_{}.7z",
@@ -445,12 +473,15 @@ impl PortableEnvironmentManager {
                     let _g = print_lock_c.lock().unwrap();
                     println!("[Setup] CUDA extracted.");
                 }
+                // Emit final progress update for CUDA step completion
+                let _ = completed_c.load(Ordering::SeqCst);
                 Ok::<(), PortableSourceError>(())
             }));
+            }
         }
 
         // Other tools in parallel
-        for key in ["python", "git", "ffmpeg"] {
+        for key in tools_to_install {
             if let Some(spec) = self.tool_specs.get(key) {
                 let url = spec.url.clone();
                 let archive_name = Url::parse(&url)
@@ -485,6 +516,7 @@ impl PortableEnvironmentManager {
                         let _g = print_lock_t.lock().unwrap();
                         println!("[Setup] {} installed.", exe_rel);
                     }
+                    // No callback here (this variant prints to stdout only)
                     Ok::<(), PortableSourceError>(())
                 }));
             }
@@ -553,7 +585,7 @@ impl PortableEnvironmentManager {
             if let Some(cuda_ver) = &gpu.cuda_version {
                 if gpu.recommended_backend.contains("cuda") {
                     if let Some(link) = self.config_manager.get_cuda_download_link(Some(cuda_ver)) {
-                        total_steps += 2; // download + extract
+                        if !self.is_cuda_installed() { total_steps += 2; }
                         let version_debug = format!("{:?}", cuda_ver).to_lowercase();
                         let cleaned = version_debug.replace("cuda", "").replace(['_', '"'], "");
                         let expected_folder = format!("cuda_{}", cleaned);
@@ -562,8 +594,14 @@ impl PortableEnvironmentManager {
                 }
             }
         }
-        // python, git, ffmpeg each: download + extract
-        total_steps += 2 * 3;
+        // python, git, ffmpeg each: download + extract (only for missing ones)
+        let mut tools_to_install: Vec<&str> = Vec::new();
+        for key in ["python", "git", "ffmpeg"] {
+            if !self.is_tool_installed(key) {
+                total_steps += 2;
+                tools_to_install.push(key);
+            }
+        }
 
         // Tell UI initial total
         cb_arc.clone()("init".to_string(), 0, total_steps);
@@ -572,6 +610,7 @@ impl PortableEnvironmentManager {
         let total_c = total_steps;
         let cb_cuda = cb_arc.clone();
         if let Some((link, expected_folder)) = cuda_plan {
+            if !self.is_cuda_installed() {
             let ps_env = self.ps_env_path.clone();
             let archive_path = ps_env.join(format!(
                 "CUDA_{}.7z",
@@ -598,12 +637,16 @@ impl PortableEnvironmentManager {
                 let _ = fs::remove_dir_all(&temp_extract);
                 let _ = fs::remove_file(&archive_path);
                 completed_c.fetch_add(1, Ordering::SeqCst);
+                // Emit final state after finishing CUDA extraction
+                let done_now = completed_c.load(Ordering::SeqCst);
+                cb_cuda("cuda".to_string(), done_now, total_c);
                 Ok::<(), PortableSourceError>(())
             }));
+            }
         }
 
         // Other tools in parallel
-        for key in ["python", "git", "ffmpeg"] {
+        for key in tools_to_install {
             if let Some(spec) = self.tool_specs.get(key) {
                 let url = spec.url.clone();
                 let archive_name = Url::parse(&url)
@@ -631,6 +674,9 @@ impl PortableEnvironmentManager {
                         return Err(PortableSourceError::environment(format!("Executable not found: {:?}", exe_path)));
                     }
                     completed_t.fetch_add(1, Ordering::SeqCst);
+                    // Emit final update after tool extraction completes
+                    let done_now = completed_t.load(Ordering::SeqCst);
+                    cb_t(key.to_string(), done_now, total_c);
                     Ok::<(), PortableSourceError>(())
                 }));
             }
