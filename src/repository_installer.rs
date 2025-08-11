@@ -830,19 +830,31 @@ impl RepositoryInstaller {
     fn get_default_torch_index_url(&self) -> String {
         let cfg = self._config_manager.get_config();
         if let Some(gpu) = &cfg.gpu_config {
-            // Blackwell (RTX 50xx) — использовать nightly cu128
             let name_up = gpu.name.to_uppercase();
             let is_blackwell = name_up.contains("RTX 50") || format!("{:?}", gpu.generation).to_lowercase().contains("blackwell");
-            if is_blackwell {
-                return "https://download.pytorch.org/whl/nightly/cu128".into();
+            if is_blackwell { return "https://download.pytorch.org/whl/nightly/cu128".into(); }
+        }
+        #[cfg(unix)]
+        {
+            if let Some(cv) = crate::utils::detect_cuda_version_from_system() {
+                return match cv {
+                    crate::config::CudaVersionLinux::Cuda128 => "https://download.pytorch.org/whl/cu128".into(),
+                    crate::config::CudaVersionLinux::Cuda126 => "https://download.pytorch.org/whl/cu126".into(),
+                    crate::config::CudaVersionLinux::Cuda124 => "https://download.pytorch.org/whl/cu124".into(),
+                    crate::config::CudaVersionLinux::Cuda121 => "https://download.pytorch.org/whl/cu121".into(),
+                    crate::config::CudaVersionLinux::Cuda118 => "https://download.pytorch.org/whl/cu118".into(),
+                };
             }
-            if let Some(cuda) = &gpu.cuda_version {
+        }
+        #[cfg(windows)]
+        {
+            if let Some(gpu) = &cfg.gpu_config { if let Some(cuda) = &gpu.cuda_version {
                 return match cuda {
                     crate::config::CudaVersion::Cuda128 => "https://download.pytorch.org/whl/cu128".into(),
                     crate::config::CudaVersion::Cuda124 => "https://download.pytorch.org/whl/cu124".into(),
                     crate::config::CudaVersion::Cuda118 => "https://download.pytorch.org/whl/cu118".into(),
                 };
-            }
+            }}
         }
         "https://download.pytorch.org/whl/cpu".into()
     }
@@ -1018,9 +1030,28 @@ impl<'a> RequirementsAnalyzer<'a> {
 
     fn get_default_torch_index_url(&self) -> String {
         let cfg = self.config_manager.get_config();
-        if let Some(gpu) = &cfg.gpu_config { if let Some(cuda) = &gpu.cuda_version {
-            return match cuda { crate::config::CudaVersion::Cuda128 => "https://download.pytorch.org/whl/cu128".into(), crate::config::CudaVersion::Cuda124 => "https://download.pytorch.org/whl/cu124".into(), crate::config::CudaVersion::Cuda118 => "https://download.pytorch.org/whl/cu118".into() };
-        }}
+        #[cfg(unix)]
+        {
+            if let Some(cv) = crate::utils::detect_cuda_version_from_system() {
+                return match cv {
+                    crate::config::CudaVersionLinux::Cuda128 => "https://download.pytorch.org/whl/cu128".into(),
+                    crate::config::CudaVersionLinux::Cuda126 => "https://download.pytorch.org/whl/cu126".into(),
+                    crate::config::CudaVersionLinux::Cuda124 => "https://download.pytorch.org/whl/cu124".into(),
+                    crate::config::CudaVersionLinux::Cuda121 => "https://download.pytorch.org/whl/cu121".into(),
+                    crate::config::CudaVersionLinux::Cuda118 => "https://download.pytorch.org/whl/cu118".into(),
+                };
+            }
+        }
+        #[cfg(windows)]
+        {
+            if let Some(gpu) = &cfg.gpu_config { if let Some(cuda) = &gpu.cuda_version {
+                return match cuda {
+                    crate::config::CudaVersion::Cuda128 => "https://download.pytorch.org/whl/cu128".into(),
+                    crate::config::CudaVersion::Cuda124 => "https://download.pytorch.org/whl/cu124".into(),
+                    crate::config::CudaVersion::Cuda118 => "https://download.pytorch.org/whl/cu118".into(),
+                };
+            }}
+        }
         "https://download.pytorch.org/whl/cpu".into()
     }
 
@@ -1039,13 +1070,45 @@ impl RepositoryInstaller {
     fn handle_insightface_package(&self, repo_name: &str) -> Result<()> {
         // Windows prebuilt wheel; fallback to pip package
         if cfg!(windows) {
-            let mut pip_cmd = self.get_pip_executable(repo_name);
-            pip_cmd.extend(["install".into(), "-U".into(), "https://huggingface.co/hanamizuki-ai/pypi-wheels/resolve/main/insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl".into()]);
-            run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing insightface wheel"))
+            let uv_available = self.install_uv_in_venv(repo_name).unwrap_or(false);
+            // Ensure NumPy ABI compatible for compiled extensions (avoid numpy 2.0+ breakage)
+            if uv_available {
+                let mut uv_numpy = self.get_uv_executable(repo_name);
+                uv_numpy.extend(["pip".into(), "install".into(), "-U".into(), "numpy<2.0".into()]);
+                let _ = run_tool_with_env(&self._env_manager, &uv_numpy, Some("Preinstall numpy<2.0 (uv) for insightface"));
+                let mut uv_cmd = self.get_uv_executable(repo_name);
+                uv_cmd.extend(["pip".into(), "install".into(), "-U".into(),
+                    "https://huggingface.co/hanamizuki-ai/pypi-wheels/resolve/main/insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl".into()
+                ]);
+                run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing insightface wheel (uv)"))
+            } else {
+                let mut pip_numpy = self.get_pip_executable(repo_name);
+                pip_numpy.extend(["install".into(), "-U".into(), "numpy<2.0".into()]);
+                let _ = run_tool_with_env(&self._env_manager, &pip_numpy, Some("Preinstall numpy<2.0 for insightface"));
+                let mut pip_cmd = self.get_pip_executable(repo_name);
+                pip_cmd.extend(["install".into(), "-U".into(),
+                    "https://huggingface.co/hanamizuki-ai/pypi-wheels/resolve/main/insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl".into()
+                ]);
+                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing insightface wheel"))
+            }
         } else {
-            let mut pip_cmd = self.get_pip_executable(repo_name);
-            pip_cmd.extend(["install".into(), "-U".into(), "insightface".into()]);
-            run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing insightface"))
+            let uv_available = self.install_uv_in_venv(repo_name).unwrap_or(false);
+            // Ensure NumPy ABI compatible
+            if uv_available {
+                let mut uv_numpy = self.get_uv_executable(repo_name);
+                uv_numpy.extend(["pip".into(), "install".into(), "-U".into(), "numpy<2.0".into()]);
+                let _ = run_tool_with_env(&self._env_manager, &uv_numpy, Some("Preinstall numpy<2.0 (uv) for insightface"));
+                let mut uv_cmd = self.get_uv_executable(repo_name);
+                uv_cmd.extend(["pip".into(), "install".into(), "-U".into(), "insightface".into()]);
+                run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing insightface (uv)"))
+            } else {
+                let mut pip_numpy = self.get_pip_executable(repo_name);
+                pip_numpy.extend(["install".into(), "-U".into(), "numpy<2.0".into()]);
+                let _ = run_tool_with_env(&self._env_manager, &pip_numpy, Some("Preinstall numpy<2.0 for insightface"));
+                let mut pip_cmd = self.get_pip_executable(repo_name);
+                pip_cmd.extend(["install".into(), "-U".into(), "insightface".into()]);
+                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing insightface"))
+            }
         }
     }
 }

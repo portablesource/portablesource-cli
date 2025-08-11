@@ -42,14 +42,21 @@ async fn run(cli: Cli) -> Result<()> {
         config_manager.set_install_path(validated_path.clone())?;
         validated_path
     } else {
-        // Default path: Windows -> current_dir/portablesource; Linux -> /root/portablesource
+        // Default path with interactive prompt on Linux
         #[cfg(windows)]
-        let default_path = std::env::current_dir()?.join("portablesource");
+        {
+            let default_path = std::env::current_dir()?.join("portablesource");
+            let validated_path = utils::validate_and_create_path(&default_path)?;
+            config_manager.set_install_path(validated_path.clone())?;
+            validated_path
+        }
         #[cfg(unix)]
-        let default_path = PathBuf::from("/root/portablesource");
-        let validated_path = utils::validate_and_create_path(&default_path)?;
-        config_manager.set_install_path(validated_path.clone())?;
-        validated_path
+        {
+            let default_path = utils::default_install_path_linux();
+            let chosen = utils::prompt_install_path_linux(&default_path)?;
+            config_manager.set_install_path(chosen.clone())?;
+            chosen
+        }
     };
     
     // Ensure config file is anchored to install_path, not AppData
@@ -66,10 +73,57 @@ async fn run(cli: Cli) -> Result<()> {
     ensure_config_initialized(&mut config_manager)?;
     config_manager.hydrate_from_existing_env()?;
 
-    // Linux: best-effort подготовка системы (root предпочтителен)
+    // Linux: выбор режима CLOUD/DESK и базовая подготовка
     #[cfg(unix)]
     {
-        let _ = utils::prepare_linux_system();
+        use portablesource_rs::utils::{detect_linux_mode, LinuxMode, detect_cuda_version_from_system, setup_micromamba_base_env};
+        match detect_linux_mode() {
+            LinuxMode::Cloud => {
+                info!("Linux CLOUD mode detected: using system git/python/cuda");
+                // Linux использует отдельную логику выбора индекса torch — не пишем в Windows-поле cuda_version
+                let _cv_for_indexes = detect_cuda_version_from_system();
+                // Check required tools
+                let check = |name: &str| -> bool { utils::is_command_available(name) };
+                let git_ok = check("git");
+                let py_ok = check("python3") || check("python");
+                let ff_ok = check("ffmpeg");
+                let nvcc_ok = check("nvcc");
+                println!(
+                    "CLOUD requirements: git={} python={} ffmpeg={} nvcc={}",
+                    if git_ok { "OK" } else { "Missing" },
+                    if py_ok { "OK" } else { "Missing" },
+                    if ff_ok { "OK" } else { "Missing" },
+                    if nvcc_ok { "OK" } else { "Missing" }
+                );
+                if !(git_ok && py_ok && ff_ok) {
+                    warn!("Some system tools missing; CLOUD mode may fail. Consider DESK mode (non-root) or install packages.");
+                }
+            }
+            LinuxMode::Desk => {
+                info!("Linux DESK mode detected: setting up micromamba base env");
+                // Если системная CUDA есть (nvcc найден) — НЕ ставим CUDA в базу (cv=None)
+                // Иначе — подбираем версию по gpu_config.cuda_version (118/124/128)
+                let cv = match detect_cuda_version_from_system() {
+                    Some(_) => None,
+                    None => {
+                        let cv_opt = config_manager
+                            .get_config()
+                            .gpu_config
+                            .as_ref()
+                            .and_then(|g| g.cuda_version.as_ref());
+                        cv_opt.map(|v| match v {
+                            portablesource_rs::config::CudaVersion::Cuda128 => portablesource_rs::config::CudaVersionLinux::Cuda128,
+                            portablesource_rs::config::CudaVersion::Cuda124 => portablesource_rs::config::CudaVersionLinux::Cuda124,
+                            portablesource_rs::config::CudaVersion::Cuda118 => portablesource_rs::config::CudaVersionLinux::Cuda118,
+                            // если вдруг появятся 12.1/12.6 в Windows enum — сведём к ближайшему поддерживаемому
+                            //portablesource_rs::config::CudaVersion::Cuda121 => portablesource_rs::config::CudaVersionLinux::Cuda121,
+                            //portablesource_rs::config::CudaVersion::Cuda126 => portablesource_rs::config::CudaVersionLinux::Cuda126,
+                        })
+                    }
+                };
+                setup_micromamba_base_env(&install_path, cv)?;
+            }
+        }
     }
     
     // Handle commands
@@ -303,7 +357,7 @@ async fn check_environment(install_path: &PathBuf, _config_manager: &ConfigManag
         if utils::check_msvc_build_tools_installed() { "Installed" } else { "Not installed" });
     
     // Check for tools
-    let tools = ["git", "python", "pip"];
+    let tools = ["git", "python", "ffmpeg"];
     println!("\n=== Available Tools ===");
     for tool in &tools {
         let available = utils::is_command_available(tool);

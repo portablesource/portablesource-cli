@@ -37,6 +37,20 @@ pub enum CudaVersion {
     Cuda128,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum CudaVersionLinux {
+    #[serde(rename = "118")]
+    Cuda118,
+    #[serde(rename = "121")]
+    Cuda121,
+    #[serde(rename = "124")]
+    Cuda124,
+    #[serde(rename = "126")]
+    Cuda126,
+    #[serde(rename = "128")]
+    Cuda128,
+}
+
 impl CudaVersion {
     pub fn get_download_url(&self) -> &'static str {
         match self {

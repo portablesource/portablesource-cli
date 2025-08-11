@@ -146,6 +146,7 @@ pub fn create_directory_structure(install_path: &Path) -> Result<()> {
     ];
     #[cfg(unix)]
     let directories = [
+        install_path.join("ps_env"),
         install_path.join("repos"),
         install_path.join("envs"),
     ];
@@ -158,6 +159,190 @@ pub fn create_directory_structure(install_path: &Path) -> Result<()> {
         log::debug!("Created directory: {:?}", dir);
     }
     
+    Ok(())
+}
+
+// ===== Linux helpers for install path and micromamba setup =====
+
+#[cfg(unix)]
+pub fn is_root() -> bool {
+    let euid = unsafe { libc::geteuid() };
+    euid == 0
+}
+
+#[cfg(unix)]
+pub fn default_install_path_linux() -> PathBuf {
+    if is_root() {
+        PathBuf::from("/root/portablesource")
+    } else {
+        if let Some(home) = dirs::home_dir() {
+            return home.join("portablesource");
+        }
+        PathBuf::from("./portablesource")
+    }
+}
+
+#[cfg(unix)]
+pub fn prompt_install_path_linux(default: &Path) -> Result<PathBuf> {
+    use std::io::{self, Write};
+    println!(
+        "[{}] — it is base install path, do you like it, or customize?\nEnter new path or press Enter to accept:",
+        default.display()
+    );
+    print!("> ");
+    io::stdout().flush().ok();
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).ok();
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return validate_and_create_path(default);
+    }
+    let chosen = PathBuf::from(trimmed);
+    validate_and_create_path(&chosen)
+}
+
+/// Simple HTTP(S) download helper
+pub fn download_file(url: &str, destination: &Path) -> Result<()> {
+    use reqwest::blocking::Client;
+    use std::io::copy;
+    if let Some(parent) = destination.parent() { std::fs::create_dir_all(parent)?; }
+    let client = Client::builder().timeout(Duration::from_secs(600)).build()?;
+    let mut resp = client.get(url).send()
+        .map_err(|e| PortableSourceError::environment(format!("Failed to GET {}: {}", url, e)))?;
+    if !resp.status().is_success() {
+        return Err(PortableSourceError::environment(format!("Download failed: HTTP {}", resp.status())));
+    }
+    let mut file = std::fs::File::create(destination)?;
+    copy(&mut resp, &mut file)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinuxMode { Cloud, Desk }
+
+#[cfg(unix)]
+pub fn detect_linux_mode() -> LinuxMode {
+    let has = |bin: &str| is_command_available(bin);
+    if is_root() && (has("nvcc")) && (has("git")) && (has("python3") || has("python")) {
+        LinuxMode::Cloud
+    } else {
+        LinuxMode::Desk
+    }
+}
+
+#[cfg(unix)]
+pub fn detect_cuda_version_from_system() -> Option<crate::config::CudaVersionLinux> {
+    let out = std::process::Command::new("nvcc").arg("--version").output().ok()?;
+    if !out.status.success() { return None; }
+    let stdout = String::from_utf8_lossy(&out.stdout).to_lowercase();
+    for line in stdout.lines() {
+        if line.contains("cuda compilation tools") && line.contains("release") {
+            let ver = line.split_whitespace().filter(|s| s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)).next().unwrap_or("");
+            if ver.starts_with("12.8") { return Some(crate::config::CudaVersionLinux::Cuda128); }
+            if ver.starts_with("12.6") { return Some(crate::config::CudaVersionLinux::Cuda126); }
+            if ver.starts_with("12.4") { return Some(crate::config::CudaVersionLinux::Cuda124); }
+            if ver.starts_with("12.1") { return Some(crate::config::CudaVersionLinux::Cuda121); }
+            if ver.starts_with("11.8") { return Some(crate::config::CudaVersionLinux::Cuda118); }
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn cuda_version_to_runtime_spec(v: &crate::config::CudaVersionLinux) -> &'static str {
+    match v {
+        crate::config::CudaVersionLinux::Cuda118 => "11.8",
+        crate::config::CudaVersionLinux::Cuda121 => "12.1",
+        crate::config::CudaVersionLinux::Cuda124 => "12.4",
+        crate::config::CudaVersionLinux::Cuda126 => "12.6",
+        crate::config::CudaVersionLinux::Cuda128 => "12.8",
+    }
+}
+
+#[cfg(unix)]
+pub fn setup_micromamba_base_env(install_path: &Path, cuda_version: Option<crate::config::CudaVersionLinux>) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    // Ensure directory layout
+    create_directory_structure(install_path)?;
+    let mamba_bin = install_path.join("ps_env").join("micromamba-linux-64");
+    let mamba_url = "https://github.com/mamba-org/micromamba-releases/releases/download/latest/micromamba-linux-64";
+    if !mamba_bin.exists() {
+        download_file(mamba_url, &mamba_bin)?;
+        let mut perms = std::fs::metadata(&mamba_bin)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&mamba_bin, perms)?;
+    }
+
+    let base_prefix = install_path.join("ps_env").join("mamba_env");
+    let mut args: Vec<String> = vec![
+        "create".into(), "-y".into(), "-p".into(), base_prefix.to_string_lossy().to_string(),
+        "-c".into(), "nvidia/label/tensorrt-main".into(), "-c".into(), "nvidia".into(), "-c".into(), "conda-forge".into(),
+        "python=3.11".into(), "git".into(), "ffmpeg".into(),
+    ];
+    let mut attempted_cuda = false;
+    if let Some(v) = cuda_version.as_ref() {
+        let spec = cuda_version_to_runtime_spec(v);
+        args.push(format!("cuda-runtime={}", spec));
+        args.push("cudnn".into());
+        args.push("tensorrt".into());
+        attempted_cuda = true;
+    }
+    // auto-accept ToS/licenses
+    let status = std::process::Command::new(&mamba_bin)
+        .env("MAMBA_ALWAYS_YES", "1")
+        .args(args)
+        .status()
+        .map_err(|e| PortableSourceError::environment(format!("Failed to run micromamba: {}", e)))?;
+    if !status.success() {
+        return Err(PortableSourceError::environment("micromamba create failed".into()));
+    }
+    // Verify CUDA runtime presence on DESK: libcudart.so* must exist if we attempted CUDA
+    if attempted_cuda {
+        let lib_dir = base_prefix.join("lib");
+        let lib64_dir = base_prefix.join("lib64");
+        let mut found = false;
+        for dir in [&lib_dir, &lib64_dir] {
+            if dir.exists() {
+                if let Ok(read) = std::fs::read_dir(dir) {
+                    for e in read.flatten() {
+                        if let Some(name) = e.file_name().to_str() {
+                            if name.starts_with("libcudart.so") { found = true; break; }
+                        }
+                    }
+                }
+            }
+            if found { break; }
+        }
+        if !found {
+            // Fallback: try install TensorRT via pip from NVIDIA PyPI if conda TRT missing
+            let py = base_prefix.join("bin").join("python");
+            if py.exists() {
+                let pip_status = std::process::Command::new(&py)
+                    .args(["-m","pip","install","--extra-index-url","https://pypi.nvidia.com","nvidia-tensorrt"])
+                    .status()
+                    .map_err(|e| PortableSourceError::environment(format!("pip fallback failed: {}", e)))?;
+                if !pip_status.success() {
+                    return Err(PortableSourceError::environment("CUDA runtime verification failed: libcudart not found".into()));
+                }
+            }
+            // Recheck libcudart after pip fallback (usually not provided by TRT, но оставим на случай будущих wheels)
+            let mut ok = false;
+            for dir in [&lib_dir, &lib64_dir] {
+                if dir.exists() {
+                    if let Ok(read) = std::fs::read_dir(dir) {
+                        for e in read.flatten() {
+                            if let Some(name) = e.file_name().to_str() {
+                                if name.starts_with("libcudart.so") { ok = true; break; }
+                            }
+                        }
+                    }
+                }
+                if ok { break; }
+            }
+            if !ok { return Err(PortableSourceError::environment("CUDA runtime verification failed: libcudart not found".into())); }
+        }
+    }
     Ok(())
 }
 

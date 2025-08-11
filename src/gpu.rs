@@ -72,7 +72,7 @@ impl GpuDetector {
         }
     }
     
-    /// Detect GPU using Windows WMI (via wmi crate), fallback to shell if needed
+    /// Detect GPU using Windows WMI (via wmi crate), fallback to WMIC on Windows only
     pub fn detect_gpu_wmi(&self) -> Result<Vec<GpuInfo>> {
         #[cfg(windows)]
         {
@@ -100,37 +100,76 @@ impl GpuDetector {
                     }
                 }
             }
+
+            // Fallback: WMIC CLI
+            let output = Command::new("wmic")
+                .args(&["path", "win32_VideoController", "get", "name,AdapterRAM,DriverVersion", "/format:csv"])
+                .output();
+            match output {
+                Ok(output) if output.status.success() => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let mut gpus = Vec::new();
+                    for line in stdout.lines().skip(1) {
+                        if line.trim().is_empty() { continue; }
+                        let parts: Vec<&str> = line.split(',').collect();
+                        if parts.len() >= 4 {
+                            let name = parts[3].trim().to_string();
+                            if name.is_empty() || name == "Name" { continue; }
+                            let memory_bytes = parts[2].trim().parse::<u64>().unwrap_or(0);
+                            let memory_mb = (memory_bytes / (1024 * 1024)) as u32;
+                            let driver_version = {
+                                let dv = parts.get(1).map(|s| s.trim()).unwrap_or("");
+                                if dv.is_empty() || dv == "DriverVersion" { None } else { Some(dv.to_string()) }
+                            };
+                            let gpu_type = self.determine_gpu_type(&name);
+                            gpus.push(GpuInfo { name, gpu_type, memory_mb, driver_version });
+                        }
+                    }
+                    Ok(gpus)
+                }
+                _ => Ok(Vec::new()),
+            }
         }
+        #[cfg(not(windows))]
+        {
+            Ok(Vec::new())
+        }
+    }
 
-        // Fallback: shell WMIC (Windows) or empty on other OS
-        let output = Command::new("wmic")
-            .args(&["path", "win32_VideoController", "get", "name,AdapterRAM,DriverVersion", "/format:csv"])
+    #[cfg(unix)]
+    fn detect_gpu_linux_lspci(&self) -> Vec<GpuInfo> {
+        let mut gpus = Vec::new();
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg("lspci -mm | egrep -i 'VGA|3D|Display'")
             .output();
-
-        match output {
-            Ok(output) if output.status.success() => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let mut gpus = Vec::new();
-                for line in stdout.lines().skip(1) {
-                    if line.trim().is_empty() { continue; }
-                    let parts: Vec<&str> = line.split(',').collect();
-                    if parts.len() >= 4 {
-                        let name = parts[3].trim().to_string();
-                        if name.is_empty() || name == "Name" { continue; }
-                        let memory_bytes = parts[2].trim().parse::<u64>().unwrap_or(0);
-                        let memory_mb = (memory_bytes / (1024 * 1024)) as u32;
-                        let driver_version = {
-                            let dv = parts.get(1).map(|s| s.trim()).unwrap_or("");
-                            if dv.is_empty() || dv == "DriverVersion" { None } else { Some(dv.to_string()) }
-                        };
-                        let gpu_type = self.determine_gpu_type(&name);
-                        gpus.push(GpuInfo { name, gpu_type, memory_mb, driver_version });
+        if let Ok(out) = output {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                for line in text.lines() {
+                    let l = line.to_string();
+                    let up = l.to_uppercase();
+                    let gpu_type = if up.contains("NVIDIA") { GpuType::Nvidia } else if up.contains("AMD") || up.contains("ATI") || up.contains("RADEON") { GpuType::Amd } else if up.contains("INTEL") { GpuType::Intel } else { GpuType::Unknown };
+                    if gpu_type != GpuType::Unknown {
+                        // Try to extract model name between quotes if present
+                        let name = if let Some(start) = l.find('"') { if let Some(end) = l[start+1..].find('"') { l[start+1..start+1+end].to_string() } else { l.clone() } } else { l.clone() };
+                        gpus.push(GpuInfo { name, gpu_type, memory_mb: 0, driver_version: None });
                     }
                 }
-                Ok(gpus)
             }
-            _ => Ok(Vec::new()),
         }
+        gpus
+    }
+
+    #[cfg(unix)]
+    fn detect_gpu_linux_glxinfo(&self) -> Option<GpuInfo> {
+        let out = Command::new("sh").arg("-c").arg("glxinfo -B 2>/dev/null | grep 'renderer string' || true").output().ok()?;
+        if !out.status.success() { return None; }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let line = text.lines().next()?.to_string();
+        let lower = line.to_lowercase();
+        let gpu_type = if lower.contains("nvidia") { GpuType::Nvidia } else if lower.contains("amd") || lower.contains("radeon") { GpuType::Amd } else if lower.contains("intel") { GpuType::Intel } else { GpuType::Unknown };
+        Some(GpuInfo { name: line, gpu_type, memory_mb: 0, driver_version: None })
     }
 
     
@@ -155,18 +194,23 @@ impl GpuDetector {
             return Ok(Some(nvidia_gpu));
         }
         
-        // Fall back to WMI detection
-        let gpus = self.detect_gpu_wmi()?;
-        
-        // Prioritize NVIDIA GPUs
-        for gpu in &gpus {
-            if gpu.gpu_type == GpuType::Nvidia {
-                return Ok(Some(gpu.clone()));
-            }
+        #[cfg(windows)]
+        {
+            // Fall back to WMI/WMIC on Windows
+            let gpus = self.detect_gpu_wmi()?;
+            for gpu in &gpus { if gpu.gpu_type == GpuType::Nvidia { return Ok(Some(gpu.clone())); } }
+            return Ok(gpus.into_iter().next());
         }
-        
-        // Return first available GPU
-        Ok(gpus.into_iter().next())
+        #[cfg(unix)]
+        {
+            // Linux: try lspci then glxinfo as best-effort
+            let mut gpus = self.detect_gpu_linux_lspci();
+            if gpus.is_empty() {
+                if let Some(glx) = self.detect_gpu_linux_glxinfo() { gpus.push(glx); }
+            }
+            for gpu in &gpus { if gpu.gpu_type == GpuType::Nvidia { return Ok(Some(gpu.clone())); } }
+            return Ok(gpus.into_iter().next());
+        }
     }
     
     /// Check if NVIDIA GPU is available

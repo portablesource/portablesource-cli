@@ -895,23 +895,20 @@ impl PortableEnvironmentManager {
     
     /// Get path to Python executable
     pub fn get_python_executable(&self) -> Option<PathBuf> {
-        let python_path = self.ps_env_path.join("python").join("python.exe");
-        if python_path.exists() {
-            Some(python_path)
+        if cfg!(windows) {
+            let p = self.ps_env_path.join("python").join("python.exe");
+            if p.exists() { return Some(p); }
         } else {
-            None
+            // Linux: prefer micromamba base if present
+            let base = self.install_path.join("ps_env").join("mamba_env").join("bin").join("python");
+            if base.exists() { return Some(base); }
+            let p = self.ps_env_path.join("python").join("bin").join("python");
+            if p.exists() { return Some(p); }
         }
+        None
     }
 
-    /// Get path to pip executable in ps_env
-    pub fn get_ps_env_pip(&self) -> Option<PathBuf> {
-        let p = if cfg!(windows) {
-            self.ps_env_path.join("python").join("Scripts").join("pip.exe")
-        } else {
-            self.ps_env_path.join("python").join("bin").join("pip")
-        };
-        if p.exists() { Some(p) } else { None }
-    }
+    // Removed: we universally use `python -m pip` via repository_installer
     
     /// Get path to Git executable
     pub fn get_git_executable(&self) -> Option<PathBuf> {
