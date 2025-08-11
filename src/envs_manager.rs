@@ -990,7 +990,7 @@ impl PortableEnvironmentManager {
         EnvironmentInfo {
             base_env_exists,
             base_env_python: python_path.map(|p| p.to_string_lossy().to_string()),
-            base_env_pip: self.get_ps_env_pip().map(|p| p.to_string_lossy().to_string()),
+            base_env_pip: None,
             installed_tools,
             paths: EnvironmentPaths { ps_env_path: self.ps_env_path.to_string_lossy().to_string() },
         }
