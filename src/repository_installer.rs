@@ -1071,43 +1071,28 @@ impl RepositoryInstaller {
         // Windows prebuilt wheel; fallback to pip package
         if cfg!(windows) {
             let uv_available = self.install_uv_in_venv(repo_name).unwrap_or(false);
-            // Ensure NumPy ABI compatible for compiled extensions (avoid numpy 2.0+ breakage)
+            // Устанавливаем одновременно insightface и совместимую версию numpy
+            let wheel = "https://huggingface.co/hanamizuki-ai/pypi-wheels/resolve/main/insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl";
             if uv_available {
-                let mut uv_numpy = self.get_uv_executable(repo_name);
-                uv_numpy.extend(["pip".into(), "install".into(), "-U".into(), "numpy<2.0".into()]);
-                let _ = run_tool_with_env(&self._env_manager, &uv_numpy, Some("Preinstall numpy<2.0 (uv) for insightface"));
                 let mut uv_cmd = self.get_uv_executable(repo_name);
-                uv_cmd.extend(["pip".into(), "install".into(), "-U".into(),
-                    "https://huggingface.co/hanamizuki-ai/pypi-wheels/resolve/main/insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl".into()
-                ]);
-                run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing insightface wheel (uv)"))
+                uv_cmd.extend(["pip".into(), "install".into(), "-U".into(), wheel.into(), "numpy==1.26.4".into()]);
+                run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing insightface + numpy (uv)"))
             } else {
-                let mut pip_numpy = self.get_pip_executable(repo_name);
-                pip_numpy.extend(["install".into(), "-U".into(), "numpy<2.0".into()]);
-                let _ = run_tool_with_env(&self._env_manager, &pip_numpy, Some("Preinstall numpy<2.0 for insightface"));
                 let mut pip_cmd = self.get_pip_executable(repo_name);
-                pip_cmd.extend(["install".into(), "-U".into(),
-                    "https://huggingface.co/hanamizuki-ai/pypi-wheels/resolve/main/insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl".into()
-                ]);
-                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing insightface wheel"))
+                pip_cmd.extend(["install".into(), "-U".into(), wheel.into(), "numpy==1.26.4".into()]);
+                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing insightface + numpy (pip)"))
             }
         } else {
             let uv_available = self.install_uv_in_venv(repo_name).unwrap_or(false);
-            // Ensure NumPy ABI compatible
+            // Ставим одновременно insightface и совместимый numpy
             if uv_available {
-                let mut uv_numpy = self.get_uv_executable(repo_name);
-                uv_numpy.extend(["pip".into(), "install".into(), "-U".into(), "numpy<2.0".into()]);
-                let _ = run_tool_with_env(&self._env_manager, &uv_numpy, Some("Preinstall numpy<2.0 (uv) for insightface"));
                 let mut uv_cmd = self.get_uv_executable(repo_name);
-                uv_cmd.extend(["pip".into(), "install".into(), "-U".into(), "insightface".into()]);
-                run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing insightface (uv)"))
+                uv_cmd.extend(["pip".into(), "install".into(), "-U".into(), "insightface".into(), "numpy==1.26.4".into()]);
+                run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing insightface + numpy (uv)"))
             } else {
-                let mut pip_numpy = self.get_pip_executable(repo_name);
-                pip_numpy.extend(["install".into(), "-U".into(), "numpy<2.0".into()]);
-                let _ = run_tool_with_env(&self._env_manager, &pip_numpy, Some("Preinstall numpy<2.0 for insightface"));
                 let mut pip_cmd = self.get_pip_executable(repo_name);
-                pip_cmd.extend(["install".into(), "-U".into(), "insightface".into()]);
-                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing insightface"))
+                pip_cmd.extend(["install".into(), "-U".into(), "insightface".into(), "numpy==1.26.4".into()]);
+                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing insightface + numpy (pip)"))
             }
         }
     }

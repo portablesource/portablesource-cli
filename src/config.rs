@@ -478,9 +478,8 @@ impl ConfigManager {
      }
      
      pub fn msvc_bt_config(&self) -> (String, String) {
-         let url = "https://aka.ms/vs/17/release/vs_buildtools.exe".to_string();
-         let args = " --quiet --wait --norestart --nocache --add Microsoft.VisualStudio.Workload.NativeDesktop --add Microsoft.VisualStudio.Component.VC.CMake.Project --add Microsoft.VisualStudio.Component.VC.Llvm.Clang".to_string();
-         (url, args)
+         // Не используется больше для финального списка; оставлено для совместимости
+         ("https://aka.ms/vs/17/release/vs_buildtools.exe".to_string(), String::new())
      }
      
      pub fn get_config_summary(&self) -> String {

@@ -405,13 +405,34 @@ pub fn install_msvc_build_tools() -> Result<()> {
     use std::io::copy;
     
     // Prefer winget if available (often faster and more reliable)
+    // Helper: choose one SDK depending on OS build (Win11 vs Win10)
+    #[cfg(windows)]
+    fn detect_windows_sdk_component() -> &'static str {
+        use winreg::enums::*;
+        use winreg::RegKey;
+        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+        if let Ok(key) = hklm.open_subkey("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion") {
+            if let Ok(build_str) = key.get_value::<String, _>("CurrentBuildNumber") {
+                if build_str.parse::<u32>().unwrap_or(0) >= 22000 {
+                    return "Microsoft.VisualStudio.Component.Windows11SDK.26100";
+                }
+            }
+        }
+        "Microsoft.VisualStudio.Component.Windows10SDK.19041"
+    }
+    #[cfg(not(windows))]
+    fn detect_windows_sdk_component() -> &'static str { "Microsoft.VisualStudio.Component.Windows10SDK.19041" }
+
     if which::which("winget").is_ok() {
-        let (_url, args) = crate::config::ConfigManager::new(None)
-            .map(|cm| cm.msvc_bt_config())
-            .unwrap_or_else(|_| (
-                "https://aka.ms/vs/17/release/vs_buildtools.exe".to_string(),
-                " --quiet --wait --norestart --nocache --add Microsoft.VisualStudio.Workload.NativeDesktop --add Microsoft.VisualStudio.Component.VC.CMake.Project --add Microsoft.VisualStudio.Component.VC.Llvm.Clang".to_string()
-            ));
+        let args = concat!(
+            " --quiet --wait --norestart --nocache",
+            " --add Microsoft.VisualStudio.Workload.NativeDesktop",
+            " --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            " --add Microsoft.VisualStudio.Component.VC.CMake.Project",
+            " --add Microsoft.VisualStudio.Component.VC.Llvm.Clang",
+            " --add Microsoft.VisualStudio.Component.VC.AddressSanitizer",
+            " --add Microsoft.VisualStudio.Component.VC.Redist.14.Latest"
+        ).to_string();
 
         log::info!("Trying to install MSVC Build Tools via winget...");
         let mut cmd = Command::new("winget");
@@ -423,7 +444,9 @@ pub fn install_msvc_build_tools() -> Result<()> {
             .arg("--disable-interactivity")
             // Важно: без обрамляющих кавычек, Command сам корректно экранирует аргумент
             .arg("--override")
-            .arg(args.trim());
+            .arg(format!("{} --add {}", args.trim(), detect_windows_sdk_component()))
+            // На некоторых системах нужно явно указать источник
+            .arg("--source").arg("winget");
         let status = cmd.status();
         match status {
             Ok(st) if st.success() => {
@@ -440,12 +463,20 @@ pub fn install_msvc_build_tools() -> Result<()> {
     }
 
     // Download URL and args (match python version's config)
-    let (url, args) = crate::config::ConfigManager::new(None)
-        .map(|cm| cm.msvc_bt_config())
-        .unwrap_or_else(|_| (
-            "https://aka.ms/vs/17/release/vs_buildtools.exe".to_string(),
-            " --quiet --wait --norestart --nocache --add Microsoft.VisualStudio.Workload.NativeDesktop --add Microsoft.VisualStudio.Component.VC.CMake.Project --add Microsoft.VisualStudio.Component.VC.Llvm.Clang".to_string()
-        ));
+    let url = "https://aka.ms/vs/17/release/vs_buildtools.exe".to_string();
+    let args = format!(
+        "{} --add {}",
+        concat!(
+            " --quiet --wait --norestart --nocache",
+            " --add Microsoft.VisualStudio.Workload.NativeDesktop",
+            " --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            " --add Microsoft.VisualStudio.Component.VC.CMake.Project",
+            " --add Microsoft.VisualStudio.Component.VC.Llvm.Clang",
+            " --add Microsoft.VisualStudio.Component.VC.AddressSanitizer",
+            " --add Microsoft.VisualStudio.Component.VC.Redist.14.Latest"
+        ),
+        detect_windows_sdk_component()
+    );
 
     log::info!("Starting MSVC Build Tools installation...");
     log::info!("Download URL: {}", url);
