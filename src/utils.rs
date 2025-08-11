@@ -415,16 +415,15 @@ pub fn install_msvc_build_tools() -> Result<()> {
 
         log::info!("Trying to install MSVC Build Tools via winget...");
         let mut cmd = Command::new("winget");
-        cmd.args([
-            "install",
-            "Microsoft.VisualStudio.2022.BuildTools",
-            "--silent",
-            "--accept-package-agreements",
-            "--accept-source-agreements",
-            "--disable-interactivity",
-            "--override",
-            &format!("\"{}\"", args.trim()),
-        ]);
+        cmd.arg("install")
+            .arg("Microsoft.VisualStudio.2022.BuildTools")
+            .arg("--silent")
+            .arg("--accept-package-agreements")
+            .arg("--accept-source-agreements")
+            .arg("--disable-interactivity")
+            // Важно: без обрамляющих кавычек, Command сам корректно экранирует аргумент
+            .arg("--override")
+            .arg(args.trim());
         let status = cmd.status();
         match status {
             Ok(st) if st.success() => {
