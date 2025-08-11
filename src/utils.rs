@@ -404,6 +404,42 @@ pub fn install_msvc_build_tools() -> Result<()> {
     use reqwest::blocking::Client;
     use std::io::copy;
     
+    // Prefer winget if available (often faster and more reliable)
+    if which::which("winget").is_ok() {
+        let (_url, args) = crate::config::ConfigManager::new(None)
+            .map(|cm| cm.msvc_bt_config())
+            .unwrap_or_else(|_| (
+                "https://aka.ms/vs/17/release/vs_buildtools.exe".to_string(),
+                " --quiet --wait --norestart --nocache --add Microsoft.VisualStudio.Workload.NativeDesktop --add Microsoft.VisualStudio.Component.VC.CMake.Project --add Microsoft.VisualStudio.Component.VC.Llvm.Clang".to_string()
+            ));
+
+        log::info!("Trying to install MSVC Build Tools via winget...");
+        let mut cmd = Command::new("winget");
+        cmd.args([
+            "install",
+            "Microsoft.VisualStudio.2022.BuildTools",
+            "--silent",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+            "--disable-interactivity",
+            "--override",
+            &format!("\"{}\"", args.trim()),
+        ]);
+        let status = cmd.status();
+        match status {
+            Ok(st) if st.success() => {
+                log::info!("winget installation completed successfully");
+                return Ok(());
+            }
+            Ok(st) => {
+                log::warn!("winget returned non-zero exit code: {:?}. Falling back to direct bootstrapper.", st.code());
+            }
+            Err(e) => {
+                log::warn!("winget not usable: {}. Falling back to direct bootstrapper.", e);
+            }
+        }
+    }
+
     // Download URL and args (match python version's config)
     let (url, args) = crate::config::ConfigManager::new(None)
         .map(|cm| cm.msvc_bt_config())
