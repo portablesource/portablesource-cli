@@ -32,13 +32,21 @@ async fn run(cli: Cli) -> Result<()> {
     // Initialize configuration manager
     let mut config_manager = ConfigManager::new(None)?;
     
-    // Handle install path from CLI or registry
+    // Handle install path from CLI, registry, config, or default
     let install_path = if let Some(path) = cli.install_path {
         let validated_path = utils::validate_and_create_path(&path)?;
         config_manager.set_install_path(validated_path.clone())?;
+        // Persist for subsequent commands
+        let _ = utils::save_install_path_to_registry(&validated_path);
         validated_path
     } else if let Some(path) = utils::load_install_path_from_registry()? {
         let validated_path = utils::validate_and_create_path(&path)?;
+        config_manager.set_install_path(validated_path.clone())?;
+        validated_path
+    } else if !config_manager.get_config().install_path.as_os_str().is_empty() {
+        let existing = config_manager.get_config().install_path.clone();
+        let validated_path = utils::validate_and_create_path(&existing)?;
+        // Normalize in config in case of differences
         config_manager.set_install_path(validated_path.clone())?;
         validated_path
     } else {
@@ -48,6 +56,7 @@ async fn run(cli: Cli) -> Result<()> {
             let default_path = std::env::current_dir()?.join("portablesource");
             let validated_path = utils::validate_and_create_path(&default_path)?;
             config_manager.set_install_path(validated_path.clone())?;
+            let _ = utils::save_install_path_to_registry(&validated_path);
             validated_path
         }
         #[cfg(unix)]
