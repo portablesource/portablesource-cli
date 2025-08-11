@@ -419,6 +419,8 @@ pub fn install_msvc_build_tools() -> Result<()> {
     let temp_dir = std::env::temp_dir().join("portablesource");
     fs::create_dir_all(&temp_dir)?;
     let installer_path = temp_dir.join("vs_buildtools.exe");
+    // Best-effort cleanup of previous leftover/locked file
+    if installer_path.exists() { let _ = std::fs::remove_file(&installer_path); }
 
     // Download file
     log::info!("Downloading installer to {:?}...", installer_path);
@@ -434,11 +436,16 @@ pub fn install_msvc_build_tools() -> Result<()> {
     }
     let mut file = std::fs::File::create(&installer_path)?;
     copy(&mut resp, &mut file)?;
+    // Ensure data is fully flushed and file handle is closed before executing (Windows lock avoidance)
+    let _ = file.sync_all();
+    drop(file);
 
     // Run installer
     log::info!("Running installer (this may take a while)...");
+    #[cfg(windows)]
     let status = Command::new(&installer_path)
         .args(args.split_whitespace())
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .status()
         .map_err(|e| PortableSourceError::command(format!("Failed to start installer: {}", e)))?;
 
