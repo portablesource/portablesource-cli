@@ -3,6 +3,7 @@
 use crate::{Result, PortableSourceError};
 use crate::config::{GpuConfig, GpuGeneration};
 use std::process::Command;
+#[cfg(windows)]
 use serde::Deserialize;
 #[cfg(windows)]
 use wmi::{COMLibrary, WMIConnection};

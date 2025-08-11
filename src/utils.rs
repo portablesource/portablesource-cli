@@ -295,7 +295,7 @@ pub fn setup_micromamba_base_env(install_path: &Path, cuda_version: Option<crate
         .status()
         .map_err(|e| PortableSourceError::environment(format!("Failed to run micromamba: {}", e)))?;
     if !status.success() {
-        return Err(PortableSourceError::environment("micromamba create failed".into()));
+        return Err(PortableSourceError::environment("micromamba create failed"));
     }
     // Verify CUDA runtime presence on DESK: libcudart.so* must exist if we attempted CUDA
     if attempted_cuda {
@@ -323,7 +323,7 @@ pub fn setup_micromamba_base_env(install_path: &Path, cuda_version: Option<crate
                     .status()
                     .map_err(|e| PortableSourceError::environment(format!("pip fallback failed: {}", e)))?;
                 if !pip_status.success() {
-                    return Err(PortableSourceError::environment("CUDA runtime verification failed: libcudart not found".into()));
+                    return Err(PortableSourceError::environment("CUDA runtime verification failed: libcudart not found"));
                 }
             }
             // Recheck libcudart after pip fallback (usually not provided by TRT, но оставим на случай будущих wheels)
@@ -340,7 +340,7 @@ pub fn setup_micromamba_base_env(install_path: &Path, cuda_version: Option<crate
                 }
                 if ok { break; }
             }
-            if !ok { return Err(PortableSourceError::environment("CUDA runtime verification failed: libcudart not found".into())); }
+            if !ok { return Err(PortableSourceError::environment("CUDA runtime verification failed: libcudart not found")); }
         }
     }
     Ok(())
@@ -380,6 +380,7 @@ pub fn check_msvc_build_tools_installed() -> bool {
         || check_msvc_registry()
 }
 
+#[cfg(windows)]
 fn check_msvc_registry() -> bool {
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     if let Ok(instances) = hklm.open_subkey(r"SOFTWARE\\Microsoft\\VisualStudio\\Setup\\Instances") {
@@ -396,6 +397,12 @@ fn check_msvc_registry() -> bool {
             }
         }
     }
+    false
+}
+
+#[cfg(not(windows))]
+fn check_msvc_registry() -> bool {
+    println!("Your os dont support!");
     false
 }
 
@@ -610,7 +617,7 @@ pub fn prepare_linux_system() -> Result<()> {
     let missing = linux_check_requirements(pm.clone());
     println!("\n=== Linux requirements check ===");
     for (tool, status) in linux_collect_tool_status() {
-        println!("- {}: {}", tool.0, status);
+        println!("- {}: {}", tool, status);
     }
     if missing.is_empty() {
         println!("All required packages are present.");
@@ -641,7 +648,7 @@ fn linux_detect_package_manager() -> LinuxPackageManager {
 }
 
 #[cfg(unix)]
-fn linux_collect_tool_status() -> Vec<((&'static str), String)> {
+fn linux_collect_tool_status() -> Vec<(&'static str, String)> {
     use std::process::Command;
     let mut out = Vec::new();
     let has = |bin: &str| which::which(bin).is_ok();
