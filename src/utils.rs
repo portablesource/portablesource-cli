@@ -478,12 +478,17 @@ pub fn install_msvc_build_tools() -> Result<()> {
 
     // Run installer
     log::info!("Running installer (this may take a while)...");
-    #[cfg(windows)]
-    let status = Command::new(&installer_path)
-        .args(args.split_whitespace())
-        .creation_flags(0x08000000) // CREATE_NO_WINDOW
-        .status()
-        .map_err(|e| PortableSourceError::command(format!("Failed to start installer: {}", e)))?;
+    let status = {
+        let mut cmd = Command::new(&installer_path);
+        cmd.args(args.split_whitespace());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        cmd.status()
+            .map_err(|e| PortableSourceError::command(format!("Failed to start installer: {}", e)))?
+    };
 
     // Cleanup best-effort
     let _ = std::fs::remove_file(&installer_path);
