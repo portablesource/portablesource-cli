@@ -667,6 +667,7 @@ impl RepositoryInstaller {
 
         // Ensure uv if available
         let uv_available = self.install_uv_in_venv(repo_name).unwrap_or(false);
+        info!("Plan: regular={} torch={} onnx={}", plan.regular_packages.len(), plan.torch_packages.len(), plan.onnx_packages.len());
 
         // 1) Regular packages via uv (prefer) или pip -r — сначала базовые зависимости
         if !plan.regular_packages.is_empty() {
@@ -715,15 +716,25 @@ impl RepositoryInstaller {
 
         // 3) Torch пакеты (через pip) с нужным индексом
         if !plan.torch_packages.is_empty() {
-            let mut pip_cmd = self.get_pip_executable(repo_name);
-            pip_cmd.push("install".into());
-            pip_cmd.push("--force-reinstall".into());
-            if let Some(index) = plan.torch_index_url.as_ref() {
-                pip_cmd.push("--index-url".into());
-                pip_cmd.push(index.clone());
+            if uv_available {
+                let mut uv_cmd = self.get_uv_executable(repo_name);
+                uv_cmd.extend(["pip".into(), "install".into(), "--force-reinstall".into()]);
+                if let Some(index) = plan.torch_index_url.as_ref() {
+                    uv_cmd.extend(["--index-url".into(), index.clone()]);
+                }
+                for p in &plan.torch_packages { uv_cmd.push(p.to_string()); }
+                run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing PyTorch packages (uv)"))?;
+            } else {
+                let mut pip_cmd = self.get_pip_executable(repo_name);
+                pip_cmd.push("install".into());
+                pip_cmd.push("--force-reinstall".into());
+                if let Some(index) = plan.torch_index_url.as_ref() {
+                    pip_cmd.push("--index-url".into());
+                    pip_cmd.push(index.clone());
+                }
+                for p in &plan.torch_packages { pip_cmd.push(p.to_string()); }
+                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing PyTorch packages"))?;
             }
-            for p in &plan.torch_packages { pip_cmd.push(p.to_string()); }
-            run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing PyTorch packages"))?;
         }
 
         // 4) Triton (если присутствует) — пропускаем на Linux, т.к. ставится безболезненно
@@ -742,6 +753,36 @@ impl RepositoryInstaller {
         if !plan.insightface_packages.is_empty() {
             for _p in &plan.insightface_packages {
                 self.handle_insightface_package(repo_name)?;
+            }
+        }
+
+        // 6) ORT fallback: если в requirements нет onnxruntime* и GPU NVIDIA — ставим ORT
+        {
+            let cfg = self._config_manager.get_config();
+            let gpu_up = cfg.gpu_config.as_ref().map(|g| g.name.to_uppercase()).unwrap_or_default();
+            let is_nvidia = gpu_up.contains("NVIDIA") || gpu_up.contains("RTX") || gpu_up.contains("GEFORCE");
+            if is_nvidia && plan.onnx_packages.is_empty() {
+                // Проверяем установлен ли уже ORT
+                let mut probe = self.get_pip_executable(repo_name);
+                probe.extend(["show".into(), "onnxruntime-gpu".into()]);
+                let already = run_tool_with_env(&self._env_manager, &probe, None).is_ok();
+                if !already {
+                    let spec = self.get_onnx_package_spec();
+                    let use_nightly = self.needs_onnx_nightly();
+                    if uv_available {
+                        let mut uv_cmd = self.get_uv_executable(repo_name);
+                        uv_cmd.extend(["pip".into(), "install".into()]);
+                        if use_nightly { uv_cmd.push("--pre".into()); }
+                        uv_cmd.push(spec);
+                        run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing ONNX (fallback)"))?;
+                    } else {
+                        let mut pip_cmd = self.get_pip_executable(repo_name);
+                        pip_cmd.push("install".into());
+                        if use_nightly { pip_cmd.push("--pre".into()); }
+                        pip_cmd.push(spec);
+                        run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing ONNX (fallback)"))?;
+                    }
+                }
             }
         }
 
@@ -808,9 +849,18 @@ impl RepositoryInstaller {
                 let uv_available = self.install_uv_in_venv(repo_name).unwrap_or(false);
                 let mut cmd = if uv_available { self.get_uv_executable(repo_name) } else { self.get_pip_executable(repo_name) };
                 if uv_available { cmd.extend(["pip".into(), "install".into()]); } else { cmd.push("install".into()); }
+                // Map packages: on NVIDIA заменить onnxruntime -> onnxruntime-gpu, и если нужно — включить --pre
+                let mut mapped: Vec<String> = Vec::new();
                 if let Some(pkgs) = step.get("packages").and_then(|p| p.as_array()) {
-                    for p in pkgs { if let Some(s) = p.as_str() { cmd.push(s.to_string()); } }
+                    for p in pkgs {
+                        if let Some(s) = p.as_str() {
+                            mapped.push(self.apply_onnx_gpu_detection(s));
+                        }
+                    }
                 }
+                let needs_pre = self.needs_onnx_nightly() && mapped.iter().any(|m| m.starts_with("onnxruntime-gpu"));
+                if needs_pre { cmd.push("--pre".into()); }
+                for m in mapped { cmd.push(m); }
                 self.add_install_flags_and_urls(repo_name, &mut cmd, step)?;
                 run_tool_with_env(&self._env_manager, &cmd, Some("Installing packages"))?;
             }
@@ -1020,10 +1070,11 @@ impl RepositoryInstaller {
             cuda_exports.push_str(&format!("export CUDA_HOME=\"{}\"\n", base));
             cuda_exports.push_str(&format!("export CUDA_ROOT=\"{}\"\n", base));
             cuda_exports.push_str(&format!("export PATH=\"{}:$PATH\"\n", bin));
-            cuda_exports.push_str(&format!("export LD_LIBRARY_PATH=\"{}:{}:$LD_LIBRARY_PATH\"\n", lib, lib64));
+            // Use default expansion for unset variable due to 'set -u'
+            cuda_exports.push_str(&format!("export LD_LIBRARY_PATH=\"{}:{}:${{LD_LIBRARY_PATH:-}}\"\n", lib, lib64));
         }}
 
-        let content = format!("#!/usr/bin/env bash\nset -Eeuo pipefail\n\nINSTALL=\"{}\"\nENV_PATH=\"$INSTALL/ps_env\"\nMAMBA=\"$ENV_PATH/micromamba-linux-64\"\nBASE_PREFIX=\"$ENV_PATH/mamba_env\"\nREPO_PATH=\"{}\"\nVENV=\"$INSTALL/envs/{}\"\nPYEXE=\"$VENV/bin/python\"\n\n# micromamba hook + activate base\nif [[ -x \"$MAMBA\" ]]; then\n  eval \"$($MAMBA shell hook -s bash)\"\n  $MAMBA activate -p \"$BASE_PREFIX\" || true\nfi\n\n# activate project venv if present\nif [[ -f \"$VENV/bin/activate\" ]]; then\n  source \"$VENV/bin/activate\"\nfi\n\n{}\ncd \"$REPO_PATH\"\nif [[ -x \"$PYEXE\" ]]; then\n  exec \"$PYEXE\" \"{}\" {}\nelse\n  exec python3 \"{}\" {}\nfi\n",
+        let content = format!("#!/usr/bin/env bash\nset -Eeuo pipefail\n\nINSTALL=\"{}\"\nENV_PATH=\"$INSTALL/ps_env\"\nBASE_PREFIX=\"$ENV_PATH/mamba_env\"\nREPO_PATH=\"{}\"\nVENV=\"$INSTALL/envs/{}\"\nPYEXE=\"$VENV/bin/python\"\n\n# prepend micromamba base bin to PATH (no activation)\nexport PATH=\"$BASE_PREFIX/bin:$PATH\"\n\n# activate project venv if present (be tolerant to unset vars)\nif [[ -f \"$VENV/bin/activate\" ]]; then\n  set +u\n  source \"$VENV/bin/activate\" || true\n  set -u\nfi\n\n{}\ncd \"$REPO_PATH\"\nif [[ -x \"$PYEXE\" ]]; then\n  exec \"$PYEXE\" \"{}\" {}\nelse\n  exec python3 \"{}\" {}\nfi\n",
             install_path.to_string_lossy(),
             repo_path.to_string_lossy(),
             repo_name,

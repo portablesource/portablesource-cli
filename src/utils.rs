@@ -6,21 +6,23 @@ use crate::envs_manager::PortableEnvironmentManager;
 use crate::repository_installer::RepositoryInstaller;
 use crate::gpu::{GpuDetector, GpuType};
 use std::path::{Path, PathBuf};
-#[cfg(windows)]
-use winreg::enums::*;
-#[cfg(windows)]
-use winreg::RegKey;
-#[cfg(unix)]
-use libc;
 use std::process::Command;
 use std::fs;
 use std::time::Duration;
+
+#[cfg(unix)]
 use indicatif::{ProgressBar, ProgressStyle};
+#[cfg(unix)]
+use libc;
 
 #[cfg(windows)]
 const REGISTRY_KEY: &str = r"Software\PortableSource";
 #[cfg(windows)]
 const INSTALL_PATH_VALUE: &str = "InstallPath";
+#[cfg(windows)]
+use winreg::enums::*;
+#[cfg(windows)]
+use winreg::RegKey;
 
 /// Save installation path (Windows: registry; Linux: /etc file)
 #[cfg(windows)]
