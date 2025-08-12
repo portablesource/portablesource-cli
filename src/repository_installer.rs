@@ -14,6 +14,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use url::Url;
+#[cfg(unix)]
+use crate::utils::{detect_linux_mode, LinuxMode};
 
 pub struct RepositoryInstaller {
     install_path: PathBuf,
@@ -220,6 +222,8 @@ impl RepositoryInstaller {
         // Generate startup script (Windows only for now)
         #[cfg(windows)]
         self.generate_startup_script(&repo_path, &repo_info)?;
+        #[cfg(unix)]
+        self.generate_startup_script_unix(&repo_path, &repo_info)?;
 
         // Send stats (non-fatal)
         let _ = self.server_client.send_download_stats(&repo_name);
@@ -255,6 +259,12 @@ impl RepositoryInstaller {
             // Final save after script generation
             let _ = self._config_manager.save_config();
             self.generate_startup_script(&repo_path, &repo_info)?;
+        }
+        #[cfg(unix)]
+        {
+            println!("[PortableSource] Generating start script (.sh)...");
+            let _ = self._config_manager.save_config();
+            self.generate_startup_script_unix(&repo_path, &repo_info)?;
         }
 
         let _ = self.server_client.send_download_stats(&name);
@@ -619,14 +629,31 @@ impl RepositoryInstaller {
             let python_exe = venv_path.join("python.exe");
             if !python_exe.exists() { return Err(PortableSourceError::installation(format!("Python executable not found in {:?}", venv_path))); }
         } else {
-            // Linux: создаём venv при помощи системного python3
+            // Linux: в DESK режиме используем python из micromamba-базы, в CLOUD — системный python3
             fs::create_dir_all(&envs_path)?;
-            let status = std::process::Command::new("python3")
+            let mamba_py = install_path.join("ps_env").join("mamba_env").join("bin").join("python");
+            #[cfg(unix)]
+            let py_bin = if matches!(detect_linux_mode(), LinuxMode::Desk) && mamba_py.exists() { mamba_py } else { PathBuf::from("python3") };
+            #[cfg(not(unix))]
+            let py_bin = mamba_py; // unreachable, just to satisfy type
+            let status = std::process::Command::new(&py_bin)
                 .args(["-m", "venv", venv_path.to_string_lossy().as_ref()])
                 .status()
                 .map_err(|e| PortableSourceError::environment(format!("Failed to create venv: {}", e)))?;
             if !status.success() {
-                return Err(PortableSourceError::environment("python3 -m venv failed"));
+                return Err(PortableSourceError::environment("python -m venv failed"));
+            }
+            // Ensure pip is present in the new venv
+            let venv_py = venv_path.join("bin").join("python");
+            let pip_ok = std::process::Command::new(&venv_py)
+                .args(["-m", "pip", "--version"]) 
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !pip_ok {
+                let _ = std::process::Command::new(&venv_py)
+                    .args(["-m", "ensurepip", "-U"]) 
+                    .status();
             }
         }
         Ok(())
@@ -640,6 +667,7 @@ impl RepositoryInstaller {
 
         // Ensure uv if available
         let uv_available = self.install_uv_in_venv(repo_name).unwrap_or(false);
+        info!("Plan: regular={} torch={} onnx={}", plan.regular_packages.len(), plan.torch_packages.len(), plan.onnx_packages.len());
 
         // 1) Regular packages via uv (prefer) или pip -r — сначала базовые зависимости
         if !plan.regular_packages.is_empty() {
@@ -663,27 +691,50 @@ impl RepositoryInstaller {
 
         // 2) ONNX пакеты
         if !plan.onnx_packages.is_empty() {
-            let package_name = plan.onnx_package_name.clone().unwrap_or_else(|| "onnxruntime".into());
-            let mut version_suffix = String::new();
-            if let Some(pkg) = plan.onnx_packages.iter().find(|p| p.name == "onnxruntime" && p.version.is_some()) {
-                version_suffix = format!("=={}", pkg.version.clone().unwrap());
+            // Форсим onnxruntime-gpu>=1.20 для Blackwell/NVIDIA на любых ОС
+            let forced_spec = self.get_onnx_package_spec();
+            let spec = if forced_spec.contains(">=") { forced_spec } else {
+                if let Some(pkg) = plan.onnx_packages.iter().find(|p| p.name == "onnxruntime" && p.version.is_some()) {
+                    format!("{}=={}", forced_spec, pkg.version.clone().unwrap())
+                } else { forced_spec }
+            };
+            let use_nightly = self.needs_onnx_nightly();
+            if uv_available {
+                let mut uv_cmd = self.get_uv_executable(repo_name);
+                uv_cmd.extend(["pip".into(), "install".into()]);
+                if use_nightly { uv_cmd.push("--pre".into()); }
+                uv_cmd.push(spec);
+                run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing ONNX package (uv)"))?;
+            } else {
+                let mut pip_cmd = self.get_pip_executable(repo_name);
+                pip_cmd.push("install".into());
+                if use_nightly { pip_cmd.push("--pre".into()); }
+                pip_cmd.push(spec);
+                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing ONNX package"))?;
             }
-            let mut pip_cmd = self.get_pip_executable(repo_name);
-            pip_cmd.extend(["install".into(), format!("{}{}", package_name, version_suffix)]);
-            run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing ONNX package"))?;
         }
 
         // 3) Torch пакеты (через pip) с нужным индексом
         if !plan.torch_packages.is_empty() {
-            let mut pip_cmd = self.get_pip_executable(repo_name);
-            pip_cmd.push("install".into());
-            pip_cmd.push("--force-reinstall".into());
-            if let Some(index) = plan.torch_index_url.as_ref() {
-                pip_cmd.push("--index-url".into());
-                pip_cmd.push(index.clone());
+            if uv_available {
+                let mut uv_cmd = self.get_uv_executable(repo_name);
+                uv_cmd.extend(["pip".into(), "install".into(), "--force-reinstall".into()]);
+                if let Some(index) = plan.torch_index_url.as_ref() {
+                    uv_cmd.extend(["--index-url".into(), index.clone()]);
+                }
+                for p in &plan.torch_packages { uv_cmd.push(p.to_string()); }
+                run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing PyTorch packages (uv)"))?;
+            } else {
+                let mut pip_cmd = self.get_pip_executable(repo_name);
+                pip_cmd.push("install".into());
+                pip_cmd.push("--force-reinstall".into());
+                if let Some(index) = plan.torch_index_url.as_ref() {
+                    pip_cmd.push("--index-url".into());
+                    pip_cmd.push(index.clone());
+                }
+                for p in &plan.torch_packages { pip_cmd.push(p.to_string()); }
+                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing PyTorch packages"))?;
             }
-            for p in &plan.torch_packages { pip_cmd.push(p.to_string()); }
-            run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing PyTorch packages"))?;
         }
 
         // 4) Triton (если присутствует) — пропускаем на Linux, т.к. ставится безболезненно
@@ -702,6 +753,36 @@ impl RepositoryInstaller {
         if !plan.insightface_packages.is_empty() {
             for _p in &plan.insightface_packages {
                 self.handle_insightface_package(repo_name)?;
+            }
+        }
+
+        // 6) ORT fallback: если в requirements нет onnxruntime* и GPU NVIDIA — ставим ORT
+        {
+            let cfg = self._config_manager.get_config();
+            let gpu_up = cfg.gpu_config.as_ref().map(|g| g.name.to_uppercase()).unwrap_or_default();
+            let is_nvidia = gpu_up.contains("NVIDIA") || gpu_up.contains("RTX") || gpu_up.contains("GEFORCE");
+            if is_nvidia && plan.onnx_packages.is_empty() {
+                // Проверяем установлен ли уже ORT
+                let mut probe = self.get_pip_executable(repo_name);
+                probe.extend(["show".into(), "onnxruntime-gpu".into()]);
+                let already = run_tool_with_env(&self._env_manager, &probe, None).is_ok();
+                if !already {
+                    let spec = self.get_onnx_package_spec();
+                    let use_nightly = self.needs_onnx_nightly();
+                    if uv_available {
+                        let mut uv_cmd = self.get_uv_executable(repo_name);
+                        uv_cmd.extend(["pip".into(), "install".into()]);
+                        if use_nightly { uv_cmd.push("--pre".into()); }
+                        uv_cmd.push(spec);
+                        run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing ONNX (fallback)"))?;
+                    } else {
+                        let mut pip_cmd = self.get_pip_executable(repo_name);
+                        pip_cmd.push("install".into());
+                        if use_nightly { pip_cmd.push("--pre".into()); }
+                        pip_cmd.push(spec);
+                        run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing ONNX (fallback)"))?;
+                    }
+                }
             }
         }
 
@@ -724,8 +805,14 @@ impl RepositoryInstaller {
     }
 
     fn get_uv_executable(&self, repo_name: &str) -> Vec<String> {
-        let py = self.get_python_in_env(repo_name);
-        if py.exists() { vec![py.to_string_lossy().to_string(), "-m".into(), "uv".into()] } else { vec!["python".into(), "-m".into(), "uv".into()] }
+        // Всегда вызываем модуль uv как "<env_python> -m uv";
+        // надёжнее, чем полагаться на PATH и бинарь uv
+        let mut py_path = self.get_python_in_env(repo_name);
+        if !py_path.exists() {
+            // Фолбэк на системный python (windows/python.exe, unix/python3)
+            py_path = if cfg!(windows) { PathBuf::from("python.exe") } else { PathBuf::from("python3") };
+        }
+        vec![py_path.to_string_lossy().to_string(), "-m".into(), "uv".into()]
     }
 
     fn install_uv_in_venv(&self, repo_name: &str) -> Result<bool> {
@@ -762,9 +849,18 @@ impl RepositoryInstaller {
                 let uv_available = self.install_uv_in_venv(repo_name).unwrap_or(false);
                 let mut cmd = if uv_available { self.get_uv_executable(repo_name) } else { self.get_pip_executable(repo_name) };
                 if uv_available { cmd.extend(["pip".into(), "install".into()]); } else { cmd.push("install".into()); }
+                // Map packages: on NVIDIA заменить onnxruntime -> onnxruntime-gpu, и если нужно — включить --pre
+                let mut mapped: Vec<String> = Vec::new();
                 if let Some(pkgs) = step.get("packages").and_then(|p| p.as_array()) {
-                    for p in pkgs { if let Some(s) = p.as_str() { cmd.push(s.to_string()); } }
+                    for p in pkgs {
+                        if let Some(s) = p.as_str() {
+                            mapped.push(self.apply_onnx_gpu_detection(s));
+                        }
+                    }
                 }
+                let needs_pre = self.needs_onnx_nightly() && mapped.iter().any(|m| m.starts_with("onnxruntime-gpu"));
+                if needs_pre { cmd.push("--pre".into()); }
+                for m in mapped { cmd.push(m); }
                 self.add_install_flags_and_urls(repo_name, &mut cmd, step)?;
                 run_tool_with_env(&self._env_manager, &cmd, Some("Installing packages"))?;
             }
@@ -869,6 +965,50 @@ impl RepositoryInstaller {
         base.into()
     }
 
+    fn needs_onnx_nightly(&self) -> bool {
+        let cfg = self._config_manager.get_config();
+        // Blackwell GPUs (RTX 50xx)
+        if let Some(gpu) = &cfg.gpu_config {
+            let gen = format!("{:?}", gpu.generation).to_lowercase();
+            let name_up = gpu.name.to_uppercase();
+            let is_nvidia = name_up.contains("NVIDIA") || name_up.contains("RTX") || name_up.contains("GEFORCE");
+            if is_nvidia && (gen.contains("blackwell") || name_up.contains("RTX 50")) {
+                return true;
+            }
+        }
+        // Linux: system CUDA 12.8
+        #[cfg(unix)]
+        {
+            if let Some(cv) = crate::utils::detect_cuda_version_from_system() {
+                if matches!(cv, crate::config::CudaVersionLinux::Cuda128) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    // Выбор конкретного пакета ORT для установки с учётом поколения GPU
+    fn get_onnx_package_spec(&self) -> String {
+        let cfg = self._config_manager.get_config();
+        if let Some(gpu) = &cfg.gpu_config {
+            let gen = format!("{:?}", gpu.generation).to_lowercase();
+            let name_up = gpu.name.to_uppercase();
+            let is_nvidia = name_up.contains("NVIDIA") || name_up.contains("RTX") || name_up.contains("GEFORCE");
+            let is_blackwell = gen.contains("blackwell") || name_up.contains("RTX 50");
+            if is_nvidia && is_blackwell {
+                return "onnxruntime-gpu>=1.20".into();
+            }
+            if is_nvidia {
+                return "onnxruntime-gpu".into();
+            }
+            if (name_up.contains("AMD") || name_up.contains("INTEL")) && cfg!(windows) {
+                return "onnxruntime-directml".into();
+            }
+        }
+        "onnxruntime".into()
+    }
+
     fn generate_startup_script(&self, repo_path: &Path, repo_info: &RepositoryInfo) -> Result<bool> {
         let repo_name = repo_path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
         let mut main_file = repo_info.main_file.clone();
@@ -901,6 +1041,56 @@ impl RepositoryInstaller {
         );
         let mut f = fs::File::create(&bat_file)?;
         f.write_all(content.as_bytes())?;
+        Ok(true)
+    }
+
+    #[cfg(unix)]
+    fn generate_startup_script_unix(&self, repo_path: &Path, repo_info: &RepositoryInfo) -> Result<bool> {
+        use std::os::unix::fs::PermissionsExt;
+        let repo_name = repo_path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+        let mut main_file = repo_info.main_file.clone();
+        if main_file.is_none() { main_file = self.main_file_finder.find_main_file(&repo_name, repo_path, repo_info.url.as_deref()); }
+        let main_file = match main_file { Some(m) => m, None => { warn!("Could not determine main file for repository"); return Ok(false); } };
+
+        let cfg = self._config_manager.get_config();
+        if cfg.install_path.as_os_str().is_empty() { return Err(PortableSourceError::installation("Install path not configured")); }
+        let install_path = &cfg.install_path;
+
+        let sh_file = repo_path.join(format!("start_{}.sh", repo_name));
+        let program_args = repo_info.program_args.clone().unwrap_or_default();
+
+        // CUDA PATH exports if configured (optional)
+        let mut cuda_exports = String::new();
+        if let Some(gpu) = &cfg.gpu_config { if let Some(paths) = &gpu.cuda_paths {
+            let base = paths.base_path.to_string_lossy();
+            let bin = paths.cuda_bin.to_string_lossy();
+            let lib = paths.cuda_lib.to_string_lossy();
+            let lib64 = paths.cuda_lib_64.to_string_lossy();
+            cuda_exports.push_str(&format!("export CUDA_PATH=\"{}\"\n", base));
+            cuda_exports.push_str(&format!("export CUDA_HOME=\"{}\"\n", base));
+            cuda_exports.push_str(&format!("export CUDA_ROOT=\"{}\"\n", base));
+            cuda_exports.push_str(&format!("export PATH=\"{}:$PATH\"\n", bin));
+            // Use default expansion for unset variable due to 'set -u'
+            cuda_exports.push_str(&format!("export LD_LIBRARY_PATH=\"{}:{}:${{LD_LIBRARY_PATH:-}}\"\n", lib, lib64));
+        }}
+
+        let content = format!("#!/usr/bin/env bash\nset -Eeuo pipefail\n\nINSTALL=\"{}\"\nENV_PATH=\"$INSTALL/ps_env\"\nBASE_PREFIX=\"$ENV_PATH/mamba_env\"\nREPO_PATH=\"{}\"\nVENV=\"$INSTALL/envs/{}\"\nPYEXE=\"$VENV/bin/python\"\n\n# prepend micromamba base bin to PATH (no activation)\nexport PATH=\"$BASE_PREFIX/bin:$PATH\"\n\n# activate project venv if present (be tolerant to unset vars)\nif [[ -f \"$VENV/bin/activate\" ]]; then\n  set +u\n  source \"$VENV/bin/activate\" || true\n  set -u\nfi\n\n{}\ncd \"$REPO_PATH\"\nif [[ -x \"$PYEXE\" ]]; then\n  exec \"$PYEXE\" \"{}\" {}\nelse\n  exec python3 \"{}\" {}\nfi\n",
+            install_path.to_string_lossy(),
+            repo_path.to_string_lossy(),
+            repo_name,
+            cuda_exports,
+            main_file,
+            program_args,
+            main_file,
+            program_args,
+        );
+
+        let mut f = fs::File::create(&sh_file)?;
+        use std::io::Write as _;
+        f.write_all(content.as_bytes())?;
+        let mut perms = fs::metadata(&sh_file)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&sh_file, perms)?;
         Ok(true)
     }
 

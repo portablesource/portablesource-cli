@@ -6,18 +6,23 @@ use crate::envs_manager::PortableEnvironmentManager;
 use crate::repository_installer::RepositoryInstaller;
 use crate::gpu::{GpuDetector, GpuType};
 use std::path::{Path, PathBuf};
-#[cfg(windows)]
-use winreg::enums::*;
-#[cfg(windows)]
-use winreg::RegKey;
-#[cfg(unix)]
-use libc;
 use std::process::Command;
 use std::fs;
 use std::time::Duration;
 
+#[cfg(unix)]
+use indicatif::{ProgressBar, ProgressStyle};
+#[cfg(unix)]
+use libc;
+
+#[cfg(windows)]
 const REGISTRY_KEY: &str = r"Software\PortableSource";
+#[cfg(windows)]
 const INSTALL_PATH_VALUE: &str = "InstallPath";
+#[cfg(windows)]
+use winreg::enums::*;
+#[cfg(windows)]
+use winreg::RegKey;
 
 /// Save installation path (Windows: registry; Linux: /etc file)
 #[cfg(windows)]
@@ -266,36 +271,75 @@ pub fn setup_micromamba_base_env(install_path: &Path, cuda_version: Option<crate
     // Ensure directory layout
     create_directory_structure(install_path)?;
     let mamba_bin = install_path.join("ps_env").join("micromamba-linux-64");
-    let mamba_url = "https://github.com/mamba-org/micromamba-releases/releases/download/latest/micromamba-linux-64";
+    // Correct latest asset URL + fallback pinned version
+    let mamba_url_latest = "https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-linux-64";
+    let mamba_url_fallback = "https://github.com/mamba-org/micromamba-releases/releases/download/2.3.1-0/micromamba-linux-64";
     if !mamba_bin.exists() {
-        download_file(mamba_url, &mamba_bin)?;
+        if let Err(e) = download_file(mamba_url_latest, &mamba_bin) {
+            log::warn!("micromamba latest download failed: {} — trying fallback", e);
+            download_file(mamba_url_fallback, &mamba_bin)?;
+        }
         let mut perms = std::fs::metadata(&mamba_bin)?.permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&mamba_bin, perms)?;
     }
 
     let base_prefix = install_path.join("ps_env").join("mamba_env");
+    let root_prefix = install_path.join("ps_env");
     let mut args: Vec<String> = vec![
-        "create".into(), "-y".into(), "-p".into(), base_prefix.to_string_lossy().to_string(),
-        "-c".into(), "nvidia/label/tensorrt-main".into(), "-c".into(), "nvidia".into(), "-c".into(), "conda-forge".into(),
+        "create".into(),
+        "-y".into(),
+        "-r".into(), root_prefix.to_string_lossy().to_string(),
+        "-p".into(), base_prefix.to_string_lossy().to_string(),
+        "-c".into(), "nvidia".into(), "-c".into(), "conda-forge".into(),
         "python=3.11".into(), "git".into(), "ffmpeg".into(),
     ];
     let mut attempted_cuda = false;
     if let Some(v) = cuda_version.as_ref() {
         let spec = cuda_version_to_runtime_spec(v);
-        args.push(format!("cuda-runtime={}", spec));
+        args.push(format!("cuda-toolkit={}", spec));
         args.push("cudnn".into());
-        args.push("tensorrt".into());
         attempted_cuda = true;
     }
     // auto-accept ToS/licenses
-    let status = std::process::Command::new(&mamba_bin)
-        .env("MAMBA_ALWAYS_YES", "1")
+    let mut child = std::process::Command::new(&mamba_bin)
+        .env("MAMBA_ALWAYS_YES", "true")
+        .env("MAMBA_NO_RC", "true")
+        .env("MAMBA_ROOT_PREFIX", &root_prefix)
+        .current_dir(&root_prefix)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
         .args(args)
-        .status()
+        .spawn()
         .map_err(|e| PortableSourceError::environment(format!("Failed to run micromamba: {}", e)))?;
-    if !status.success() {
-        return Err(PortableSourceError::environment("micromamba create failed".into()));
+
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(ProgressStyle::with_template("{spinner} {msg}").unwrap());
+    pb.enable_steady_tick(Duration::from_millis(120));
+    if let Some(out) = child.stdout.take() {
+        use std::io::{BufRead, BufReader};
+        let reader = BufReader::new(out);
+        for line in reader.lines().flatten() {
+            let l = line.trim();
+            if !l.is_empty() {
+                pb.set_message(l.to_string());
+            }
+        }
+    }
+    let status = child.wait().map_err(|e| PortableSourceError::environment(format!("micromamba wait failed: {}", e)))?;
+    if status.success() {
+        pb.finish_with_message("micromamba: done");
+        // Verify env created
+        let py = base_prefix.join("bin").join("python");
+        if !py.exists() {
+            return Err(PortableSourceError::environment(format!(
+                "micromamba create succeeded but python not found at {}",
+                py.display()
+            )));
+        }
+    } else {
+        pb.finish_with_message("micromamba: failed");
+        return Err(PortableSourceError::environment("micromamba create failed"));
     }
     // Verify CUDA runtime presence on DESK: libcudart.so* must exist if we attempted CUDA
     if attempted_cuda {
@@ -323,7 +367,7 @@ pub fn setup_micromamba_base_env(install_path: &Path, cuda_version: Option<crate
                     .status()
                     .map_err(|e| PortableSourceError::environment(format!("pip fallback failed: {}", e)))?;
                 if !pip_status.success() {
-                    return Err(PortableSourceError::environment("CUDA runtime verification failed: libcudart not found".into()));
+                    return Err(PortableSourceError::environment("CUDA runtime verification failed: libcudart not found"));
                 }
             }
             // Recheck libcudart after pip fallback (usually not provided by TRT, но оставим на случай будущих wheels)
@@ -340,7 +384,7 @@ pub fn setup_micromamba_base_env(install_path: &Path, cuda_version: Option<crate
                 }
                 if ok { break; }
             }
-            if !ok { return Err(PortableSourceError::environment("CUDA runtime verification failed: libcudart not found".into())); }
+            if !ok { return Err(PortableSourceError::environment("CUDA runtime verification failed: libcudart not found")); }
         }
     }
     Ok(())
@@ -380,6 +424,7 @@ pub fn check_msvc_build_tools_installed() -> bool {
         || check_msvc_registry()
 }
 
+#[cfg(windows)]
 fn check_msvc_registry() -> bool {
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     if let Ok(instances) = hklm.open_subkey(r"SOFTWARE\\Microsoft\\VisualStudio\\Setup\\Instances") {
@@ -396,6 +441,12 @@ fn check_msvc_registry() -> bool {
             }
         }
     }
+    false
+}
+
+#[cfg(not(windows))]
+fn check_msvc_registry() -> bool {
+    println!("Your os dont support!");
     false
 }
 
@@ -610,7 +661,7 @@ pub fn prepare_linux_system() -> Result<()> {
     let missing = linux_check_requirements(pm.clone());
     println!("\n=== Linux requirements check ===");
     for (tool, status) in linux_collect_tool_status() {
-        println!("- {}: {}", tool.0, status);
+        println!("- {}: {}", tool, status);
     }
     if missing.is_empty() {
         println!("All required packages are present.");
@@ -641,7 +692,7 @@ fn linux_detect_package_manager() -> LinuxPackageManager {
 }
 
 #[cfg(unix)]
-fn linux_collect_tool_status() -> Vec<((&'static str), String)> {
+fn linux_collect_tool_status() -> Vec<(&'static str, String)> {
     use std::process::Command;
     let mut out = Vec::new();
     let has = |bin: &str| which::which(bin).is_ok();
@@ -759,12 +810,22 @@ pub fn get_system_info() -> Result<String> {
     info.push(format!("OS: {}", std::env::consts::OS));
     info.push(format!("Architecture: {}", std::env::consts::ARCH));
     
-    // Available tools
-    let tools = ["git", "python", "pip"];
-    for tool in &tools {
-        let available = which::which(tool).is_ok();
-        info.push(format!("{}: {}", tool, if available { "Available" } else { "Not found" }));
-    }
+    // Available tools (cross-platform detection)
+    let git_ok = which::which("git").is_ok();
+    let py_ok = which::which("python3").is_ok() || which::which("python").is_ok();
+    let pip_ok = which::which("pip3").is_ok() || {
+        let py = if which::which("python3").is_ok() { "python3" } else { "python" };
+        std::process::Command::new(py)
+            .args(["-m", "pip", "--version"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    let ffmpeg_ok = which::which("ffmpeg").is_ok();
+    info.push(format!("git: {}", if git_ok { "Available" } else { "Not found" }));
+    info.push(format!("python: {}", if py_ok { "Available" } else { "Not found" }));
+    info.push(format!("pip: {}", if pip_ok { "Available" } else { "Not found" }));
+    info.push(format!("ffmpeg: {}", if ffmpeg_ok { "Available" } else { "Not found" }));
     
     Ok(info.join("\n"))
 }
