@@ -425,6 +425,13 @@ impl ConfigManager {
             self.config.environment_setup_completed = true;
         }
 
+        // Unix: also consider micromamba base env as a completed base
+        #[cfg(unix)]
+        if !self.config.environment_setup_completed {
+            let mamba_py = ps_env.join("mamba_env").join("bin").join("python");
+            if mamba_py.exists() { self.config.environment_setup_completed = true; }
+        }
+
         Ok(())
     }
      

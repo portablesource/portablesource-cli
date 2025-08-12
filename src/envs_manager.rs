@@ -377,6 +377,26 @@ impl PortableEnvironmentManager {
             if let Some(exe_dir) = exe_dir { if exe_dir.exists() { tool_paths.push(exe_dir.to_string_lossy().to_string()); } }
         }
 
+        // Linux: prepend micromamba base bin and libraries so all tools/rt are visible to project venv
+        #[cfg(unix)]
+        {
+            let mamba_base = self.install_path.join("ps_env").join("mamba_env");
+            let mamba_bin = mamba_base.join("bin");
+            let mamba_lib = mamba_base.join("lib");
+            let mamba_lib64 = mamba_base.join("lib64");
+            if mamba_bin.exists() { tool_paths.insert(0, mamba_bin.to_string_lossy().to_string()); }
+            // LD_LIBRARY_PATH layering
+            let mut ld_paths: Vec<String> = Vec::new();
+            if mamba_lib.exists() { ld_paths.push(mamba_lib.to_string_lossy().to_string()); }
+            if mamba_lib64.exists() { ld_paths.push(mamba_lib64.to_string_lossy().to_string()); }
+            if !ld_paths.is_empty() {
+                let current = env_vars.get("LD_LIBRARY_PATH").cloned().unwrap_or_default();
+                let sep = ":";
+                let merged = if current.is_empty() { ld_paths.join(sep) } else { format!("{}{}{}", ld_paths.join(sep), sep, current) };
+                env_vars.insert("LD_LIBRARY_PATH".to_string(), merged);
+            }
+        }
+
         // CUDA PATH vars
         if let Some(gpu) = &self.config_manager.get_config().gpu_config {
             if let Some(paths) = &gpu.cuda_paths {
@@ -912,18 +932,31 @@ impl PortableEnvironmentManager {
     
     /// Get path to Git executable
     pub fn get_git_executable(&self) -> Option<PathBuf> {
-        let git_path = self.ps_env_path.join("git").join("bin").join("git.exe");
-        if git_path.exists() {
-            Some(git_path)
+        if cfg!(windows) {
+            let git_path = self.ps_env_path.join("git").join("bin").join("git.exe");
+            return if git_path.exists() { Some(git_path) } else { None };
         } else {
+            // Prefer micromamba base
+            let m_git = self.install_path.join("ps_env").join("mamba_env").join("bin").join("git");
+            if m_git.exists() { return Some(m_git); }
+            let p = self.ps_env_path.join("git").join("bin").join("git");
+            if p.exists() { return Some(p); }
             None
         }
     }
 
     /// Get path to FFmpeg executable
     pub fn get_ffmpeg_executable(&self) -> Option<PathBuf> {
-        let ffmpeg_path = self.ps_env_path.join("ffmpeg").join("ffmpeg.exe");
-        if ffmpeg_path.exists() { Some(ffmpeg_path) } else { None }
+        if cfg!(windows) {
+            let ffmpeg_path = self.ps_env_path.join("ffmpeg").join("ffmpeg.exe");
+            return if ffmpeg_path.exists() { Some(ffmpeg_path) } else { None };
+        } else {
+            let m_ff = self.install_path.join("ps_env").join("mamba_env").join("bin").join("ffmpeg");
+            if m_ff.exists() { return Some(m_ff); }
+            let p = self.ps_env_path.join("ffmpeg").join("ffmpeg");
+            if p.exists() { return Some(p); }
+            None
+        }
     }
     
     /// Detailed environment status (summary)

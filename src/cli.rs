@@ -26,9 +26,11 @@ pub enum Commands {
     SetupEnv,
     
     /// Register installation path in registry
+    #[cfg(windows)]
     SetupReg,
     
     /// Unregister installation path from registry
+    #[cfg(windows)]
     Unregister,
     
     /// Change installation path
@@ -61,9 +63,11 @@ pub enum Commands {
     /// Check environment status and tools
     CheckEnv,
     
+    #[cfg(windows)]
     /// Install MSVC Build Tools
     InstallMsvc,
     
+    #[cfg(windows)]
     /// Check MSVC Build Tools installation
     CheckMsvc,
     

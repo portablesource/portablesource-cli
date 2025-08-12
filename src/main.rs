@@ -29,11 +29,49 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    // Fast-path: commands that don't require config or install_path
+    match cli.command.as_ref() {
+        Some(Commands::CheckGpu) => {
+            return check_gpu();
+        }
+        Some(Commands::Version) => {
+            utils::show_version();
+            return Ok(());
+        }
+        _ => {}
+    }
+
     // Initialize configuration manager
     let mut config_manager = ConfigManager::new(None)?;
     
     // Handle install path from CLI, registry, config, or default
-    let install_path = if let Some(path) = cli.install_path {
+    // Skip interactive prompt for commands that don't need install_path
+    #[cfg(windows)]
+    let needs_install_path = matches!(cli.command, Some(Commands::SetupEnv) | Some(Commands::InstallRepo { .. }) | Some(Commands::UpdateRepo { .. }) | Some(Commands::DeleteRepo { .. }) | Some(Commands::ListRepos) | Some(Commands::ChangePath) | Some(Commands::CheckEnv));
+    #[cfg(not(windows))]
+    let needs_install_path = matches!(cli.command, Some(Commands::SetupEnv) | Some(Commands::InstallRepo { .. }) | Some(Commands::UpdateRepo { .. }) | Some(Commands::DeleteRepo { .. }) | Some(Commands::ListRepos) | Some(Commands::ChangePath) | Some(Commands::CheckEnv));
+
+    let install_path = if !needs_install_path {
+        // Use existing config or silent defaults without prompting
+        if let Some(path) = utils::load_install_path_from_registry()? {
+            utils::validate_and_create_path(&path)?
+        } else if !config_manager.get_config().install_path.as_os_str().is_empty() {
+            let existing = config_manager.get_config().install_path.clone();
+            utils::validate_and_create_path(&existing)?
+        } else {
+            // Silent default without prompt
+            #[cfg(windows)]
+            {
+                let default_path = std::env::current_dir()?.join("portablesource");
+                utils::validate_and_create_path(&default_path)?
+            }
+            #[cfg(unix)]
+            {
+                let default_path = utils::default_install_path_linux();
+                utils::validate_and_create_path(&default_path)?
+            }
+        }
+    } else if let Some(path) = cli.install_path {
         let validated_path = utils::validate_and_create_path(&path)?;
         config_manager.set_install_path(validated_path.clone())?;
         // Persist for subsequent commands
@@ -68,10 +106,11 @@ async fn run(cli: Cli) -> Result<()> {
         }
     };
     
-    // Ensure config file is anchored to install_path, not AppData
-    // На Linux временно не используем конфиг-файл (по требованию)
-    #[cfg(windows)]
+    // Всегда привязываем конфиг к install_path и сохраняем туда
+    // (для Linux не требуем root и не используем /etc для persist)
+    let _ = config_manager.set_install_path(install_path.clone());
     config_manager.set_config_path_to_install_dir();
+    let _ = config_manager.save_config();
     info!("Using install path: {:?}", install_path);
     #[cfg(not(windows))]
     {
@@ -82,16 +121,14 @@ async fn run(cli: Cli) -> Result<()> {
     ensure_config_initialized(&mut config_manager)?;
     config_manager.hydrate_from_existing_env()?;
 
-    // Linux: выбор режима CLOUD/DESK и базовая подготовка
+    // Linux: выбор режима CLOUD/DESK и базовая подготовка — только когда действительно готовим базу
     #[cfg(unix)]
-    {
+    if matches!(cli.command, Some(Commands::SetupEnv)) {
         use portablesource_rs::utils::{detect_linux_mode, LinuxMode, detect_cuda_version_from_system, setup_micromamba_base_env};
         match detect_linux_mode() {
             LinuxMode::Cloud => {
                 info!("Linux CLOUD mode detected: using system git/python/cuda");
-                // Linux использует отдельную логику выбора индекса torch — не пишем в Windows-поле cuda_version
                 let _cv_for_indexes = detect_cuda_version_from_system();
-                // Check required tools
                 let check = |name: &str| -> bool { utils::is_command_available(name) };
                 let git_ok = check("git");
                 let py_ok = check("python3") || check("python");
@@ -110,8 +147,6 @@ async fn run(cli: Cli) -> Result<()> {
             }
             LinuxMode::Desk => {
                 info!("Linux DESK mode detected: setting up micromamba base env");
-                // Если системная CUDA есть (nvcc найден) — НЕ ставим CUDA в базу (cv=None)
-                // Иначе — подбираем версию по gpu_config.cuda_version (118/124/128)
                 let cv = match detect_cuda_version_from_system() {
                     Some(_) => None,
                     None => {
@@ -124,9 +159,6 @@ async fn run(cli: Cli) -> Result<()> {
                             portablesource_rs::config::CudaVersion::Cuda128 => portablesource_rs::config::CudaVersionLinux::Cuda128,
                             portablesource_rs::config::CudaVersion::Cuda124 => portablesource_rs::config::CudaVersionLinux::Cuda124,
                             portablesource_rs::config::CudaVersion::Cuda118 => portablesource_rs::config::CudaVersionLinux::Cuda118,
-                            // если вдруг появятся 12.1/12.6 в Windows enum — сведём к ближайшему поддерживаемому
-                            //portablesource_rs::config::CudaVersion::Cuda121 => portablesource_rs::config::CudaVersionLinux::Cuda121,
-                            //portablesource_rs::config::CudaVersion::Cuda126 => portablesource_rs::config::CudaVersionLinux::Cuda126,
                         })
                     }
                 };
@@ -140,11 +172,13 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Commands::SetupEnv) => {
             setup_environment(&install_path, &mut config_manager).await
         }
+        #[cfg(windows)]
         Some(Commands::SetupReg) => {
             utils::save_install_path_to_registry(&install_path)?;
             println!("Installation path registered successfully");
             Ok(())
         }
+        #[cfg(windows)]
         Some(Commands::Unregister) => {
             utils::delete_install_path_from_registry()?;
             println!("Installation path unregistered successfully");
@@ -171,9 +205,11 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Commands::CheckEnv) => {
             check_environment(&install_path, &config_manager).await
         }
+        #[cfg(windows)]
         Some(Commands::InstallMsvc) => {
             utils::install_msvc_build_tools()
         }
+        #[cfg(windows)]
         Some(Commands::CheckMsvc) => {
             let installed = utils::check_msvc_build_tools_installed();
             println!("MSVC Build Tools: {}", if installed { "Installed" } else { "Not installed" });
@@ -199,11 +235,37 @@ async fn setup_environment(install_path: &PathBuf, config_manager: &mut ConfigMa
     // Create directory structure
     utils::create_directory_structure(install_path)?;
     
-    // Initialize environment manager
-    let env_manager = PortableEnvironmentManager::new(install_path.clone());
-    
-    // Setup environment
-    env_manager.setup_environment().await?;
+    // Windows: ставим портативные инструменты (7z, архивы)
+    #[cfg(windows)]
+    {
+        // Initialize environment manager
+        let env_manager = PortableEnvironmentManager::new(install_path.clone());
+        // Setup environment via portable archives
+        env_manager.setup_environment().await?;
+    }
+
+    // Linux/macOS: без 7z, готовим базу через micromamba
+    #[cfg(unix)]
+    {
+        use portablesource_rs::utils::{detect_cuda_version_from_system, setup_micromamba_base_env};
+        // Если системная CUDA есть — не ставим CUDA в базу
+        let cv = match detect_cuda_version_from_system() {
+            Some(_) => None,
+            None => {
+                let cv_opt = config_manager
+                    .get_config()
+                    .gpu_config
+                    .as_ref()
+                    .and_then(|g| g.cuda_version.as_ref());
+                cv_opt.map(|v| match v {
+                    portablesource_rs::config::CudaVersion::Cuda128 => portablesource_rs::config::CudaVersionLinux::Cuda128,
+                    portablesource_rs::config::CudaVersion::Cuda124 => portablesource_rs::config::CudaVersionLinux::Cuda124,
+                    portablesource_rs::config::CudaVersion::Cuda118 => portablesource_rs::config::CudaVersionLinux::Cuda118,
+                })
+            }
+        };
+        setup_micromamba_base_env(install_path, cv)?;
+    }
     
     // Detect and configure GPU
     let gpu_detector = GpuDetector::new();
@@ -311,9 +373,48 @@ async fn show_system_info(config_manager: &mut ConfigManager) -> Result<()> {
     println!("\n{}", config_manager.get_config_summary());
     
     // Show system info
-    println!("\n=== System Information ===");
-    let system_info = utils::get_system_info()?;
-    println!("{}", system_info);
+    // On Unix: if DESK mode, show only micromamba base tools; if CLOUD mode, show only system tools
+    #[cfg(unix)]
+    {
+        use portablesource_rs::utils::{detect_linux_mode, LinuxMode};
+        match detect_linux_mode() {
+            LinuxMode::Desk => {
+                let base_bin = config_manager
+                    .get_config()
+                    .install_path
+                    .join("ps_env")
+                    .join("mamba_env")
+                    .join("bin");
+                println!("\n=== Micromamba Base ===");
+                if base_bin.exists() {
+                    let check = |name: &str| base_bin.join(name).exists();
+                    let py_ok = check("python") || check("python3");
+                    let pip_ok = check("pip") || check("pip3");
+                    let git_ok = check("git");
+                    let ff_ok = check("ffmpeg");
+                    println!("python: {}", if py_ok { "Available" } else { "Not found" });
+                    println!("pip: {}", if pip_ok { "Available" } else { "Not found" });
+                    println!("git: {}", if git_ok { "Available" } else { "Not found" });
+                    println!("ffmpeg: {}", if ff_ok { "Available" } else { "Not found" });
+                    let cuda_ok = base_bin.join("nvcc").exists();
+                    println!("cuda: {}", if cuda_ok { "Available" } else { "Not found" });
+                } else {
+                    println!("Micromamba base not found at {}", base_bin.display());
+                }
+            }
+            LinuxMode::Cloud => {
+                println!("\n=== System Information ===");
+                let system_info = utils::get_system_info()?;
+                println!("{}", system_info);
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        println!("\n=== System Information ===");
+        let system_info = utils::get_system_info()?;
+        println!("{}", system_info);
+    }
     
     // Show GPU info
     let gpu_detector = GpuDetector::new();
@@ -359,18 +460,42 @@ async fn check_environment(install_path: &PathBuf, _config_manager: &ConfigManag
     println!("=== Environment Status ===");
     
     let env_manager = PortableEnvironmentManager::new(install_path.clone());
+    #[cfg(unix)]
+    let status = {
+        let base_bin = install_path.join("ps_env").join("mamba_env").join("bin");
+        base_bin.join("python").exists() && base_bin.join("git").exists() && base_bin.join("ffmpeg").exists()
+    };
+    #[cfg(windows)]
     let status = env_manager.check_environment_status()?;
     
     println!("Environment setup: {}", if status { "OK" } else { "Not setup" });
-    println!("MSVC Build Tools: {}", 
-        if utils::check_msvc_build_tools_installed() { "Installed" } else { "Not installed" });
+    #[cfg(windows)]
+    println!("MSVC Build Tools: {}", if utils::check_msvc_build_tools_installed() { "Installed" } else { "Not installed" });
     
     // Check for tools
-    let tools = ["git", "python", "ffmpeg"];
     println!("\n=== Available Tools ===");
-    for tool in &tools {
-        let available = utils::is_command_available(tool);
-        println!("{}: {}", tool, if available { "Available" } else { "Not found" });
+    #[cfg(unix)]
+    {
+        let base_bin = install_path.join("ps_env").join("mamba_env").join("bin");
+        let chk = |name: &str| {
+            let p = base_bin.join(name);
+            std::fs::metadata(&p).is_ok() || p.exists()
+        };
+        println!("git: {}", if chk("git") { "Available" } else { "Not found" });
+        println!("python: {}", if chk("python") || chk("python3") { "Available" } else { "Not found" });
+        println!("ffmpeg: {}", if chk("ffmpeg") { "Available" } else { "Not found" });
+        // CUDA availability (via nvcc) in micromamba base
+        let nvcc_path = base_bin.join("nvcc");
+        let cuda_ok = std::fs::metadata(&nvcc_path).is_ok();
+        println!("cuda: {}", if cuda_ok { "Available" } else { "Not found" });
+    }
+    #[cfg(windows)]
+    {
+        let tools = ["git", "python", "ffmpeg"];
+        for tool in &tools {
+            let available = utils::is_command_available(tool);
+            println!("{}: {}", tool, if available { "Available" } else { "Not found" });
+        }
     }
     
     Ok(())
