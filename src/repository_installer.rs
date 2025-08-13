@@ -222,8 +222,11 @@ impl RepositoryInstaller {
         // Generate startup script (Windows only for now)
         #[cfg(windows)]
         self.generate_startup_script(&repo_path, &repo_info)?;
-        #[cfg(unix)]
-        self.generate_startup_script_unix(&repo_path, &repo_info)?;
+                #[cfg(unix)]
+        {
+            self.generate_startup_script_unix(&repo_path, &repo_info)?;
+            println!("[PortableSource] Start script generated: {:?}", repo_path.join(format!("start_{}.sh", repo_name.to_lowercase())));
+        }
 
         // Send stats (non-fatal)
         let _ = self.server_client.send_download_stats(&repo_name);
@@ -265,6 +268,7 @@ impl RepositoryInstaller {
             println!("[PortableSource] Generating start script (.sh)...");
             let _ = self._config_manager.save_config();
             self.generate_startup_script_unix(&repo_path, &repo_info)?;
+            println!("[PortableSource] Start script generated: {:?}", repo_path.join(format!("start_{}.sh", name.to_lowercase())));
         }
 
         let _ = self.server_client.send_download_stats(&name);
@@ -1074,7 +1078,28 @@ impl RepositoryInstaller {
             cuda_exports.push_str(&format!("export LD_LIBRARY_PATH=\"{}:{}:${{LD_LIBRARY_PATH:-}}\"\n", lib, lib64));
         }}
 
-        let content = format!("#!/usr/bin/env bash\nset -Eeuo pipefail\n\nINSTALL=\"{}\"\nENV_PATH=\"$INSTALL/ps_env\"\nBASE_PREFIX=\"$ENV_PATH/mamba_env\"\nREPO_PATH=\"{}\"\nVENV=\"$INSTALL/envs/{}\"\nPYEXE=\"$VENV/bin/python\"\n\n# prepend micromamba base bin to PATH (no activation)\nexport PATH=\"$BASE_PREFIX/bin:$PATH\"\n\n# activate project venv if present (be tolerant to unset vars)\nif [[ -f \"$VENV/bin/activate\" ]]; then\n  set +u\n  source \"$VENV/bin/activate\" || true\n  set -u\nfi\n\n{}\ncd \"$REPO_PATH\"\nif [[ -x \"$PYEXE\" ]]; then\n  exec \"$PYEXE\" \"{}\" {}\nelse\n  exec python3 \"{}\" {}\nfi\n",
+        let content = format!("#!/usr/bin/env bash\nset -Eeuo pipefail\n\nINSTALL=\"{}\"\nENV_PATH=\"$INSTALL/ps_env\"\nBASE_PREFIX=\"$ENV_PATH/mamba_env\"\nREPO_PATH=\"{}\"\nVENV=\"$INSTALL/envs/{}\"\nPYEXE=\"$VENV/bin/python\"\n\n# Detect mode: allow override via PORTABLESOURCE_MODE\nMODE=\"${{PORTABLESOURCE_MODE:-}}\"\nif [[ -z \"$MODE\" ]]; then\n  if command -v git >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && command -v ffmpeg >/dev/null 2>&1; then\n    MODE=cloud
+  else
+    MODE=desk
+  fi
+fi
+
+# prepend micromamba base bin to PATH (no activation) in DESK mode
+if [[ \"$MODE\" == \"desk\" ]]; then
+  export PATH=\"$BASE_PREFIX/bin:$PATH\"
+fi
+
+# activate project venv if present (be tolerant to unset vars)
+if [[ -f \"$VENV/bin/activate\" ]]; then
+  set +u
+  source \"$VENV/bin/activate\" || true
+  set -u
+fi
+
+{}\ncd \"$REPO_PATH\"\nif [[ -x \"$PYEXE\" ]]; then\n  exec \"$PYEXE\" \"{}\" {}
+else
+  exec python3 \"{}\" {}
+fi\n",
             install_path.to_string_lossy(),
             repo_path.to_string_lossy(),
             repo_name,
