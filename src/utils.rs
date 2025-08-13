@@ -38,12 +38,13 @@ pub fn save_install_path_to_registry(install_path: &Path) -> Result<()> {
 
 #[cfg(unix)]
 pub fn save_install_path_to_registry(install_path: &Path) -> Result<()> {
-    // Emulate registry with file
-    if unsafe { libc::geteuid() } != 0 {
-        return Err(PortableSourceError::Registry("Must be root to save install path on Linux".into()));
-    }
-    let path_file = std::path::Path::new("/etc/portablesource").join("install_path");
-    if let Some(parent) = path_file.parent() { std::fs::create_dir_all(parent)?; }
+    // Persist install path to user's config dir (no root required)
+    let cfg_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("portablesource");
+    if let Some(parent) = cfg_dir.parent() { std::fs::create_dir_all(parent)?; }
+    std::fs::create_dir_all(&cfg_dir)?;
+    let path_file = cfg_dir.join("install_path");
     std::fs::write(&path_file, install_path.to_string_lossy().as_bytes())
         .map_err(|e| PortableSourceError::Registry(format!("Failed to write {}: {}", path_file.display(), e)))?;
     log::info!("Installation path saved to {}", path_file.display());
@@ -71,12 +72,17 @@ pub fn delete_install_path_from_registry() -> Result<()> {
 
 #[cfg(unix)]
 pub fn delete_install_path_from_registry() -> Result<()> {
-    if unsafe { libc::geteuid() } != 0 {
-        return Err(PortableSourceError::Registry("Must be root to delete install path on Linux".into()));
-    }
-    let path_file = std::path::Path::new("/etc/portablesource").join("install_path");
-    if path_file.exists() { let _ = std::fs::remove_file(&path_file); }
-    log::info!("Installation path deleted: {}", path_file.display());
+    // Remove from user's config dir; ignore errors if not present
+    let user_file = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("portablesource")
+        .join("install_path");
+    if user_file.exists() { let _ = std::fs::remove_file(&user_file); }
+
+    // Best-effort: also remove legacy global file if running as root
+    let etc_file = std::path::Path::new("/etc/portablesource").join("install_path");
+    if unsafe { libc::geteuid() } == 0 && etc_file.exists() { let _ = std::fs::remove_file(&etc_file); }
+    log::info!("Installation path deleted (user and legacy locations cleaned where possible)");
     Ok(())
 }
 
@@ -102,12 +108,24 @@ pub fn load_install_path_from_registry() -> Result<Option<PathBuf>> {
 
 #[cfg(unix)]
 pub fn load_install_path_from_registry() -> Result<Option<PathBuf>> {
+    // Prefer user config dir
+    let user_file = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("portablesource")
+        .join("install_path");
+    if user_file.exists() {
+        let content = std::fs::read_to_string(&user_file)
+            .map_err(|e| PortableSourceError::Registry(format!("Failed to read {}: {}", user_file.display(), e)))?;
+        return Ok(Some(PathBuf::from(content.trim())));
+    }
+    // Back-compat: legacy global file
     let path_file = std::path::Path::new("/etc/portablesource").join("install_path");
-    if !path_file.exists() { return Ok(None); }
-    let content = std::fs::read_to_string(&path_file)
-        .map_err(|e| PortableSourceError::Registry(format!("Failed to read {}: {}", path_file.display(), e)))?;
-    let p = PathBuf::from(content.trim());
-    Ok(Some(p))
+    if path_file.exists() {
+        let content = std::fs::read_to_string(&path_file)
+            .map_err(|e| PortableSourceError::Registry(format!("Failed to read {}: {}", path_file.display(), e)))?;
+        return Ok(Some(PathBuf::from(content.trim())));
+    }
+    Ok(None)
 }
 
 /// Validate and create directory if it doesn't exist
@@ -228,8 +246,15 @@ pub enum LinuxMode { Cloud, Desk }
 
 #[cfg(unix)]
 pub fn detect_linux_mode() -> LinuxMode {
+    // Env override: PORTABLESOURCE_MODE=CLOUD|DESK
+    if let Ok(mode) = std::env::var("PORTABLESOURCE_MODE") {
+        let m = mode.to_lowercase();
+        if m == "cloud" { return LinuxMode::Cloud; }
+        if m == "desk" { return LinuxMode::Desk; }
+    }
     let has = |bin: &str| is_command_available(bin);
-    if is_root() && (has("nvcc")) && (has("git")) && (has("python3") || has("python")) {
+    // Consider CLOUD if core tools are present on system PATH
+    if has("git") && (has("python3") || has("python")) && has("ffmpeg") {
         LinuxMode::Cloud
     } else {
         LinuxMode::Desk
@@ -643,10 +668,11 @@ pub fn show_version() {
 #[cfg(unix)]
 pub fn prepare_linux_system() -> Result<()> {
     use std::process::Command;
-    // Ожидается запуск от root для установки пакетов
+    // Ожидается запуск от root для установки пакетов; если не root — пробуем sudo -n
     let is_root = unsafe { libc::geteuid() } == 0;
-    if !is_root {
-        log::warn!("Not running as root. Skipping package installation. Some steps may fail.");
+    let use_sudo = !is_root && which::which("sudo").is_ok();
+    if !is_root && !use_sudo {
+        log::warn!("Not running as root and sudo not available. Skipping package installation. Some steps may fail.");
         return Ok(());
     }
 
@@ -671,7 +697,7 @@ pub fn prepare_linux_system() -> Result<()> {
     for (_tool, pkg) in &missing { println!("  - {}", pkg); }
 
     // 3) Устанавливаем только недостающие
-    install_linux_packages(pm, &missing)?;
+    install_linux_packages(pm, &missing, use_sudo)?;
     Ok(())
 }
 
@@ -763,35 +789,43 @@ fn linux_check_requirements(pm: LinuxPackageManager) -> Vec<(String, String)> {
 }
 
 #[cfg(unix)]
-fn install_linux_packages(pm: LinuxPackageManager, missing: &Vec<(String, String)>) -> Result<()> {
+fn install_linux_packages(pm: LinuxPackageManager, missing: &Vec<(String, String)>, use_sudo: bool) -> Result<()> {
     use std::process::Command;
     if missing.is_empty() { return Ok(()); }
     let pkgs: Vec<String> = missing.iter().map(|(_, p)| p.clone()).collect();
+    let sudo = |cmd: &str| if use_sudo { Some("sudo") } else { None };
+    let sudo_args: [&str; 1] = ["-n"]; // non-interactive
     match pm {
         LinuxPackageManager::Apt => {
-            let _ = Command::new("apt-get").arg("update").status();
-            let mut cmd = Command::new("apt-get");
+            // apt-get update
+            if let Some(s) = sudo("apt-get") {
+                let _ = Command::new(s).args(&sudo_args).arg("apt-get").arg("update").status();
+            } else {
+                let _ = Command::new("apt-get").arg("update").status();
+            }
+            // apt-get install -y pkgs
+            let mut cmd = if let Some(s) = sudo("apt-get") { let mut c = Command::new(s); c.args(&sudo_args).arg("apt-get"); c } else { Command::new("apt-get") };
             cmd.arg("install").arg("-y");
             for p in &pkgs { cmd.arg(p); }
             let st = cmd.status().map_err(|e| PortableSourceError::environment(format!("apt-get failed: {}", e)))?;
             if !st.success() { return Err(PortableSourceError::environment("apt-get install failed")); }
         }
         LinuxPackageManager::Dnf => {
-            let mut cmd = Command::new("dnf");
+            let mut cmd = if let Some(s) = sudo("dnf") { let mut c = Command::new(s); c.args(&sudo_args).arg("dnf"); c } else { Command::new("dnf") };
             cmd.arg("install").arg("-y");
             for p in &pkgs { cmd.arg(p); }
             let st = cmd.status().map_err(|e| PortableSourceError::environment(format!("dnf failed: {}", e)))?;
             if !st.success() { return Err(PortableSourceError::environment("dnf install failed")); }
         }
         LinuxPackageManager::Yum => {
-            let mut cmd = Command::new("yum");
+            let mut cmd = if let Some(s) = sudo("yum") { let mut c = Command::new(s); c.args(&sudo_args).arg("yum"); c } else { Command::new("yum") };
             cmd.arg("install").arg("-y");
             for p in &pkgs { cmd.arg(p); }
             let st = cmd.status().map_err(|e| PortableSourceError::environment(format!("yum failed: {}", e)))?;
             if !st.success() { return Err(PortableSourceError::environment("yum install failed")); }
         }
         LinuxPackageManager::Pacman => {
-            let mut cmd = Command::new("pacman");
+            let mut cmd = if let Some(s) = sudo("pacman") { let mut c = Command::new(s); c.args(&sudo_args).arg("pacman"); c } else { Command::new("pacman") };
             cmd.arg("-Sy").arg("--noconfirm");
             for p in &pkgs { cmd.arg(p); }
             let st = cmd.status().map_err(|e| PortableSourceError::environment(format!("pacman failed: {}", e)))?;

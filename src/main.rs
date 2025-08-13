@@ -101,6 +101,8 @@ async fn run(cli: Cli) -> Result<()> {
         {
             let default_path = utils::default_install_path_linux();
             let chosen = utils::prompt_install_path_linux(&default_path)?;
+            // Persist for subsequent commands on Linux too (user scope)
+            let _ = utils::save_install_path_to_registry(&chosen);
             config_manager.set_install_path(chosen.clone())?;
             chosen
         }
@@ -126,7 +128,7 @@ async fn run(cli: Cli) -> Result<()> {
     if matches!(cli.command, Some(Commands::SetupEnv)) {
         use portablesource_rs::utils::{detect_linux_mode, LinuxMode, detect_cuda_version_from_system, setup_micromamba_base_env};
         match detect_linux_mode() {
-            LinuxMode::Cloud => {
+                        LinuxMode::Cloud => {
                 info!("Linux CLOUD mode detected: using system git/python/cuda");
                 let _cv_for_indexes = detect_cuda_version_from_system();
                 let check = |name: &str| -> bool { utils::is_command_available(name) };
@@ -142,7 +144,8 @@ async fn run(cli: Cli) -> Result<()> {
                     if nvcc_ok { "OK" } else { "Missing" }
                 );
                 if !(git_ok && py_ok && ff_ok) {
-                    warn!("Some system tools missing; CLOUD mode may fail. Consider DESK mode (non-root) or install packages.");
+                    warn!("Some system tools missing; attempting to install missing packages (best-effort). You can also set PORTABLESOURCE_MODE=DESK.");
+                    let _ = utils::prepare_linux_system();
                 }
             }
             LinuxMode::Desk => {
@@ -403,9 +406,10 @@ async fn show_system_info(config_manager: &mut ConfigManager) -> Result<()> {
                 }
             }
             LinuxMode::Cloud => {
-                println!("\n=== System Information ===");
+                println!("\n=== System Information (CLOUD) ===");
                 let system_info = utils::get_system_info()?;
                 println!("{}", system_info);
+                println!("\nTip: set PORTABLESOURCE_MODE=DESK to force micromamba-based portable env on Linux.");
             }
         }
     }
