@@ -54,9 +54,9 @@ pub enum CudaVersionLinux {
 impl CudaVersion {
     pub fn get_download_url(&self) -> &'static str {
         match self {
-            CudaVersion::Cuda118 => "https://files.portables.dev/CUDA/CUDA_118.7z",
-            CudaVersion::Cuda124 => "https://files.portables.dev/CUDA/CUDA_124.7z",
-            CudaVersion::Cuda128 => "https://files.portables.dev/CUDA/CUDA_128.7z",
+            CudaVersion::Cuda118 => "https://files.portables.dev/CUDA/CUDA_118.tar.zst",
+            CudaVersion::Cuda124 => "https://files.portables.dev/CUDA/CUDA_124.tar.zst",
+            CudaVersion::Cuda128 => "https://files.portables.dev/CUDA/CUDA_128.tar.zst",
         }
     }
 }
@@ -67,17 +67,17 @@ pub enum ToolLinks {
     Ffmpeg,
     Python311,
     MsvcBuildTools,
-    SevenZip,
+    // SevenZip удален, так как перешли на tar zstd
 }
 
 impl ToolLinks {
     pub fn url(&self) -> &'static str {
         match self {
-            ToolLinks::Git => "https://files.portables.dev/git.7z",
-            ToolLinks::Ffmpeg => "https://files.portables.dev/ffmpeg.7z",
-            ToolLinks::Python311 => "https://files.portables.dev/python311.7z",
-            ToolLinks::MsvcBuildTools => "https://files.portables.dev/msvc_build_tools.7z",
-            ToolLinks::SevenZip => "https://huggingface.co/datasets/NeuroDonu/PortableSource/resolve/main/7z.exe",
+            ToolLinks::Git => "https://files.portables.dev/git.tar.zst",
+            ToolLinks::Ffmpeg => "https://files.portables.dev/ffmpeg.tar.zst",
+            ToolLinks::Python311 => "https://files.portables.dev/python.tar.zst",
+            ToolLinks::MsvcBuildTools => "https://aka.ms/vs/17/release/vs_buildtools.exe",
+            // ToolLinks::SevenZip больше не используется, так как перешли на tar zstd
         }
     }
 }

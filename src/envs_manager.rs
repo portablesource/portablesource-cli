@@ -7,7 +7,7 @@ use crate::{Result, PortableSourceError};
 use crate::config::{ConfigManager, ToolLinks};
 use url::Url;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Seek, SeekFrom, Read, BufRead, Write};
+use std::io::{self, Seek, SeekFrom, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use crate::gpu::GpuDetector;
@@ -110,6 +110,17 @@ impl PortableEnvironmentManager {
             existing_len = destination.metadata()?.len();
         } else if let Some(parent) = destination.parent() { fs::create_dir_all(parent)?; }
 
+        // Проверяем полный размер файла с сервера
+        let head_resp = client.head(url).send()?;
+        if let Some(total_size) = head_resp.content_length() {
+            if existing_len == total_size {
+                // Файл уже полностью скачан
+                let file_name = destination.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
+                println!("[Setup] {} already downloaded.", file_name);
+                return Ok(());
+            }
+        }
+
         // Try ranged request if we have partial file
         let mut resp = if existing_len > 0 {
             client.get(url).header(RANGE, format!("bytes={}-", existing_len)).send()?
@@ -191,6 +202,18 @@ impl PortableEnvironmentManager {
         let client = Client::builder().timeout(std::time::Duration::from_secs(600)).build()?;
         if let Some(parent) = destination.parent() { fs::create_dir_all(parent)?; }
         let existing_len: u64 = if destination.exists() { destination.metadata()?.len() } else { 0 };
+        
+        // Проверяем полный размер файла с сервера
+        let head_resp = client.head(&url).send()?;
+        if let Some(total_size) = head_resp.content_length() {
+            if existing_len == total_size {
+                // Файл уже полностью скачан
+                let file_name = destination.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
+                println!("[Setup] {} already downloaded.", file_name);
+                return Ok(());
+            }
+        }
+        
         let mut resp = if existing_len > 0 {
             client.get(&url).header(RANGE, format!("bytes={}-", existing_len)).send()?
         } else { client.get(&url).send()? };
@@ -245,99 +268,80 @@ impl PortableEnvironmentManager {
         Ok(())
     }
 
-    // --- Extraction (only via bundled 7z.exe) ---
-    fn extract_7z(&self, archive_path: &Path, extract_to: &Path) -> Result<()> {
+    // --- Extraction (via tar zstd) ---
+    fn extract_tar_zstd(&self, archive_path: &Path, extract_to: &Path) -> Result<()> {
         if let Some(parent) = extract_to.parent() { fs::create_dir_all(parent)?; }
         fs::create_dir_all(extract_to)?;
-        self.extract_with_7z_binary(archive_path, extract_to)
+        self.extract_with_tar_zstd_binary(archive_path, extract_to)
     }
-    fn extract_7z_static(archive_path: PathBuf, extract_to: PathBuf) -> Result<()> {
+    fn extract_tar_zstd_static(archive_path: PathBuf, extract_to: PathBuf) -> Result<()> {
         if let Some(parent) = extract_to.parent() { fs::create_dir_all(parent)?; }
         fs::create_dir_all(&extract_to)?;
-        Self::extract_with_7z_binary_static(&archive_path, &extract_to)
+        Self::extract_with_tar_zstd_binary_static(&archive_path, &extract_to)
     }
 
-    fn ensure_7z_binary(&self) -> Result<PathBuf> {
-        let seven_zip_path = self.ps_env_path.join("7z.exe");
-        if seven_zip_path.exists() { return Ok(seven_zip_path); }
-        // Download 7z.exe to ps_env
-        let url = crate::config::ToolLinks::SevenZip.url();
-        self.download_with_resume(url, &seven_zip_path)?;
-        Ok(seven_zip_path)
-    }
+    // ensure_tar_binary больше не нужна - используем Rust крейты напрямую
 
-    fn extract_with_7z_binary(&self, archive_path: &Path, extract_to: &Path) -> Result<()> {
-        let seven_zip = self.ensure_7z_binary()?;
-        // Progress bar (0-100%)
+    fn extract_with_tar_zstd_binary(&self, archive_path: &Path, extract_to: &Path) -> Result<()> {
+        use std::fs::File;
+        use std::io::BufReader;
+        
         let file_label = archive_path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "archive".into());
         let pb = create_extract_progress_bar(&format!("Extracting {}", file_label));
-        // 7z.exe prefers order: x <archive> -y -o<dir>
-        let mut child = Command::new(&seven_zip)
-            .arg("x")
-            .arg(archive_path.to_string_lossy().to_string())
-            .arg("-y")
-            .arg(format_7z_out_arg(extract_to))
-            .arg("-bsp1") // show progress to stdout
-            .arg("-bso1") // route normal output to stdout
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
-        if let Some(out) = child.stdout.take() {
-            let mut reader = io::BufReader::new(out);
-            let mut buf = String::new();
-            while reader.read_line(&mut buf).unwrap_or(0) > 0 {
-                if let Some(p) = extract_percent(&buf) { pb.set_position(p as u64); }
-                buf.clear();
-            }
-        }
-        let status = child.wait()?;
-        if status.success() {
-            finish_progress(pb, &format!("Extracted {}", file_label));
-            Ok(())
-        } else {
-            pb.abandon_with_message(format!("Extraction failed for {}", file_label));
-            Err(PortableSourceError::environment("7z.exe extraction failed"))
-        }
+        
+        pb.set_position(25);
+        
+        // Открываем файл и создаем zstd декодер
+        let file = File::open(archive_path)
+            .map_err(|e| PortableSourceError::environment(format!("Failed to open archive: {}", e)))?;
+        let buf_reader = BufReader::new(file);
+        let zstd_decoder = zstd::stream::Decoder::new(buf_reader)
+            .map_err(|e| PortableSourceError::environment(format!("Failed to create zstd decoder: {}", e)))?;
+        
+        pb.set_position(50);
+        
+        // Создаем tar архив из декодированного потока
+        let mut archive = tar::Archive::new(zstd_decoder);
+        
+        pb.set_position(75);
+        
+        // Извлекаем архив
+        archive.unpack(extract_to)
+            .map_err(|e| PortableSourceError::environment(format!("Failed to extract tar archive: {}", e)))?;
+        
+        finish_progress(pb, &format!("Extracted {}", file_label));
+        Ok(())
     }
 
-    fn extract_with_7z_binary_static(archive_path: &Path, extract_to: &Path) -> Result<()> {
-        // Всегда храним 7z.exe в корне ps_env (родитель архива)
-        let ps_env = archive_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-        let seven_zip_path = ps_env.join("7z.exe");
-        if !seven_zip_path.exists() {
-            let url = crate::config::ToolLinks::SevenZip.url();
-            Self::download_with_resume_static(url.to_string(), seven_zip_path.clone())?;
-        }
-        // Progress bar (0-100%)
+    fn extract_with_tar_zstd_binary_static(archive_path: &Path, extract_to: &Path) -> Result<()> {
+        use std::fs::File;
+        use std::io::BufReader;
+        
         let file_label = archive_path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "archive".into());
         let pb = create_extract_progress_bar(&format!("Extracting {}", file_label));
-        // 7z.exe prefers order: x <archive> -y -o<dir>
-        let mut child = Command::new(&seven_zip_path)
-            .arg("x")
-            .arg(archive_path.to_string_lossy().to_string())
-            .arg("-y")
-            .arg(format_7z_out_arg(extract_to))
-            .arg("-bsp1")
-            .arg("-bso1")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
-        if let Some(out) = child.stdout.take() {
-            let mut reader = io::BufReader::new(out);
-            let mut buf = String::new();
-            while reader.read_line(&mut buf).unwrap_or(0) > 0 {
-                if let Some(p) = extract_percent(&buf) { pb.set_position(p as u64); }
-                buf.clear();
-            }
-        }
-        let status = child.wait()?;
-        if status.success() {
-            finish_progress(pb, &format!("Extracted {}", file_label));
-            Ok(())
-        } else {
-            pb.abandon_with_message(format!("Extraction failed for {}", file_label));
-            Err(PortableSourceError::environment("7z.exe extraction failed"))
-        }
+        
+        pb.set_position(25);
+        
+        // Открываем файл и создаем zstd декодер
+        let file = File::open(archive_path)
+            .map_err(|e| PortableSourceError::environment(format!("Failed to open archive: {}", e)))?;
+        let buf_reader = BufReader::new(file);
+        let zstd_decoder = zstd::stream::Decoder::new(buf_reader)
+            .map_err(|e| PortableSourceError::environment(format!("Failed to create zstd decoder: {}", e)))?;
+        
+        pb.set_position(50);
+        
+        // Создаем tar архив из декодированного потока
+        let mut archive = tar::Archive::new(zstd_decoder);
+        
+        pb.set_position(75);
+        
+        // Извлекаем архив
+        archive.unpack(extract_to)
+            .map_err(|e| PortableSourceError::environment(format!("Failed to extract tar archive: {}", e)))?;
+        
+        finish_progress(pb, &format!("Extracted {}", file_label));
+        Ok(())
     }
     
     fn install_portable_tool(&self, key: &str) -> Result<()> {
@@ -349,12 +353,12 @@ impl PortableEnvironmentManager {
         let archive_name = Url::parse(&spec.url)
             .ok()
             .and_then(|u| u.path_segments().and_then(|mut s| s.next_back()).map(|s| s.to_string()))
-            .unwrap_or_else(|| format!("{}.7z", spec.name));
+            .unwrap_or_else(|| format!("{}.tar.zst", spec.name));
         let archive_path = self.ps_env_path.join(&archive_name);
 
         self.download_with_resume(&spec.url, &archive_path)?;
         // Extract to ps_env root; archives are structured with top-level folder (ffmpeg/git/python)
-        self.extract_7z(&archive_path, &self.ps_env_path)?;
+        self.extract_tar_zstd(&archive_path, &self.ps_env_path)?;
         let _ = fs::remove_file(&archive_path);
 
         if !exe_path.exists() {
@@ -585,7 +589,7 @@ impl PortableEnvironmentManager {
             if !self.is_cuda_installed() {
                 let ps_env = self.ps_env_path.clone();
                 let archive_path = ps_env.join(format!(
-                    "CUDA_{}.7z",
+                    "CUDA_{}.tar.zst",
                     expected_folder.trim_start_matches("cuda_").to_uppercase()
                 ));
                 {
@@ -603,7 +607,7 @@ impl PortableEnvironmentManager {
                 }
                 let temp_extract = ps_env.join("__cuda_extract_temp__");
                 if temp_extract.exists() { let _ = fs::remove_dir_all(&temp_extract); }
-                PortableEnvironmentManager::extract_7z_static(archive_path.clone(), temp_extract.clone())?;
+                PortableEnvironmentManager::extract_tar_zstd_static(archive_path.clone(), temp_extract.clone())?;
                 let extracted_sub = temp_extract.join(&expected_folder);
                 let cuda_dir = ps_env.join("CUDA");
                 if cuda_dir.exists() { let _ = fs::remove_dir_all(&cuda_dir); }
@@ -628,7 +632,7 @@ impl PortableEnvironmentManager {
                 let archive_name = Url::parse(&url)
                     .ok()
                     .and_then(|u| u.path_segments().and_then(|mut s| s.next_back()).map(|s| s.to_string()))
-                    .unwrap_or_else(|| format!("{}.7z", spec.name));
+                    .unwrap_or_else(|| format!("{}.tar.zst", spec.name));
                 let ps_env = self.ps_env_path.clone();
                 let exe_rel = spec.executable_path.clone();
                 {
@@ -645,7 +649,7 @@ impl PortableEnvironmentManager {
                     println!("[Setup] Progress: {}/{} ({:.0}%)", done, total_c, (done as f32/ total_c as f32)*100.0);
                     println!("[Setup] Extracting {}...", archive_name);
                 }
-                PortableEnvironmentManager::extract_7z_static(archive_path.clone(), ps_env.clone())?;
+                PortableEnvironmentManager::extract_tar_zstd_static(archive_path.clone(), ps_env.clone())?;
                 let _ = fs::remove_file(&archive_path);
                 let exe_path = ps_env.join(&exe_rel);
                 if !exe_path.exists() {
@@ -748,7 +752,7 @@ impl PortableEnvironmentManager {
             if !self.is_cuda_installed() {
             let ps_env = self.ps_env_path.clone();
             let archive_path = ps_env.join(format!(
-                "CUDA_{}.7z",
+                "CUDA_{}.tar.zst",
                 expected_folder.trim_start_matches("cuda_").to_uppercase()
             ));
             let completed_c = completed.clone();
@@ -763,7 +767,7 @@ impl PortableEnvironmentManager {
                 cb_cuda("cuda".to_string(), done_now, total_c);
                 let temp_extract = ps_env.join("__cuda_extract_temp__");
                 if temp_extract.exists() { let _ = fs::remove_dir_all(&temp_extract); }
-                PortableEnvironmentManager::extract_7z_static(archive_path.clone(), temp_extract.clone())?;
+                PortableEnvironmentManager::extract_tar_zstd_static(archive_path.clone(), temp_extract.clone())?;
                 let extracted_sub = temp_extract.join(&expected_folder);
                 let cuda_dir = ps_env.join("CUDA");
                 if cuda_dir.exists() { let _ = fs::remove_dir_all(&cuda_dir); }
@@ -787,7 +791,7 @@ impl PortableEnvironmentManager {
                 let archive_name = Url::parse(&url)
                     .ok()
                     .and_then(|u| u.path_segments().and_then(|mut s| s.next_back()).map(|s| s.to_string()))
-                    .unwrap_or_else(|| format!("{}.7z", spec.name));
+                    .unwrap_or_else(|| format!("{}.tar.zst", spec.name));
                 let ps_env = self.ps_env_path.clone();
                 let exe_rel = spec.executable_path.clone();
                 let completed_t = completed.clone();
@@ -802,7 +806,7 @@ impl PortableEnvironmentManager {
                     // Step: extract
                     let done_now = completed_t.load(Ordering::SeqCst);
                     cb_t(key.to_string(), done_now, total_c);
-                    PortableEnvironmentManager::extract_7z_static(archive_path.clone(), ps_env.clone())?;
+                    PortableEnvironmentManager::extract_tar_zstd_static(archive_path.clone(), ps_env.clone())?;
                     let _ = fs::remove_file(&archive_path);
                     let exe_path = ps_env.join(&exe_rel);
                     if !exe_path.exists() {
@@ -876,18 +880,18 @@ impl PortableEnvironmentManager {
                     .get_cuda_download_link(Some(cuda_ver))
                     .ok_or_else(|| PortableSourceError::environment("CUDA download link not available"))?;
 
-                // Вычисляем версию в имени папки: CUDA_118.7z -> cuda_118
+                // Вычисляем версию в имени папки: CUDA_118.tar.zst -> cuda_118
                 let version_debug = format!("{:?}", cuda_ver).to_lowercase();
                 let cleaned = version_debug.replace("cuda", "").replace(['_', '"'], "");
                 let expected_folder = format!("cuda_{}", cleaned);
 
-                let archive_path = self.ps_env_path.join(format!("CUDA_{}.7z", cleaned.to_uppercase()));
+                let archive_path = self.ps_env_path.join(format!("CUDA_{}.tar.zst", cleaned.to_uppercase()));
                 self.download_with_resume(&link, &archive_path)?;
 
                 // Распаковка во временную директорию
                 let temp_extract = self.ps_env_path.join("__cuda_extract_temp__");
                 if temp_extract.exists() { let _ = fs::remove_dir_all(&temp_extract); }
-                self.extract_7z(&archive_path, &temp_extract)?;
+                self.extract_tar_zstd(&archive_path, &temp_extract)?;
 
                 // Переименование папки cuda_{ver} -> CUDA (строго без манкипатчей)
                 let extracted_sub = temp_extract.join(&expected_folder);
@@ -897,8 +901,31 @@ impl PortableEnvironmentManager {
                     )));
                 }
 
-                if cuda_dir.exists() { let _ = fs::remove_dir_all(&cuda_dir); }
-                fs::rename(&extracted_sub, &cuda_dir)?;
+                if cuda_dir.exists() { 
+                    let _ = fs::remove_dir_all(&cuda_dir); 
+                    // Даем время системе освободить ресурсы
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                
+                // Попытка переименования с повторными попытками
+                let mut attempts = 0;
+                let max_attempts = 3;
+                loop {
+                    match fs::rename(&extracted_sub, &cuda_dir) {
+                        Ok(_) => break,
+                        Err(e) if attempts < max_attempts => {
+                            attempts += 1;
+                            log::warn!("Attempt {} to rename CUDA folder failed: {}", attempts, e);
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                        }
+                        Err(e) => {
+                            // Если переименование не удалось, попробуем копирование
+                            log::warn!("Rename failed, trying copy: {}", e);
+                            Self::copy_dir_recursive(&extracted_sub, &cuda_dir)?;
+                            break;
+                        }
+                    }
+                }
                 let _ = fs::remove_dir_all(&temp_extract);
                 let _ = fs::remove_file(&archive_path);
 
@@ -1047,20 +1074,35 @@ impl PortableEnvironmentManager {
             }
         }
     }
+    
+    /// Recursively copy directory from src to dst
+    fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+        if !src.exists() {
+            return Err(PortableSourceError::environment(format!("Source directory does not exist: {:?}", src)));
+        }
+        
+        if !dst.exists() {
+            fs::create_dir_all(dst)?;
+        }
+        
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let src_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+            
+            if src_path.is_dir() {
+                Self::copy_dir_recursive(&src_path, &dst_path)?;
+            } else {
+                fs::copy(&src_path, &dst_path)?;
+            }
+        }
+        
+        Ok(())
+    }
 }
 
-fn sanitize_windows_path_for_7z(path: &Path) -> String {
-    let mut s = path.to_string_lossy().to_string();
-    if s.starts_with(r"\\?\") { s = s.trim_start_matches(r"\\?\").to_string(); }
-    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 { s = s[1..s.len()-1].to_string(); }
-    while s.ends_with('\\') { s.pop(); }
-    s
-}
-
-fn format_7z_out_arg(path: &Path) -> String {
-    let s = sanitize_windows_path_for_7z(path);
-    if s.contains(' ') { format!("-o\"{}\"", s) } else { format!("-o{}", s) }
-}
+// Удалены функции sanitize_windows_path_for_7z и format_7z_out_arg
+// так как они больше не нужны для tar zstd
 
 // ===== Progress helpers =====
 fn create_download_progress_bar(total_opt: Option<u64>, prefix: &str) -> ProgressBar {
@@ -1107,19 +1149,7 @@ fn parse_total_from_content_range(hv: &str) -> Option<u64> {
     None
 }
 
-fn extract_percent(line: &str) -> Option<u32> {
-    if let Some(pidx) = line.rfind('%') {
-        let digits_rev: String = line[..pidx]
-            .chars()
-            .rev()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        if digits_rev.is_empty() { return None; }
-        let digits: String = digits_rev.chars().rev().collect();
-        if let Ok(v) = digits.parse::<u32>() { return Some(v.min(100)); }
-    }
-    None
-}
+// Функция extract_percent удалена, так как tar не выводит прогресс в процентах
 
 fn update_download_pb_message(pb: &ProgressBar, downloaded: u64, total_opt: Option<u64>, start: Instant) {
     let elapsed = start.elapsed().as_secs_f64();

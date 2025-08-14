@@ -238,7 +238,7 @@ async fn setup_environment(install_path: &PathBuf, config_manager: &mut ConfigMa
     // Create directory structure
     utils::create_directory_structure(install_path)?;
     
-    // Windows: ставим портативные инструменты (7z, архивы)
+    // Windows: ставим портативные инструменты (tar zstd архивы)
     #[cfg(windows)]
     {
         // Initialize environment manager
@@ -247,7 +247,7 @@ async fn setup_environment(install_path: &PathBuf, config_manager: &mut ConfigMa
         env_manager.setup_environment().await?;
     }
 
-    // Linux/macOS: без 7z, готовим базу через micromamba
+    // Linux/macOS: используем системный tar, готовим базу через micromamba
     #[cfg(unix)]
     {
         use portablesource_rs::utils::{detect_cuda_version_from_system, setup_micromamba_base_env};
