@@ -1,6 +1,11 @@
 # portablesource
 Rust library for GUI
 
+## Installing in LINUX by this simple command:
+```
+curl -sSL https://raw.githubusercontent.com/portablesource/portablesource-cli/refs/heads/main/install.sh | bash
+```
+
 ## License
 
 Copyright (c) 2025 PortableSource / NeuroDonu
@@ -16,4 +21,4 @@ This means you are free to share and adapt the material, but:
 
 For the full legal code, see the [LICENSE](LICENSE) file.
 
-For commercial licensing inquiries, please contact me at `contact@portables.dev`
+For commercial licensing inquiries, please contact me at [contact@portables.dev](mailto:contact@portables.dev)
