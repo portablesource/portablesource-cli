@@ -35,7 +35,8 @@ INSTALL_NAME="portables"
 print_info "Installing PortableSource CLI..."
 
 print_info "Fetching latest release information..."
-LATEST_RELEASE_URL=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep "browser_download_url.*${BINARY_NAME}" | cut -d '"' -f 4)
+# For Linux, we want the binary without .exe extension
+LATEST_RELEASE_URL=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep "browser_download_url.*/${BINARY_NAME}\"" | grep -v "\.exe" | cut -d '"' -f 4)
 
 if [ -z "$LATEST_RELEASE_URL" ]; then
     print_error "Failed to get latest release URL"
