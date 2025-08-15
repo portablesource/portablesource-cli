@@ -49,7 +49,7 @@ TEMP_DIR=$(mktemp -d)
 cd "$TEMP_DIR"
 
 print_info "Downloading binary..."
-if ! curl -L -o "$BINARY_NAME" "$LATEST_RELEASE_URL"; then
+if ! curl -s -L -o "$BINARY_NAME" "$LATEST_RELEASE_URL"; then
     print_error "Failed to download binary"
     rm -rf "$TEMP_DIR"
     exit 1
