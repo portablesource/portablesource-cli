@@ -8,7 +8,7 @@ use crate::gpu::GpuDetector;
 use log::{info, warn, error};
 
 // Constants
-pub const SERVER_DOMAIN: &str = "portables.dev";
+pub const SERVER_DOMAIN: &str = "server.portables.dev";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
