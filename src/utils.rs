@@ -38,16 +38,22 @@ pub fn save_install_path_to_registry(install_path: &Path) -> Result<()> {
 
 #[cfg(unix)]
 pub fn save_install_path_to_registry(install_path: &Path) -> Result<()> {
-    // Persist install path to user's config dir (no root required)
-    let cfg_dir = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("portablesource");
-    if let Some(parent) = cfg_dir.parent() { std::fs::create_dir_all(parent)?; }
-    std::fs::create_dir_all(&cfg_dir)?;
-    let path_file = cfg_dir.join("install_path");
-    std::fs::write(&path_file, install_path.to_string_lossy().as_bytes())
-        .map_err(|e| PortableSourceError::Registry(format!("Failed to write {}: {}", path_file.display(), e)))?;
-    log::info!("Installation path saved to {}", path_file.display());
+    // Save install path to ~/.portablesource
+    let config_file = if is_root() {
+        PathBuf::from("/root/.portablesource")
+    } else {
+        if let Ok(username) = std::env::var("USER") {
+            PathBuf::from(format!("/home/{}/.portablesource", username))
+        } else if let Some(home) = dirs::home_dir() {
+            home.join(".portablesource")
+        } else {
+            PathBuf::from("./.portablesource")
+        }
+    };
+    
+    std::fs::write(&config_file, install_path.to_string_lossy().as_bytes())
+        .map_err(|e| PortableSourceError::Registry(format!("Failed to write {}: {}", config_file.display(), e)))?;
+    log::info!("Installation path saved to {}", config_file.display());
     Ok(())
 }
 
@@ -72,16 +78,28 @@ pub fn delete_install_path_from_registry() -> Result<()> {
 
 #[cfg(unix)]
 pub fn delete_install_path_from_registry() -> Result<()> {
-    // Remove from user's config dir; ignore errors if not present
-    let user_file = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("portablesource")
-        .join("install_path");
-    if user_file.exists() { let _ = std::fs::remove_file(&user_file); }
+    // Remove ~/.portablesource file
+    let config_file = if is_root() {
+        PathBuf::from("/root/.portablesource")
+    } else {
+        if let Ok(username) = std::env::var("USER") {
+            PathBuf::from(format!("/home/{}/.portablesource", username))
+        } else if let Some(home) = dirs::home_dir() {
+            home.join(".portablesource")
+        } else {
+            PathBuf::from("./.portablesource")
+        }
+    };
+    
+    if config_file.exists() { 
+        let _ = std::fs::remove_file(&config_file); 
+    }
 
     // Best-effort: also remove legacy global file if running as root
     let etc_file = std::path::Path::new("/etc/portablesource").join("install_path");
-    if unsafe { libc::geteuid() } == 0 && etc_file.exists() { let _ = std::fs::remove_file(&etc_file); }
+    if is_root() && etc_file.exists() { 
+        let _ = std::fs::remove_file(&etc_file); 
+    }
     log::info!("Installation path deleted (user and legacy locations cleaned where possible)");
     Ok(())
 }
@@ -108,16 +126,25 @@ pub fn load_install_path_from_registry() -> Result<Option<PathBuf>> {
 
 #[cfg(unix)]
 pub fn load_install_path_from_registry() -> Result<Option<PathBuf>> {
-    // Prefer user config dir
-    let user_file = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("portablesource")
-        .join("install_path");
-    if user_file.exists() {
-        let content = std::fs::read_to_string(&user_file)
-            .map_err(|e| PortableSourceError::Registry(format!("Failed to read {}: {}", user_file.display(), e)))?;
+    // Load install path from ~/.portablesource
+    let config_file = if is_root() {
+        PathBuf::from("/root/.portablesource")
+    } else {
+        if let Ok(username) = std::env::var("USER") {
+            PathBuf::from(format!("/home/{}/.portablesource", username))
+        } else if let Some(home) = dirs::home_dir() {
+            home.join(".portablesource")
+        } else {
+            PathBuf::from("./.portablesource")
+        }
+    };
+    
+    if config_file.exists() {
+        let content = std::fs::read_to_string(&config_file)
+            .map_err(|e| PortableSourceError::Registry(format!("Failed to read {}: {}", config_file.display(), e)))?;
         return Ok(Some(PathBuf::from(content.trim())));
     }
+    
     // Back-compat: legacy global file
     let path_file = std::path::Path::new("/etc/portablesource").join("install_path");
     if path_file.exists() {
@@ -125,6 +152,7 @@ pub fn load_install_path_from_registry() -> Result<Option<PathBuf>> {
             .map_err(|e| PortableSourceError::Registry(format!("Failed to read {}: {}", path_file.display(), e)))?;
         return Ok(Some(PathBuf::from(content.trim())));
     }
+    
     Ok(None)
 }
 
@@ -198,10 +226,14 @@ pub fn default_install_path_linux() -> PathBuf {
     if is_root() {
         PathBuf::from("/root/portablesource")
     } else {
-        if let Some(home) = dirs::home_dir() {
-            return home.join("portablesource");
+        // Get current username and construct path /home/{username}/portablesource
+        if let Ok(username) = std::env::var("USER") {
+            PathBuf::from(format!("/home/{}/portablesource", username))
+        } else if let Some(home) = dirs::home_dir() {
+            home.join("portablesource")
+        } else {
+            PathBuf::from("./portablesource")
         }
-        PathBuf::from("./portablesource")
     }
 }
 
@@ -252,13 +284,22 @@ pub fn detect_linux_mode() -> LinuxMode {
         if m == "cloud" { return LinuxMode::Cloud; }
         if m == "desk" { return LinuxMode::Desk; }
     }
-    let has = |bin: &str| is_command_available(bin);
-    // Consider CLOUD if core tools are present on system PATH
-    if has("git") && (has("python3") || has("python")) && has("ffmpeg") {
-        LinuxMode::Cloud
-    } else {
-        LinuxMode::Desk
+    
+    // Check if CUDA is available via nvcc command
+    if let Ok(output) = std::process::Command::new("nvcc")
+        .arg("--version")
+        .output() {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // Check if output contains "Cuda compilation tools"
+            if stdout.contains("Cuda compilation tools") {
+                return LinuxMode::Cloud;
+            }
+        }
     }
+    
+    // If no CUDA or nvcc command failed, use DESK mode
+    LinuxMode::Desk
 }
 
 #[cfg(unix)]
@@ -1069,36 +1110,50 @@ impl PortableSourceApp {
         println!("PORTABLESOURCE INSTALLATION PATH SETUP");
         println!("============================================================");
 
+        #[cfg(windows)]
         let default_path = PathBuf::from("C:/PortableSource");
-        println!("\nDefault path will be used: {}", default_path.display());
-        println!("\nYou can:");
-        println!("1. Press Enter to use the default path");
-        println!("2. Enter your own installation path");
-
-        print!("\nEnter installation path (or Enter for default): ");
-        io::stdout().flush().ok();
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).ok();
-        let input = input.trim();
-
-        let chosen = if input.is_empty() { default_path } else { validate_and_get_path(input)? };
-        println!("\nChosen installation path: {}", chosen.display());
-
-        if chosen.exists() && fs::read_dir(&chosen).map(|mut it| it.next().is_some()).unwrap_or(false) {
-            loop {
-                print!("Continue? (y/n): ");
-                io::stdout().flush().ok();
-                let mut confirm = String::new();
-                io::stdin().read_line(&mut confirm).ok();
-                let c = confirm.trim().to_lowercase();
-                if c == "y" || c == "yes" { break; }
-                if c == "n" || c == "no" { return Err(PortableSourceError::installation("Installation cancelled")); }
-                println!("Please enter 'y' or 'n'");
-            }
+        #[cfg(unix)]
+        let default_path = default_install_path_linux();
+        
+        #[cfg(unix)]
+        {
+            let chosen = prompt_install_path_linux(&default_path)?;
+            save_install_path_to_registry(&chosen)?;
+            return Ok(chosen);
         }
+        
+        #[cfg(windows)]
+        {
+            println!("\nDefault path will be used: {}", default_path.display());
+            println!("\nYou can:");
+            println!("1. Press Enter to use the default path");
+            println!("2. Enter your own installation path");
 
-        save_install_path_to_registry(&chosen)?;
-        Ok(chosen)
+            print!("\nEnter installation path (or Enter for default): ");
+            io::stdout().flush().ok();
+            let mut input = String::new();
+            io::stdin().read_line(&mut input).ok();
+            let input = input.trim();
+
+            let chosen = if input.is_empty() { default_path } else { validate_and_get_path(input)? };
+            println!("\nChosen installation path: {}", chosen.display());
+
+            if chosen.exists() && fs::read_dir(&chosen).map(|mut it| it.next().is_some()).unwrap_or(false) {
+                loop {
+                    print!("Continue? (y/n): ");
+                    io::stdout().flush().ok();
+                    let mut confirm = String::new();
+                    io::stdin().read_line(&mut confirm).ok();
+                    let c = confirm.trim().to_lowercase();
+                    if c == "y" || c == "yes" { break; }
+                    if c == "n" || c == "no" { return Err(PortableSourceError::installation("Installation cancelled")); }
+                    println!("Please enter 'y' or 'n'");
+                }
+            }
+
+            save_install_path_to_registry(&chosen)?;
+            Ok(chosen)
+        }
     }
 
     pub async fn setup_environment(&mut self) -> Result<()> {
