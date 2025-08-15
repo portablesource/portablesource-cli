@@ -12,7 +12,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: portablesource-rs.exe
+            release_name: portablesource-rs.exe
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact_name: portablesource-rs
+            release_name: portablesource-rs
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,6 +31,13 @@ jobs:
           toolchain: stable
           profile: minimal
           override: true
+          target: ${{ matrix.target }}
+
+      - name: Install musl tools (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -31,19 +46,26 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build release
-        run: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} ${{ matrix.release_name }}
+          else
+            cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} ${{ matrix.release_name }}
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: portablesource-rs-${{ runner.os }}
-          path: |
-            target/release/portablesource-rs.exe
-            target/release/portablesource-rs
-          if-no-files-found: ignore
+          path: ${{ matrix.release_name }}
+          if-no-files-found: error
 
   publish-cratesio:
     name: Publish to crates.io
