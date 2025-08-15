@@ -3,7 +3,7 @@ Rust library for GUI
 
 ## Installing in LINUX by this simple command:
 ```
-curl -sSL https://raw.githubusercontent.com/portablesource/portablesource-cli/refs/heads/main/install.sh | bash
+curl -sSL https://install.portables.dev | bash
 ```
 
 ## License
