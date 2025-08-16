@@ -1266,10 +1266,8 @@ if [[ -f \"$VENV/bin/activate\" ]]; then
   set -u
 fi
 
-{}\ncd \"$REPO_PATH\"\nif [[ -x \"$PYEXE\" ]]; then\n  exec \"$PYEXE\" \"{}\" {}
-else
-  exec python3 \"{}\" {}
-fi\n",
+{}\ncd \"$REPO_PATH\"\n",
+
             install_path.to_string_lossy(),
             repo_path.to_string_lossy(),
             repo_name,
