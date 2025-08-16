@@ -1209,6 +1209,249 @@ impl PortableSourceApp {
     }
 }
 
+#[cfg(unix)]
+pub async fn uninstall_portablesource(install_path: &PathBuf) -> Result<()> {
+    use std::io::{self, Write};
+    use std::fs;
+    
+    println!("[WARNING] This will completely remove PortableSource and all installed repositories!");
+    println!("Installation path: {}", install_path.display());
+    print!("Are you sure you want to continue? (yes/no): ");
+    io::stdout().flush().unwrap();
+    
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).unwrap();
+    
+    if input.trim().to_lowercase() != "yes" {
+        println!("Uninstall cancelled.");
+        return Ok(());
+    }
+    
+    println!("\n[INFO] Removing PortableSource environment...");
+    
+    // Remove the entire installation directory
+    if install_path.exists() {
+        match fs::remove_dir_all(install_path) {
+            Ok(_) => println!("[SUCCESS] Environment directory removed: {}", install_path.display()),
+            Err(e) => {
+                log::error!("Failed to remove environment directory: {}", e);
+                println!("[ERROR] Failed to remove environment directory: {}", e);
+                return Err(e.into());
+            }
+        }
+    } else {
+        println!("[INFO] Environment directory not found: {}", install_path.display());
+    }
+    
+    // Remove config directory if it exists
+    if let Some(config_dir) = dirs::config_dir() {
+        let portablesource_config = config_dir.join("portablesource");
+        if portablesource_config.exists() {
+            match fs::remove_dir_all(&portablesource_config) {
+                Ok(_) => println!("[SUCCESS] Config directory removed: {}", portablesource_config.display()),
+                Err(e) => println!("[WARNING] Failed to remove config directory: {}", e),
+            }
+        }
+    }
+    
+    // Get the current executable path
+    let current_exe = std::env::current_exe()?;
+    println!("\n[INFO] Removing executable: {}", current_exe.display());
+    
+    // Create a self-deletion script
+    let script_path = std::env::temp_dir().join("portablesource_uninstall.sh");
+    let script_content = format!(
+        "#!/bin/bash\nsleep 1\nrm -f '{}'\nrm -f '{}'\necho '[SUCCESS] PortableSource has been completely uninstalled.'\n",
+        current_exe.display(),
+        script_path.display()
+    );
+    
+    fs::write(&script_path, script_content)?;
+    
+    // Make script executable
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(&script_path)?.permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script_path, perms)?;
+    
+    println!("[SUCCESS] PortableSource environment has been removed.");
+    println!("[INFO] Executing self-deletion...");
+    
+    // Execute the self-deletion script
+    std::process::Command::new("bash")
+        .arg(&script_path)
+        .spawn()?;
+    
+    // Exit immediately to allow self-deletion
+    std::process::exit(0);
+}
+
+pub async fn run_repository(repo: &str, install_path: &PathBuf, additional_args: &[String]) -> Result<()> {
+    let repo_path = install_path.join("repos").join(repo);
+    
+    if !repo_path.exists() {
+        println!("[ERROR] Repository '{}' not found at: {}", repo, repo_path.display());
+        return Err(PortableSourceError::repository(format!("Repository '{}' not installed", repo)));
+    }
+    
+    // Look for start script based on platform
+    #[cfg(windows)]
+    let start_script = repo_path.join(format!("start_{}.bat", repo));
+    #[cfg(unix)]
+    let start_script = repo_path.join(format!("start_{}.sh", repo));
+    
+    if !start_script.exists() {
+        println!("[ERROR] Start script not found: {}", start_script.display());
+        return Err(PortableSourceError::repository(format!("Start script for '{}' not found", repo)));
+    }
+    
+    println!("[INFO] Running repository: {}", repo);
+    println!("[INFO] Executing: {}", start_script.display());
+    
+    // Prepare arguments
+    #[cfg(unix)]
+    let mut args = additional_args.to_vec();
+    #[cfg(windows)]
+    let args = additional_args.to_vec();
+    
+    // Note: Docker detection and fallback logic is handled in try_run_with_fallback function
+    
+    if !args.is_empty() {
+        println!("[INFO] Additional arguments: {}", args.join(" "));
+    }
+    
+    // Execute the start script based on platform
+    #[cfg(windows)]
+    {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/C", start_script.to_str().unwrap()]);
+        cmd.args(&args);
+        
+        let status = cmd.status()?;
+        
+        if status.success() {
+            println!("[SUCCESS] Repository '{}' executed successfully", repo);
+        } else {
+            println!("[ERROR] Repository '{}' execution failed with exit code: {:?}", repo, status.code());
+            return Err(PortableSourceError::command(format!("Repository '{}' execution failed", repo)));
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        // Try with fallback mechanism for Docker
+        if is_running_in_docker() {
+            if let Err(e) = try_run_with_fallback(&start_script, &additional_args, repo) {
+                return Err(e);
+            }
+        } else {
+            let mut cmd = std::process::Command::new("bash");
+            cmd.arg(&start_script);
+            cmd.args(&args);
+            
+            let status = cmd.status()?;
+            
+            if status.success() {
+                println!("[SUCCESS] Repository '{}' executed successfully", repo);
+            } else {
+                println!("[ERROR] Repository '{}' execution failed with exit code: {:?}", repo, status.code());
+                return Err(PortableSourceError::command(format!("Repository '{}' execution failed", repo)));
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+#[cfg(unix)]
+fn try_run_with_fallback(start_script: &PathBuf, additional_args: &[String], repo: &str) -> Result<()> {
+    // Try 1: --listen 0.0.0.0
+    println!("[INFO] Trying with --listen 0.0.0.0");
+    let mut args_with_listen = additional_args.to_vec();
+    args_with_listen.push("--listen".to_string());
+    args_with_listen.push("0.0.0.0".to_string());
+    
+    let mut cmd = std::process::Command::new("bash");
+    cmd.arg(start_script);
+    cmd.args(&args_with_listen);
+    
+    match cmd.status() {
+        Ok(status) if status.success() => {
+            println!("[SUCCESS] Repository '{}' executed successfully with --listen 0.0.0.0", repo);
+            return Ok(());
+        }
+        Ok(status) => {
+            println!("[WARNING] Failed with --listen 0.0.0.0, exit code: {:?}", status.code());
+        }
+        Err(e) => {
+            println!("[WARNING] Failed to execute with --listen 0.0.0.0: {}", e);
+        }
+    }
+    
+    // Try 2: --listen only
+    println!("[INFO] Trying with --listen only");
+    let mut args_with_listen_only = additional_args.to_vec();
+    args_with_listen_only.push("--listen".to_string());
+    
+    let mut cmd = std::process::Command::new("bash");
+    cmd.arg(start_script);
+    cmd.args(&args_with_listen_only);
+    
+    match cmd.status() {
+        Ok(status) if status.success() => {
+            println!("[SUCCESS] Repository '{}' executed successfully with --listen only", repo);
+            return Ok(());
+        }
+        Ok(status) => {
+            println!("[WARNING] Failed with --listen only, exit code: {:?}", status.code());
+        }
+        Err(e) => {
+            println!("[WARNING] Failed to execute with --listen only: {}", e);
+        }
+    }
+    
+    // Try 3: No additional listen arguments
+    println!("[INFO] Trying without additional listen arguments");
+    let mut cmd = std::process::Command::new("bash");
+    cmd.arg(start_script);
+    cmd.args(additional_args);
+    
+    let status = cmd.status()?;
+    
+    if status.success() {
+        println!("[SUCCESS] Repository '{}' executed successfully without listen arguments", repo);
+        Ok(())
+    } else {
+        println!("[ERROR] All fallback attempts failed. Repository '{}' execution failed with exit code: {:?}", repo, status.code());
+        Err(PortableSourceError::command(format!("Repository '{}' execution failed after all fallback attempts", repo)))
+    }
+}
+
+#[cfg(unix)]
+fn is_running_in_docker() -> bool {
+    use std::fs;
+    
+    // Check if we're running in a Docker container by looking at /proc/self/cgroup
+    if let Ok(cgroup_content) = fs::read_to_string("/proc/self/cgroup") {
+        return cgroup_content.contains("docker");
+    }
+    
+    // Alternative check: look for .dockerenv file
+    if fs::metadata("/.dockerenv").is_ok() {
+        return true;
+    }
+    
+    false
+}
+
+#[cfg(windows)]
+#[allow(dead_code)]
+fn is_running_in_docker() -> bool {
+    // Docker detection on Windows is more complex, for now return false
+    // Could be implemented by checking environment variables or other methods
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -48,7 +48,9 @@ async fn run(cli: Cli) -> Result<()> {
     // Skip interactive prompt for commands that don't need install_path
     #[cfg(windows)]
     let needs_install_path = matches!(cli.command, Some(Commands::SetupEnv) | Some(Commands::InstallRepo { .. }) | Some(Commands::UpdateRepo { .. }) | Some(Commands::DeleteRepo { .. }) | Some(Commands::ListRepos) | Some(Commands::ChangePath) | Some(Commands::CheckEnv));
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    let needs_install_path = matches!(cli.command, Some(Commands::SetupEnv) | Some(Commands::InstallRepo { .. }) | Some(Commands::UpdateRepo { .. }) | Some(Commands::DeleteRepo { .. }) | Some(Commands::ListRepos) | Some(Commands::ChangePath) | Some(Commands::CheckEnv) | Some(Commands::Uninstall));
+    #[cfg(all(not(windows), not(unix)))]
     let needs_install_path = matches!(cli.command, Some(Commands::SetupEnv) | Some(Commands::InstallRepo { .. }) | Some(Commands::UpdateRepo { .. }) | Some(Commands::DeleteRepo { .. }) | Some(Commands::ListRepos) | Some(Commands::ChangePath) | Some(Commands::CheckEnv));
 
     let install_path = if !needs_install_path {
@@ -82,11 +84,30 @@ async fn run(cli: Cli) -> Result<()> {
         config_manager.set_install_path(validated_path.clone())?;
         validated_path
     } else if !config_manager.get_config().install_path.as_os_str().is_empty() {
-        let existing = config_manager.get_config().install_path.clone();
-        let validated_path = utils::validate_and_create_path(&existing)?;
-        // Normalize in config in case of differences
-        config_manager.set_install_path(validated_path.clone())?;
-        validated_path
+        // For setup-env command on Linux, always show interactive prompt to allow path customization
+        #[cfg(unix)]
+        if matches!(cli.command, Some(Commands::SetupEnv)) {
+            let current_path = config_manager.get_config().install_path.clone();
+            println!("\nCurrent installation path: {}", current_path.display());
+            let chosen = utils::prompt_install_path_linux(&current_path)?;
+            let _ = utils::save_install_path_to_registry(&chosen);
+            config_manager.set_install_path(chosen.clone())?;
+            chosen
+        } else {
+            let existing = config_manager.get_config().install_path.clone();
+            let validated_path = utils::validate_and_create_path(&existing)?;
+            // Normalize in config in case of differences
+            config_manager.set_install_path(validated_path.clone())?;
+            validated_path
+        }
+        #[cfg(windows)]
+        {
+            let existing = config_manager.get_config().install_path.clone();
+            let validated_path = utils::validate_and_create_path(&existing)?;
+            // Normalize in config in case of differences
+            config_manager.set_install_path(validated_path.clone())?;
+            validated_path
+        }
     } else {
         // Default path with interactive prompt on Linux
         #[cfg(windows)]
@@ -99,12 +120,18 @@ async fn run(cli: Cli) -> Result<()> {
         }
         #[cfg(unix)]
         {
-            let default_path = utils::default_install_path_linux();
-            let chosen = utils::prompt_install_path_linux(&default_path)?;
-            // Persist for subsequent commands on Linux too (user scope)
-            let _ = utils::save_install_path_to_registry(&chosen);
-            config_manager.set_install_path(chosen.clone())?;
-            chosen
+            // For setup-env command, always show interactive prompt on first run
+            if matches!(cli.command, Some(Commands::SetupEnv)) {
+                let default_path = utils::default_install_path_linux();
+                let chosen = utils::prompt_install_path_linux(&default_path)?;
+                // Persist for subsequent commands on Linux too (user scope)
+                let _ = utils::save_install_path_to_registry(&chosen);
+                config_manager.set_install_path(chosen.clone())?;
+                chosen
+            } else {
+                let default_path = utils::default_install_path_linux();
+                utils::validate_and_create_path(&default_path)?
+            }
         }
     };
     
@@ -187,6 +214,10 @@ async fn run(cli: Cli) -> Result<()> {
             println!("Installation path unregistered successfully");
             Ok(())
         }
+        #[cfg(unix)]
+        Some(Commands::Uninstall) => {
+            utils::uninstall_portablesource(&install_path).await
+        }
         Some(Commands::ChangePath) => {
             change_installation_path(&mut config_manager).await
         }
@@ -201,6 +232,9 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Some(Commands::ListRepos) => {
             list_repositories(&install_path, &config_manager)
+        }
+        Some(Commands::RunRepo { repo, args }) => {
+            utils::run_repository(repo, &install_path, args).await
         }
         Some(Commands::SystemInfo) => {
             show_system_info(&mut config_manager).await
@@ -504,6 +538,8 @@ async fn check_environment(install_path: &PathBuf, _config_manager: &ConfigManag
     
     Ok(())
 }
+
+
 
 fn check_gpu() -> Result<()> {
     let gpu_detector = GpuDetector::new();

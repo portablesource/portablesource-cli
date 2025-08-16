@@ -33,29 +33,47 @@ pub enum Commands {
     #[cfg(windows)]
     Unregister,
     
+    /// Uninstall PortableSource completely (Linux only)
+    #[cfg(unix)]
+    Uninstall,
+    
     /// Change installation path
     ChangePath,
     
     /// Install repository
+    #[command(alias = "ir")]
     InstallRepo {
         /// Repository URL or name
         repo: String,
     },
     
     /// Update repository
+    #[command(alias = "ur")]
     UpdateRepo {
         /// Repository name (optional; if omitted, a TUI selector will be shown)
         repo: Option<String>,
     },
     
     /// Delete repository
+    #[command(alias = "dr")]
     DeleteRepo {
         /// Repository name
         repo: String,
     },
     
-    /// Show installed repositories
+    /// List installed repositories
+    #[command(alias = "lr")]
     ListRepos,
+
+    /// Run repository start script
+    #[command(alias = "rr")]
+    RunRepo {
+        /// Repository name to run
+        repo: String,
+        /// Additional arguments to pass to the repository script
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     
     /// Show system information
     SystemInfo,
