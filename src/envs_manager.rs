@@ -684,7 +684,8 @@ impl PortableEnvironmentManager {
             }
         }
 
-        //
+        // Install Git LFS (always run to ensure it's initialized)
+        self.install_git_lfs().await?;
 
         // Configure CUDA paths if present
         if let Some(gpu) = &cfg_now.gpu_config { if gpu.cuda_version.is_some() && gpu.recommended_backend.contains("cuda") { cfgm.configure_cuda_paths(); } }
@@ -1098,6 +1099,30 @@ impl PortableEnvironmentManager {
         }
         
         Ok(())
+    }
+
+    /// Install Git LFS
+    async fn install_git_lfs(&self) -> Result<()> {
+        log::info!("Installing Git LFS...");
+        
+        // Check if git is available first
+        if let Some(git_exe) = self.get_git_executable() {
+            // Simply run 'git lfs install' command
+            let output = Command::new(git_exe)
+                .args(["lfs", "install"])
+                .output()
+                .map_err(|e| PortableSourceError::environment(format!("Failed to run git lfs install: {}", e)))?;
+            
+            if output.status.success() {
+                log::info!("Git LFS initialized successfully!");
+                Ok(())
+            } else {
+                let error_msg = String::from_utf8_lossy(&output.stderr);
+                Err(PortableSourceError::environment(format!("Failed to initialize Git LFS: {}", error_msg)))
+            }
+        } else {
+            Err(PortableSourceError::environment("Git is not available, cannot install Git LFS"))
+        }
     }
 }
 

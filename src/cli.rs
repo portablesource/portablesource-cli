@@ -40,32 +40,32 @@ pub enum Commands {
     /// Change installation path
     ChangePath,
     
-    /// Install repository
+    /// Install repository (alias: ir)
     #[command(alias = "ir")]
     InstallRepo {
         /// Repository URL or name
         repo: String,
     },
     
-    /// Update repository
+    /// Update repository (alias: ur)
     #[command(alias = "ur")]
     UpdateRepo {
         /// Repository name (optional; if omitted, a TUI selector will be shown)
         repo: Option<String>,
     },
     
-    /// Delete repository
+    /// Delete repository (alias: dr)
     #[command(alias = "dr")]
     DeleteRepo {
         /// Repository name
         repo: String,
     },
     
-    /// List installed repositories
+    /// List installed repositories (alias: lr)
     #[command(alias = "lr")]
     ListRepos,
 
-    /// Run repository start script
+    /// Run repository start script (alias: rr)
     #[command(alias = "rr")]
     RunRepo {
         /// Repository name to run
