@@ -986,7 +986,7 @@ impl RepositoryInstaller {
         {
             if let Some(cv) = crate::utils::detect_cuda_version_from_system() {
                 return match cv {
-                    crate::config::CudaVersionLinux::Cuda128 => "https://download.pytorch.org/whl/cu128".into(),
+                    crate::config::CudaVersionLinux::Cuda128 => "https://download.pytorch.org/whl/nightly/cu128".into(),
                     crate::config::CudaVersionLinux::Cuda126 => "https://download.pytorch.org/whl/cu126".into(),
                     crate::config::CudaVersionLinux::Cuda124 => "https://download.pytorch.org/whl/cu124".into(),
                     crate::config::CudaVersionLinux::Cuda121 => "https://download.pytorch.org/whl/cu121".into(),
@@ -998,7 +998,7 @@ impl RepositoryInstaller {
         {
             if let Some(gpu) = &cfg.gpu_config { if let Some(cuda) = &gpu.cuda_version {
                 return match cuda {
-                    crate::config::CudaVersion::Cuda128 => "https://download.pytorch.org/whl/cu128".into(),
+                    crate::config::CudaVersion::Cuda128 => "https://download.pytorch.org/whl/nightly/cu128".into(),
                     crate::config::CudaVersion::Cuda124 => "https://download.pytorch.org/whl/cu124".into(),
                     crate::config::CudaVersion::Cuda118 => "https://download.pytorch.org/whl/cu118".into(),
                 };
@@ -1439,11 +1439,16 @@ impl<'a> RequirementsAnalyzer<'a> {
 
     fn get_default_torch_index_url(&self) -> String {
         let cfg = self.config_manager.get_config();
+        if let Some(gpu) = &cfg.gpu_config {
+            let name_up = gpu.name.to_uppercase();
+            let is_blackwell = name_up.contains("RTX 50") || format!("{:?}", gpu.generation).to_lowercase().contains("blackwell");
+            if is_blackwell { return "https://download.pytorch.org/whl/nightly/cu128".into(); }
+        }
         #[cfg(unix)]
         {
             if let Some(cv) = crate::utils::detect_cuda_version_from_system() {
                 return match cv {
-                    crate::config::CudaVersionLinux::Cuda128 => "https://download.pytorch.org/whl/cu128".into(),
+                    crate::config::CudaVersionLinux::Cuda128 => "https://download.pytorch.org/whl/nightly/cu128".into(),
                     crate::config::CudaVersionLinux::Cuda126 => "https://download.pytorch.org/whl/cu126".into(),
                     crate::config::CudaVersionLinux::Cuda124 => "https://download.pytorch.org/whl/cu124".into(),
                     crate::config::CudaVersionLinux::Cuda121 => "https://download.pytorch.org/whl/cu121".into(),
@@ -1455,7 +1460,7 @@ impl<'a> RequirementsAnalyzer<'a> {
         {
             if let Some(gpu) = &cfg.gpu_config { if let Some(cuda) = &gpu.cuda_version {
                 return match cuda {
-                    crate::config::CudaVersion::Cuda128 => "https://download.pytorch.org/whl/cu128".into(),
+                    crate::config::CudaVersion::Cuda128 => "https://download.pytorch.org/whl/nightly/cu128".into(),
                     crate::config::CudaVersion::Cuda124 => "https://download.pytorch.org/whl/cu124".into(),
                     crate::config::CudaVersion::Cuda118 => "https://download.pytorch.org/whl/cu118".into(),
                 };
