@@ -265,14 +265,14 @@ impl RepositoryInstaller {
 
         #[cfg(windows)]
         {
-            println!("[PortableSource] Generating start script...");
+            // println!("[PortableSource] Generating start script...");
             // Final save after script generation
             let _ = self._config_manager.save_config();
             self.generate_startup_script(&repo_path, &repo_info)?;
         }
         #[cfg(unix)]
         {
-            println!("[PortableSource] Generating start script (.sh)...");
+            // println!("[PortableSource] Generating start script (.sh)...");
             let _ = self._config_manager.save_config();
             self.generate_startup_script_unix(&repo_path, &repo_info)?;
             println!("[PortableSource] Start script generated: {:?}", repo_path.join(format!("start_{}.sh", name.to_lowercase())));
@@ -842,7 +842,7 @@ impl RepositoryInstaller {
         if !plan.torch_packages.is_empty() {
             let torch_install_result = if uv_available {
                 let mut uv_cmd = self.get_uv_executable(repo_name);
-                uv_cmd.extend(["pip".into(), "install".into(), "--extra-index-url".into(), "https://pypi.ngc.nvidia.com".into(), "--force-reinstall".into()]);
+                uv_cmd.extend(["pip".into(), "install".into(), "--force-reinstall".into()]);
                 if let Some(index) = plan.torch_index_url.as_ref() {
                     uv_cmd.extend(["--index-url".into(), index.clone()]);
                 }
@@ -865,7 +865,7 @@ impl RepositoryInstaller {
                 warn!("PyTorch installation with specific versions failed, trying without versions...");
                 if uv_available {
                     let mut uv_cmd = self.get_uv_executable(repo_name);
-                    uv_cmd.extend(["pip".into(), "install".into(), "--extra-index-url".into(), "https://pypi.ngc.nvidia.com".into(), "--force-reinstall".into()]);
+                    uv_cmd.extend(["pip".into(), "install".into(), "--force-reinstall".into()]);
                     if let Some(index) = plan.torch_index_url.as_ref() {
                         uv_cmd.extend(["--index-url".into(), index.clone()]);
                     }
@@ -910,6 +910,30 @@ impl RepositoryInstaller {
 
         // ONNX packages are only installed if explicitly listed in dependencies
         // No automatic fallback installation
+        
+        // 6) Force reinstall torch with CUDA index if torch is installed (as dependency)
+        // Check if torch is installed in the environment
+        let python_exe = self.get_python_in_env(repo_name);
+        let check_torch_cmd = vec![python_exe.to_string_lossy().to_string(), "-c".to_string(), "import torch; print('torch_installed')".to_string()];
+        
+        if run_tool_with_env_silent(&self._env_manager, &check_torch_cmd, None, repo_path).is_ok() {
+            info!("Torch detected as dependency, reinstalling with CUDA index...");
+            let torch_index_url = self.get_default_torch_index_url();
+            
+            let torch_reinstall_result = if uv_available {
+                let mut uv_cmd = self.get_uv_executable(repo_name);
+                uv_cmd.extend(["pip".into(), "install".into(), "--force-reinstall".into(), "--index-url".into(), torch_index_url, "torch".into(), "torchvision".into(), "torchaudio".into()]);
+                run_tool_with_env(&self._env_manager, &uv_cmd, Some("Reinstalling torch with CUDA index"), repo_path)
+            } else {
+                let mut pip_cmd = self.get_pip_executable(repo_name);
+                pip_cmd.extend(["install".into(), "--force-reinstall".into(), "--index-url".into(), torch_index_url, "torch".into(), "torchvision".into(), "torchaudio".into()]);
+                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Reinstalling torch with CUDA index"), repo_path)
+            };
+            
+            if torch_reinstall_result.is_err() {
+                warn!("Failed to reinstall torch with CUDA index, keeping existing installation");
+            }
+        }
 
         Ok(())
     }
@@ -957,6 +981,49 @@ impl RepositoryInstaller {
         for step in steps {
             self.process_server_step(repo_name, &step, repo_path)?;
         }
+        
+        // Check if torch is installed and reinstall with CUDA index if needed
+        let mut check_cmd = self.get_pip_executable(repo_name);
+        check_cmd.extend(["show".into(), "torch".into()]);
+        
+        let cfg = self._config_manager.get_config();
+        let venv_path = cfg.install_path.join("envs").join(repo_name);
+        
+        if let Ok(output) = std::process::Command::new(&check_cmd[0])
+            .args(&check_cmd[1..])
+            .env("VIRTUAL_ENV", venv_path)
+            .output() {
+            if output.status.success() {
+                info!("Torch detected as dependency, reinstalling with CUDA index");
+                
+                // Try with uv first
+                let uv_available = self.install_uv_in_venv(repo_name).unwrap_or(false);
+                let mut reinstall_cmd = if uv_available {
+                    let mut cmd = self.get_uv_executable(repo_name);
+                    cmd.extend(["pip".into(), "install".into()]);
+                    cmd
+                } else {
+                    let mut cmd = self.get_pip_executable(repo_name);
+                    cmd.push("install".into());
+                    cmd
+                };
+                
+                reinstall_cmd.extend(["--force-reinstall".into(), "--index-url".into(), self.get_default_torch_index_url()]);
+                reinstall_cmd.extend(["torch".into(), "torchvision".into(), "torchaudio".into()]);
+                
+                if let Err(_) = run_tool_with_env_silent(&self._env_manager, &reinstall_cmd, Some("Reinstalling torch with CUDA"), repo_path) {
+                    // Fallback to pip if uv fails
+                    if uv_available {
+                        info!("UV failed, falling back to pip for torch reinstall");
+                        let mut pip_cmd = self.get_pip_executable(repo_name);
+                        pip_cmd.extend(["install".into(), "--force-reinstall".into(), "--index-url".into(), self.get_default_torch_index_url()]);
+                        pip_cmd.extend(["torch".into(), "torchvision".into(), "torchaudio".into()]);
+                        run_tool_with_env_silent(&self._env_manager, &pip_cmd, Some("Reinstalling torch with CUDA (pip)"), repo_path)?;
+                    }
+                }
+            }
+        }
+        
         Ok(true)
     }
 
@@ -982,9 +1049,11 @@ impl RepositoryInstaller {
                     for p in pkgs {
                         if let Some(s) = p.as_str() {
                             let mapped = self.apply_onnx_gpu_detection(s);
-                            // Only torch, torchvision, torchaudio are considered torch packages
-                            let is_torch_package = mapped == "torch" || mapped.starts_with("torch==") || mapped.starts_with("torch>=") || mapped.starts_with("torch<=") || mapped.starts_with("torch<") || mapped.starts_with("torch>") ||
-                                                   mapped.starts_with("torchvision") || mapped.starts_with("torchaudio");
+                            // Check if this is a torch-related package
+                            let package_name = mapped.split(|c| "=><!".contains(c)).next().unwrap_or("").to_lowercase();
+                            let is_torch_package = ["torch", "torchvision", "torchaudio", "torchtext", "torchdata"].contains(&package_name.as_str());
+                            
+                            // info!("Package: {} -> mapped: {} -> name: {} -> is_torch: {}", s, mapped, package_name, is_torch_package);
                             
                             if is_torch_package {
                                 torch_packages.push(mapped);
@@ -994,6 +1063,9 @@ impl RepositoryInstaller {
                         }
                     }
                 }
+                
+                // info!("Torch packages: {:?}", torch_packages);
+                // info!("Regular packages: {:?}", regular_packages);
                 
                 // Install regular packages first (without torch index)
                 if !regular_packages.is_empty() {
@@ -1024,7 +1096,7 @@ impl RepositoryInstaller {
                     // No extra index URL needed for torch packages
                     
                     for p in torch_packages { cmd.push(p); }
-                    run_tool_with_env(&self._env_manager, &cmd, Some("Installing torch packages"), repo_path)?;
+                    run_tool_with_env(&self._env_manager, &cmd, None, repo_path)?;
                 }
             }
             "torch" => {
@@ -1227,8 +1299,8 @@ impl RepositoryInstaller {
 
     fn generate_startup_script(&self, repo_path: &Path, repo_info: &RepositoryInfo) -> Result<bool> {
         let repo_name = repo_path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-        info!("Starting generate_startup_script for repo: {}", repo_name);
-        println!("[PortableSource] Creating startup script for: {}", repo_name);
+        // info!("Starting generate_startup_script for repo: {}", repo_name);
+        // println!("[PortableSource] Creating startup script for: {}", repo_name);
         
         let mut main_file = repo_info.main_file.clone();
         if main_file.is_none() { main_file = self.main_file_finder.find_main_file(&repo_name, repo_path, repo_info.url.as_deref()); }
@@ -1269,7 +1341,7 @@ impl RepositoryInstaller {
         // Determine execution command based on available options
         let content = if let Some(main_file_path) = main_file {
             // Case 1: main_file found - use it
-            info!("Using main file: {}", main_file_path);
+            // info!("Using main file: {}", main_file_path);
             base_content + &format!(
                 "\"%python_exe%\" {} {}\nset EXIT_CODE=%ERRORLEVEL%\n\necho Cleaning up...\nsubst X: /D\n\nif %EXIT_CODE% neq 0 (\n    echo.\n    echo Program finished with error (code: %EXIT_CODE%)\n) else (\n    echo.\n    echo Program finished successfully\n)\n\npause\n",
                 main_file_path,
@@ -1300,7 +1372,7 @@ impl RepositoryInstaller {
         };
         let mut f = fs::File::create(&bat_file)?;
         f.write_all(content.as_bytes())?;
-        info!("Successfully created startup script: {:?}", bat_file);
+        // info!("Successfully created startup script: {:?}", bat_file);
 
         Ok(true)
     }
@@ -1698,7 +1770,7 @@ fn run_with_progress_typed(mut cmd: Command, label: Option<&str>, command_type: 
     
     let mut stderr_lines = Vec::new();
     
-    let (stdout_prefix, stderr_prefix, error_prefix) = match command_type {
+    let (_stdout_prefix, _stderr_prefix, error_prefix) = match command_type {
         CommandType::Git => ("[Git]", "[Git Error]", "Git command failed"),
         CommandType::Pip => ("[Pip]", "[Pip Error]", "Pip command failed"),
         CommandType::Uv => ("[UV]", "[UV Error]", "UV command failed"),
