@@ -1179,8 +1179,7 @@ impl RepositoryInstaller {
     }
 
     fn apply_onnx_gpu_detection(&self, base: &str) -> String {
-        let cfg = self._config_manager.get_config();
-        let up = cfg.gpu_config.as_ref().map(|g| g.name.to_uppercase()).unwrap_or_default();
+        let up = self._config_manager.get_gpu_name().to_uppercase();
         if base.starts_with("onnxruntime") {
             if up.contains("NVIDIA") { return base.replace("onnxruntime", "onnxruntime-gpu"); }
             if (up.contains("AMD") || up.contains("INTEL")) && cfg!(windows) { return base.replace("onnxruntime", "onnxruntime-directml"); }
