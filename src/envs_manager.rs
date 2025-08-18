@@ -862,7 +862,34 @@ impl PortableEnvironmentManager {
     
     async fn install_python(&self) -> Result<()> { self.install_portable_tool("python") }
     
-    async fn install_git(&self) -> Result<()> { self.install_portable_tool("git") }
+    async fn install_git(&self) -> Result<()> {
+        // Install Git first
+        self.install_portable_tool("git")?;
+        
+        // Configure Git to use OpenSSL backend to prevent SSL/TLS issues
+        if let Some(git_exe) = self.get_git_executable() {
+            let output = Command::new(git_exe)
+                .args(["config", "--global", "http.sslBackend", "openssl"])
+                .output();
+            
+            match output {
+                Ok(result) if result.status.success() => {
+                    log::info!("Git configured to use OpenSSL backend");
+                }
+                Ok(result) => {
+                    let error_msg = String::from_utf8_lossy(&result.stderr);
+                    log::warn!("Failed to configure Git SSL backend: {}", error_msg);
+                }
+                Err(e) => {
+                    log::warn!("Failed to run git config command: {}", e);
+                }
+            }
+        } else {
+            log::warn!("Git executable not found after installation, cannot configure SSL backend");
+        }
+        
+        Ok(())
+    }
     
     async fn install_ffmpeg(&self) -> Result<()> { self.install_portable_tool("ffmpeg") }
     
@@ -1124,6 +1151,8 @@ impl PortableEnvironmentManager {
             Err(PortableSourceError::environment("Git is not available, cannot install Git LFS"))
         }
     }
+    
+
 }
 
 // Удалены функции sanitize_windows_path_for_7z и format_7z_out_arg

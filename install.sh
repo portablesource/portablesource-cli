@@ -19,7 +19,6 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# Check if running as root
 if [[ $EUID -eq 0 ]]; then
     print_warning "Running as root. Installing to /usr/local/bin"
     INSTALL_DIR="/usr/local/bin"
@@ -35,7 +34,6 @@ INSTALL_NAME="portables"
 print_info "Installing PortableSource CLI..."
 
 print_info "Fetching latest release information..."
-# For Linux, we want the binary without .exe extension
 LATEST_RELEASE_URL=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep "browser_download_url.*/${BINARY_NAME}\"" | grep -v "\.exe" | cut -d '"' -f 4)
 
 if [ -z "$LATEST_RELEASE_URL" ]; then
@@ -65,7 +63,6 @@ chmod +x "$BINARY_NAME"
 
 print_info "Installing binary to $INSTALL_DIR/$INSTALL_NAME..."
 if [[ $EUID -eq 0 ]]; then
-    # Running as root
     cp "$BINARY_NAME" "$INSTALL_DIR/$INSTALL_NAME"
 else
     if ! sudo cp "$BINARY_NAME" "$INSTALL_DIR/$INSTALL_NAME"; then
@@ -82,12 +79,10 @@ else
 fi
 
 rm -rf "$TEMP_DIR"
-# Verify installation
 if [ -x "$INSTALL_DIR/$INSTALL_NAME" ]; then
     print_info "Installation successful!"
     print_info "You can now use 'portables' command"
     
-    # Setup environment automatically
     print_info "Setting up PortableSource environment..."
     if "$INSTALL_DIR/$INSTALL_NAME" setup-env; then
         print_info "Environment setup completed successfully!"

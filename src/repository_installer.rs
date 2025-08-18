@@ -74,17 +74,23 @@ impl RepositoryInstaller {
         // 1) Fetch + reset --hard to remote main/master, then pull
         let git_exe = self.get_git_executable();
         {
-            let mut cmd = std::process::Command::new(&git_exe);
-            cmd.current_dir(&repo_path).arg("fetch").arg("--all");
-            let _ = run_with_progress(cmd, Some("Fetching from remote"));
-        }
-        if reset_hard_to(&git_exe, &repo_path, "origin/main").is_err() {
-            let _ = reset_hard_to(&git_exe, &repo_path, "origin/master");
+            let args = vec![git_exe.clone(), "fetch".to_string(), "--all".to_string()];
+            if let Err(e) = run_tool_with_env(&self._env_manager, &args, Some("Fetching from remote"), Some(&repo_path)) {
+                warn!("Failed to fetch from remote: {}", e);
+            }
         }
         {
-            let mut cmd = std::process::Command::new(&git_exe);
-            cmd.current_dir(&repo_path).arg("pull");
-            let _ = run_with_progress(cmd, Some("Pulling latest changes"));
+            let args = vec![git_exe.clone(), "reset".to_string(), "--hard".to_string(), "origin/main".to_string()];
+            if run_tool_with_env(&self._env_manager, &args, Some("Reset to origin/main"), Some(&repo_path)).is_err() {
+                let args = vec![git_exe.clone(), "reset".to_string(), "--hard".to_string(), "origin/master".to_string()];
+                let _ = run_tool_with_env(&self._env_manager, &args, Some("Reset to origin/master"), Some(&repo_path));
+            }
+        }
+        {
+            let args = vec![git_exe.clone(), "pull".to_string()];
+            if let Err(e) = run_tool_with_env(&self._env_manager, &args, Some("Pulling latest changes"), Some(&repo_path)) {
+                warn!("Failed to pull latest changes: {}", e);
+            }
         }
 
         // 2) Reinstall deps (install_dependencies сам пересоздаст venv)
@@ -315,7 +321,7 @@ impl RepositoryInstaller {
             info!("Found pyproject.toml, extracting dependencies");
             if let Ok(requirements_path) = self.extract_dependencies_from_pyproject(&pyproject_path, repo_path) {
                 info!("Installing from extracted pyproject.toml dependencies: {:?}", requirements_path);
-                self.install_requirements_with_uv_or_pip(&repo_name, &requirements_path)?;
+                self.install_requirements_with_uv_or_pip(&repo_name, &requirements_path, Some(repo_path))?;
                 
                 // Install the repository itself as a package
                 info!("Installing repository as package with uv pip install .");
@@ -327,18 +333,10 @@ impl RepositoryInstaller {
             }
         }
 
-        // Fallback to requirements.txt variants
-        let candidates = [
-            repo_path.join("requirements.txt"),
-            repo_path.join("requirements_pyp.txt"),
-            repo_path.join("requirements").join("requirements_nvidia.txt"),
-            repo_path.join("requirements").join("requirements.txt"),
-            repo_path.join("install").join("requirements.txt"),
-        ];
-        let requirements = candidates.iter().find(|p| p.exists());
-        if let Some(req) = requirements {
-            info!("Installing from {:?}", req);
-            self.install_requirements_with_uv_or_pip(&repo_name, req)?;
+        // Fallback to requirements.txt variants using smart search
+        if let Some(requirements_file) = self.find_requirements_files(repo_path) {
+            info!("Installing from {:?}", requirements_file);
+            self.install_requirements_with_uv_or_pip(&repo_name, &requirements_file, Some(repo_path))?;
         } else {
             info!("No requirements.txt or pyproject.toml found");
         }
@@ -367,6 +365,77 @@ impl RepositoryInstaller {
         }
         
         Ok(name.to_string())
+    }
+    
+    /// Find requirements files in repository, checking specific files first, then using glob patterns
+    fn find_requirements_files(&self, repo_path: &Path) -> Option<PathBuf> {
+        use std::fs;
+        
+        // First, check specific known files
+        let specific_candidates = [
+            repo_path.join("requirements.txt"),
+            repo_path.join("requirements_pyp.txt"),
+            repo_path.join("requirements").join("requirements_nvidia.txt"),
+            repo_path.join("requirements").join("requirements.txt"),
+            repo_path.join("install").join("requirements.txt"),
+        ];
+        
+        // Check specific files first
+        for candidate in &specific_candidates {
+            if candidate.exists() {
+                return Some(candidate.clone());
+            }
+        }
+        
+        // Then search for requirements_* patterns in root directory
+        if let Ok(entries) = fs::read_dir(repo_path) {
+            for entry in entries.flatten() {
+                if let Ok(file_type) = entry.file_type() {
+                    if file_type.is_file() {
+                        let file_name = entry.file_name();
+                        let name_str = file_name.to_string_lossy();
+                        if name_str.starts_with("requirements_") && name_str.ends_with(".txt") {
+                            return Some(entry.path());
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Then search for requirements* patterns in root directory
+        if let Ok(entries) = fs::read_dir(repo_path) {
+            for entry in entries.flatten() {
+                if let Ok(file_type) = entry.file_type() {
+                    if file_type.is_file() {
+                        let file_name = entry.file_name();
+                        let name_str = file_name.to_string_lossy();
+                        if name_str.starts_with("requirements") && name_str.ends_with(".txt") && name_str != "requirements.txt" {
+                            return Some(entry.path());
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Finally, search in requirements/ subdirectory for requirements\* patterns
+        let requirements_dir = repo_path.join("requirements");
+        if requirements_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&requirements_dir) {
+                for entry in entries.flatten() {
+                    if let Ok(file_type) = entry.file_type() {
+                        if file_type.is_file() {
+                            let file_name = entry.file_name();
+                            let name_str = file_name.to_string_lossy();
+                            if name_str.starts_with("requirements") && name_str.ends_with(".txt") {
+                                return Some(entry.path());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        None
     }
 }
 
@@ -569,11 +638,11 @@ impl RepositoryInstaller {
                 if self.install_uv_in_venv(repo_name).unwrap_or(false) {
             let mut uv_cmd = self.get_uv_executable(repo_name);
                     uv_cmd.extend(["pip".into(), "install".into(), "mmgp==3.5.6".into()]);
-                    let _ = run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing mmgp for wangp"), None);
+                    let _ = run_tool_with_env_silent(&self._env_manager, &uv_cmd, Some("Installing mmgp for wangp"), Some(_repo_path));
                 } else {
                     let mut pip_cmd = self.get_pip_executable(repo_name);
                     pip_cmd.extend(["install".into(), "mmgp==3.5.6".into()]);
-                    let _ = run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing mmgp for wangp"), None);
+                    let _ = run_tool_with_env_silent(&self._env_manager, &pip_cmd, Some("Installing mmgp for wangp"), Some(_repo_path));
                 }
                 Ok(())
             }
@@ -609,22 +678,37 @@ impl RepositoryInstaller {
         
         // Clone repository (either first time or after corruption removal)
         let url = repo_info.url.clone().ok_or_else(|| PortableSourceError::repository("Missing repository URL"))?;
+        info!("Cloning repository from URL: {}", url);
+        
         let parent = repo_path.parent().ok_or_else(|| PortableSourceError::repository("Invalid repo path"))?;
         fs::create_dir_all(parent)?;
-        let mut cmd = Command::new(&git_exe);
-        cmd.current_dir(parent).arg("clone");
-        if let Some(branch) = None::<String> { cmd.arg("-b").arg(branch); }
-        cmd.arg(&url).arg(repo_path.file_name().unwrap());
-        run_with_progress(cmd, Some("Cloning repository"))?;
-        Ok(())
+        let mut args = vec![git_exe.clone(), "clone".to_string()];
+        if let Some(branch) = None::<String> { 
+            args.push("-b".to_string());
+            args.push(branch);
+        }
+        args.push(url.clone());
+        args.push(repo_path.file_name().unwrap().to_string_lossy().to_string());
+        
+        match run_tool_with_env(&self._env_manager, &args, Some("Cloning repository"), Some(parent)) {
+            Ok(_) => {
+                info!("Repository cloned successfully to: {:?}", repo_path);
+                println!("[PortableSource] Repository cloned successfully");
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("Failed to clone repository from {}: {}", url, e);
+                println!("[PortableSource] Failed to clone repository: {}", e);
+                Err(e)
+            }
+        }
     }
 
     fn update_repository_with_fixes(&self, git_exe: &str, repo_path: &Path) -> Result<()> {
         let max_attempts = 3;
         for attempt in 0..max_attempts {
-            let mut cmd = Command::new(git_exe);
-            cmd.current_dir(repo_path).arg("pull");
-            match run_with_progress(cmd, Some("Updating repository")) {
+            let args = vec![git_exe.to_string(), "pull".to_string()];
+            match run_tool_with_env(&self._env_manager, &args, Some("Updating repository"), Some(repo_path)) {
                 Ok(_) => return Ok(()),
                 Err(e) => {
                     warn!("git pull failed (attempt {}/{}): {}", attempt + 1, max_attempts, e);
@@ -654,11 +738,10 @@ impl RepositoryInstaller {
             vec!["fetch", "origin"],
             vec!["reset", "--hard", "origin/main"],
         ];
-        for args in fixes {
-            let mut cmd = Command::new(git_exe);
-            cmd.current_dir(repo_path);
-            for a in args { cmd.arg(a); }
-            let _ = run_with_progress(cmd, None);
+        for fix_args in fixes {
+            let mut args = vec![git_exe.to_string()];
+            args.extend(fix_args.into_iter().map(|s| s.to_string()));
+            let _ = run_tool_with_env(&self._env_manager, &args, None, Some(repo_path));
         }
         Ok(())
     }
@@ -710,7 +793,7 @@ impl RepositoryInstaller {
         Ok(())
     }
 
-    fn install_requirements_with_uv_or_pip(&self, repo_name: &str, requirements: &Path) -> Result<()> {
+    fn install_requirements_with_uv_or_pip(&self, repo_name: &str, requirements: &Path, repo_path: Option<&Path>) -> Result<()> {
         // Parse requirements and build plan
         let analyzer = RequirementsAnalyzer::new(&self._config_manager);
         let packages = analyzer.analyze_requirements(requirements);
@@ -730,11 +813,11 @@ impl RepositoryInstaller {
             let res = if uv_available {
                 let mut uv_cmd = self.get_uv_executable(repo_name);
                 uv_cmd.extend(["pip".into(), "install".into(), "-r".into(), tmp.to_string_lossy().to_string()]);
-                run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing regular packages with uv"), None)
+                run_tool_with_env_silent(&self._env_manager, &uv_cmd, Some("Installing regular packages with uv"), repo_path)
             } else {
                 let mut pip_cmd = self.get_pip_executable(repo_name);
                 pip_cmd.extend(["install".into(), "-r".into(), tmp.to_string_lossy().to_string()]);
-                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing regular packages with pip"), None)
+                run_tool_with_env_silent(&self._env_manager, &pip_cmd, Some("Installing regular packages with pip"), repo_path)
             };
             let _ = fs::remove_file(&tmp);
             res?;
@@ -755,13 +838,13 @@ impl RepositoryInstaller {
                 uv_cmd.extend(["pip".into(), "install".into()]);
                 if use_nightly { uv_cmd.push("--pre".into()); }
                 uv_cmd.push(spec);
-                run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing ONNX package (uv)"), None)?;
+                run_tool_with_env_silent(&self._env_manager, &uv_cmd, Some("Installing ONNX package (uv)"), repo_path)?;
             } else {
                 let mut pip_cmd = self.get_pip_executable(repo_name);
                 pip_cmd.push("install".into());
                 if use_nightly { pip_cmd.push("--pre".into()); }
                 pip_cmd.push(spec);
-                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing ONNX package"), None)?;
+                run_tool_with_env_silent(&self._env_manager, &pip_cmd, Some("Installing ONNX package"), repo_path)?;
             }
         }
 
@@ -774,7 +857,7 @@ impl RepositoryInstaller {
                     uv_cmd.extend(["--index-url".into(), index.clone()]);
                 }
                 for p in &plan.torch_packages { uv_cmd.push(p.to_string()); }
-                run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing PyTorch packages (uv)"), None)
+                run_tool_with_env_silent(&self._env_manager, &uv_cmd, Some("Installing PyTorch packages (uv)"), repo_path)
             } else {
                 let mut pip_cmd = self.get_pip_executable(repo_name);
                 pip_cmd.push("install".into());
@@ -784,7 +867,7 @@ impl RepositoryInstaller {
                     pip_cmd.push(index.clone());
                 }
                 for p in &plan.torch_packages { pip_cmd.push(p.to_string()); }
-                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing PyTorch packages"), None)
+                run_tool_with_env_silent(&self._env_manager, &pip_cmd, Some("Installing PyTorch packages"), repo_path)
             };
             
             // Fallback: если установка с версией не удалась, попробуем без версии
@@ -799,7 +882,7 @@ impl RepositoryInstaller {
                     for p in &plan.torch_packages { 
                         uv_cmd.push(p.name.clone()); // Только имя без версии
                     }
-                    run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing PyTorch packages without versions (uv)"), None)?;
+                    run_tool_with_env_silent(&self._env_manager, &uv_cmd, Some("Installing PyTorch packages without versions (uv)"), repo_path)?;
                 } else {
                     let mut pip_cmd = self.get_pip_executable(repo_name);
                     pip_cmd.push("install".into());
@@ -811,7 +894,7 @@ impl RepositoryInstaller {
                     for p in &plan.torch_packages { 
                         pip_cmd.push(p.name.clone()); // Только имя без версии
                     }
-                    run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing PyTorch packages without versions"), None)?;
+                    run_tool_with_env_silent(&self._env_manager, &pip_cmd, Some("Installing PyTorch packages without versions"), repo_path)?;
                 }
             }
         }
@@ -823,7 +906,7 @@ impl RepositoryInstaller {
                 let mut pip_cmd = self.get_pip_executable(repo_name);
                 let spec = if let Some(v) = &pkg.version { format!("{}=={}", pkg.name, v) } else { pkg.name.clone() };
                 pip_cmd.extend(["install".into(), spec]);
-                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing Triton package"), None)?;
+                run_tool_with_env_silent(&self._env_manager, &pip_cmd, Some("Installing Triton package"), repo_path)?;
             }
         }
 
@@ -831,7 +914,7 @@ impl RepositoryInstaller {
         #[cfg(windows)]
         if !plan.insightface_packages.is_empty() {
             for _p in &plan.insightface_packages {
-                self.handle_insightface_package(repo_name)?;
+                self.handle_insightface_package(repo_name, repo_path)?;
             }
         }
 
@@ -870,13 +953,13 @@ impl RepositoryInstaller {
     fn install_uv_in_venv(&self, repo_name: &str) -> Result<bool> {
         let uv_cmd = self.get_uv_executable(repo_name);
         // Try uv --version
-        if run_tool_with_env(&self._env_manager, &vec![uv_cmd[0].clone(), uv_cmd[1].clone(), uv_cmd[2].clone(), "--version".into()], None, None).is_ok() { return Ok(true); }
+        if run_tool_with_env_silent(&self._env_manager, &vec![uv_cmd[0].clone(), uv_cmd[1].clone(), uv_cmd[2].clone(), "--version".into()], None, None).is_ok() { return Ok(true); }
         // Install uv via pip
         let mut pip_cmd = self.get_pip_executable(repo_name);
         pip_cmd.extend(["install".into(), "uv".into()]);
-        let _ = run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing uv"), None);
+        let _ = run_tool_with_env_silent(&self._env_manager, &pip_cmd, Some("Installing uv"), None);
         // Verify
-        Ok(run_tool_with_env(&self._env_manager, &vec![uv_cmd[0].clone(), uv_cmd[1].clone(), uv_cmd[2].clone(), "--version".into()], None, None).is_ok())
+        Ok(run_tool_with_env_silent(&self._env_manager, &vec![uv_cmd[0].clone(), uv_cmd[1].clone(), uv_cmd[2].clone(), "--version".into()], None, None).is_ok())
     }
 
     fn execute_server_installation_plan(&self, repo_name: &str, plan: &serde_json::Value, repo_path: Option<&Path>) -> Result<bool> {
@@ -893,7 +976,8 @@ impl RepositoryInstaller {
             "requirements" => {
                 if let Some(path) = step.get("path").and_then(|s| s.as_str()) {
                     let req_path = if let Some(rp) = repo_path { rp.join(path) } else { PathBuf::from(path) };
-                    self.install_requirements_with_uv_or_pip(repo_name, &req_path)?;
+                    self.install_requirements_with_uv_or_pip(repo_name, &req_path, repo_path)?;
+
                 }
             }
             "pip_install" | "regular" | "regular_only" => {
@@ -914,7 +998,7 @@ impl RepositoryInstaller {
                 if needs_pre { cmd.push("--pre".into()); }
                 for m in mapped { cmd.push(m); }
                 self.add_install_flags_and_urls(repo_name, &mut cmd, step)?;
-                run_tool_with_env(&self._env_manager, &cmd, Some("Installing packages"), None)?;
+                run_tool_with_env_silent(&self._env_manager, &cmd, Some("Installing packages"), repo_path)?;
             }
             "torch" => {
                 let mut pip_cmd = self.get_pip_executable(repo_name);
@@ -926,7 +1010,7 @@ impl RepositoryInstaller {
                 if let Some(pkgs) = step.get("packages").and_then(|p| p.as_array()) {
                     for p in pkgs { if let Some(s) = p.as_str() { pip_cmd.push(s.to_string()); } }
                 }
-                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing PyTorch packages"), None)?;
+                run_tool_with_env_silent(&self._env_manager, &pip_cmd, Some("Installing PyTorch packages"), repo_path)?;
             }
             "onnxruntime" => {
                 let mut pip_cmd = self.get_pip_executable(repo_name);
@@ -936,17 +1020,18 @@ impl RepositoryInstaller {
                 } else {
                     pip_cmd.push(self.apply_onnx_gpu_detection("onnxruntime"));
                 }
-                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing ONNX packages"), None)?;
+                run_tool_with_env_silent(&self._env_manager, &pip_cmd, Some("Installing ONNX packages"), repo_path)?;
             }
             "insightface" => {
-                self.handle_insightface_package(repo_name)?;
+                self.handle_insightface_package(repo_name, repo_path)?;
+
             }
             "triton" => {
                 if let Some(pkgs) = step.get("packages").and_then(|p| p.as_array()) {
                     for p in pkgs { if let Some(s) = p.as_str() {
                         let mut pip_cmd = self.get_pip_executable(repo_name);
                         pip_cmd.extend(["install".into(), s.to_string()]);
-                        run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing Triton package"), None)?;
+                        run_tool_with_env_silent(&self._env_manager, &pip_cmd, Some("Installing Triton package"), repo_path)?;
                     }}
                 }
             }
@@ -1348,12 +1433,6 @@ fi
     }
 }
 
-fn reset_hard_to(git_exe: &str, repo_path: &Path, target: &str) -> Result<()> {
-    let mut cmd = std::process::Command::new(git_exe);
-    cmd.current_dir(repo_path).arg("reset").arg("--hard").arg(target);
-    run_with_progress(cmd, Some(&format!("Reset to {}", target)))
-}
-
 // ===== Requirements analysis (Rust port of Python logic) =====
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1481,7 +1560,7 @@ impl<'a> RequirementsAnalyzer<'a> {
 }
 
 impl RepositoryInstaller {
-    fn handle_insightface_package(&self, repo_name: &str) -> Result<()> {
+    fn handle_insightface_package(&self, repo_name: &str, repo_path: Option<&Path>) -> Result<()> {
         // Windows prebuilt wheel; fallback to pip package
         if cfg!(windows) {
             let uv_available = self.install_uv_in_venv(repo_name).unwrap_or(false);
@@ -1490,11 +1569,11 @@ impl RepositoryInstaller {
             if uv_available {
                 let mut uv_cmd = self.get_uv_executable(repo_name);
                 uv_cmd.extend(["pip".into(), "install".into(), "-U".into(), wheel.into(), "numpy==1.26.4".into()]);
-                run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing insightface + numpy (uv)"), None)
+                run_tool_with_env_silent(&self._env_manager, &uv_cmd, Some("Installing insightface + numpy (uv)"), repo_path)
             } else {
                 let mut pip_cmd = self.get_pip_executable(repo_name);
                 pip_cmd.extend(["install".into(), "-U".into(), wheel.into(), "numpy==1.26.4".into()]);
-                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing insightface + numpy (pip)"), None)
+                run_tool_with_env_silent(&self._env_manager, &pip_cmd, Some("Installing insightface + numpy (pip)"), repo_path)
             }
         } else {
             let uv_available = self.install_uv_in_venv(repo_name).unwrap_or(false);
@@ -1502,11 +1581,11 @@ impl RepositoryInstaller {
             if uv_available {
                 let mut uv_cmd = self.get_uv_executable(repo_name);
                 uv_cmd.extend(["pip".into(), "install".into(), "-U".into(), "insightface".into(), "numpy==1.26.4".into()]);
-                run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing insightface + numpy (uv)"), None)
+                run_tool_with_env_silent(&self._env_manager, &uv_cmd, Some("Installing insightface + numpy (uv)"), repo_path)
             } else {
                 let mut pip_cmd = self.get_pip_executable(repo_name);
                 pip_cmd.extend(["install".into(), "-U".into(), "insightface".into(), "numpy==1.26.4".into()]);
-                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing insightface + numpy (pip)"), None)
+                run_tool_with_env_silent(&self._env_manager, &pip_cmd, Some("Installing insightface + numpy (pip)"), repo_path)
             }
         }
     }
@@ -1518,12 +1597,12 @@ impl RepositoryInstaller {
         if uv_available {
             let mut uv_cmd = self.get_uv_executable(repo_name);
             uv_cmd.extend(["pip".into(), "install".into(), ".".into()]);
-            run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing repository as package (uv)"), Some(repo_path))
+            run_tool_with_env_silent(&self._env_manager, &uv_cmd, Some("Installing repository as package (uv)"), Some(repo_path))
 
         } else {
             let mut pip_cmd = self.get_pip_executable(repo_name);
             pip_cmd.extend(["install".into(), ".".into()]);
-            run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing repository as package (pip)"), Some(repo_path))
+            run_tool_with_env_silent(&self._env_manager, &pip_cmd, Some("Installing repository as package (pip)"), Some(repo_path))
         }
     }
 
@@ -1584,21 +1663,45 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_with_progress(mut cmd: Command, label: Option<&str>) -> Result<()> {
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+enum CommandType {
+    Git,
+    Pip,
+    Uv,
+    Python,
+    Other,
+}
+
+fn run_with_progress_typed(mut cmd: Command, label: Option<&str>, command_type: CommandType) -> Result<()> {
     if let Some(l) = label { info!("{}...", l); }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| PortableSourceError::command(e.to_string()))?;
     
     let mut stderr_lines = Vec::new();
     
+    let (stdout_prefix, stderr_prefix, error_prefix) = match command_type {
+        CommandType::Git => ("[Git]", "[Git Error]", "Git command failed"),
+        CommandType::Pip => ("[Pip]", "[Pip Error]", "Pip command failed"),
+        CommandType::Uv => ("[UV]", "[UV Error]", "UV command failed"),
+        CommandType::Python => ("[Python]", "[Python Error]", "Python command failed"),
+        CommandType::Other => ("[Command]", "[Command Error]", "Command failed"),
+    };
+    
     if let Some(out) = child.stdout.take() {
         let reader = BufReader::new(out);
-        for line in reader.lines().flatten() { debug!("{}", line); }
+        for line in reader.lines().flatten() { 
+            debug!("{}", line);
+            // Also print stdout to console for better visibility
+            println!("{} {}", stdout_prefix, line);
+        }
     }
     
     if let Some(err) = child.stderr.take() {
         let reader = BufReader::new(err);
         for line in reader.lines().flatten() {
+            // Print stderr to console immediately for real-time feedback
+            eprintln!("{} {}", stderr_prefix, line);
             debug!("stderr: {}", line);
             stderr_lines.push(line);
         }
@@ -1611,7 +1714,24 @@ fn run_with_progress(mut cmd: Command, label: Option<&str>) -> Result<()> {
         } else {
             format!("Command failed with status: {}", status)
         };
+        debug!("{}: {}", error_prefix, error_msg);
         return Err(PortableSourceError::command(error_msg));
+    }
+    Ok(())
+}
+
+fn run_tool_with_env_silent(env_manager: &PortableEnvironmentManager, args: &Vec<String>, label: Option<&str>, cwd: Option<&Path>) -> Result<()> {
+    if args.is_empty() { return Ok(()); }
+    if let Some(l) = label { info!("{}...", l); }
+    let mut cmd = Command::new(&args[0]);
+    for a in &args[1..] { cmd.arg(a); }
+    if let Some(dir) = cwd { cmd.current_dir(dir); }
+    let envs = env_manager.setup_environment_for_subprocess();
+    cmd.envs(envs).stdout(Stdio::null()).stderr(Stdio::null());
+    
+    let status = cmd.status().map_err(|e| PortableSourceError::command(e.to_string()))?;
+    if !status.success() {
+        return Err(PortableSourceError::command(format!("Command failed with status: {}", status)));
     }
     Ok(())
 }
@@ -1623,5 +1743,36 @@ fn run_tool_with_env(env_manager: &PortableEnvironmentManager, args: &Vec<String
     if let Some(dir) = cwd { cmd.current_dir(dir); }
     let envs = env_manager.setup_environment_for_subprocess();
     cmd.envs(envs).stdout(Stdio::piped()).stderr(Stdio::piped());
-    run_with_progress(cmd, label)
+    
+    // Determine command type based on the executable and arguments
+    let command_type = if args.len() >= 2 {
+        let exe_name = std::path::Path::new(&args[0]).file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&args[0])
+            .to_lowercase();
+        
+        if exe_name == "python" || exe_name == "python3" {
+            if args.len() >= 3 && args[1] == "-m" {
+                match args[2].as_str() {
+                    "pip" => CommandType::Pip,
+                    "uv" => CommandType::Uv,
+                    _ => CommandType::Python,
+                }
+            } else {
+                CommandType::Python
+            }
+        } else if exe_name == "pip" || exe_name == "pip3" {
+            CommandType::Pip
+        } else if exe_name == "uv" {
+            CommandType::Uv
+        } else if exe_name == "git" {
+            CommandType::Git
+        } else {
+            CommandType::Other
+        }
+    } else {
+        CommandType::Other
+    };
+    
+    run_with_progress_typed(cmd, label, command_type)
 }
