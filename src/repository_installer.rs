@@ -280,7 +280,7 @@ impl RepositoryInstaller {
 
         let _ = self.server_client.send_download_stats(&name);
 
-        println!("[PortableSource] Done: '{}'", name);
+
         // Special setup hooks
         self.apply_special_setup(&name, &repo_path)?;
         Ok(())
@@ -308,11 +308,14 @@ impl RepositoryInstaller {
 
         // Try server installation plan
         if let Some(plan) = self.server_client.get_installation_plan(&repo_name)? {
+            info!("Using server installation plan");
             if self.execute_server_installation_plan(&repo_name, &plan, Some(repo_path))? {
                 return Ok(());
             } else {
                 warn!("Server installation failed, falling back to local requirements.txt");
             }
+        } else {
+            info!("No server installation plan, using local files");
         }
 
         // Check for pyproject.toml first
@@ -631,23 +634,8 @@ fn write_link_file(repo_path: &Path, link: &str) -> Result<()> {
 }
 
 impl RepositoryInstaller {
-    fn apply_special_setup(&self, repo_name: &str, _repo_path: &Path) -> Result<()> {
-        match repo_name.to_lowercase().as_str() {
-            "wangp" => {
-                // Install mmgp==3.5.6 into this repo env
-                if self.install_uv_in_venv(repo_name).unwrap_or(false) {
-            let mut uv_cmd = self.get_uv_executable(repo_name);
-                    uv_cmd.extend(["pip".into(), "install".into(), "mmgp==3.5.6".into()]);
-                    let _ = run_tool_with_env_silent(&self._env_manager, &uv_cmd, Some("Installing mmgp for wangp"), Some(_repo_path));
-                } else {
-                    let mut pip_cmd = self.get_pip_executable(repo_name);
-                    pip_cmd.extend(["install".into(), "mmgp==3.5.6".into()]);
-                    let _ = run_tool_with_env_silent(&self._env_manager, &pip_cmd, Some("Installing mmgp for wangp"), Some(_repo_path));
-                }
-                Ok(())
-            }
-            _ => Ok(())
-        }
+    fn apply_special_setup(&self, _repo_name: &str, _repo_path: &Path) -> Result<()> {
+        Ok(())
     }
 
     fn get_git_executable(&self) -> String {
@@ -801,6 +789,7 @@ impl RepositoryInstaller {
 
         // Ensure uv if available
         let uv_available = self.install_uv_in_venv(repo_name).unwrap_or(false);
+        info!("UV Available: {}", uv_available);
         info!("Plan: regular={} torch={} onnx={}", plan.regular_packages.len(), plan.torch_packages.len(), plan.onnx_packages.len());
 
         // 1) Regular packages via uv (prefer) или pip -r — сначала базовые зависимости
@@ -812,12 +801,13 @@ impl RepositoryInstaller {
             }
             let res = if uv_available {
                 let mut uv_cmd = self.get_uv_executable(repo_name);
-                uv_cmd.extend(["pip".into(), "install".into(), "-r".into(), tmp.to_string_lossy().to_string()]);
-                run_tool_with_env_silent(&self._env_manager, &uv_cmd, Some("Installing regular packages with uv"), repo_path)
+                uv_cmd.extend(["pip".into(), "install".into(), "--extra-index-url".into(), "https://pypi.ngc.nvidia.com".into(), "-r".into(), tmp.to_string_lossy().to_string()]);
+                info!("UV Command: {:?}", uv_cmd);
+                run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing regular packages with uv"), repo_path)
             } else {
                 let mut pip_cmd = self.get_pip_executable(repo_name);
                 pip_cmd.extend(["install".into(), "-r".into(), tmp.to_string_lossy().to_string()]);
-                run_tool_with_env_silent(&self._env_manager, &pip_cmd, Some("Installing regular packages with pip"), repo_path)
+                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing regular packages with pip"), repo_path)
             };
             let _ = fs::remove_file(&tmp);
             res?;
@@ -835,7 +825,7 @@ impl RepositoryInstaller {
             let use_nightly = self.needs_onnx_nightly();
             if uv_available {
                 let mut uv_cmd = self.get_uv_executable(repo_name);
-                uv_cmd.extend(["pip".into(), "install".into()]);
+                uv_cmd.extend(["pip".into(), "install".into(), "--extra-index-url".into(), "https://pypi.ngc.nvidia.com".into()]);
                 if use_nightly { uv_cmd.push("--pre".into()); }
                 uv_cmd.push(spec);
                 run_tool_with_env_silent(&self._env_manager, &uv_cmd, Some("Installing ONNX package (uv)"), repo_path)?;
@@ -852,12 +842,12 @@ impl RepositoryInstaller {
         if !plan.torch_packages.is_empty() {
             let torch_install_result = if uv_available {
                 let mut uv_cmd = self.get_uv_executable(repo_name);
-                uv_cmd.extend(["pip".into(), "install".into(), "--force-reinstall".into()]);
+                uv_cmd.extend(["pip".into(), "install".into(), "--extra-index-url".into(), "https://pypi.ngc.nvidia.com".into(), "--force-reinstall".into()]);
                 if let Some(index) = plan.torch_index_url.as_ref() {
                     uv_cmd.extend(["--index-url".into(), index.clone()]);
                 }
                 for p in &plan.torch_packages { uv_cmd.push(p.to_string()); }
-                run_tool_with_env_silent(&self._env_manager, &uv_cmd, Some("Installing PyTorch packages (uv)"), repo_path)
+                run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing PyTorch packages (uv)"), repo_path)
             } else {
                 let mut pip_cmd = self.get_pip_executable(repo_name);
                 pip_cmd.push("install".into());
@@ -867,7 +857,7 @@ impl RepositoryInstaller {
                     pip_cmd.push(index.clone());
                 }
                 for p in &plan.torch_packages { pip_cmd.push(p.to_string()); }
-                run_tool_with_env_silent(&self._env_manager, &pip_cmd, Some("Installing PyTorch packages"), repo_path)
+                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing PyTorch packages"), repo_path)
             };
             
             // Fallback: если установка с версией не удалась, попробуем без версии
@@ -875,14 +865,14 @@ impl RepositoryInstaller {
                 warn!("PyTorch installation with specific versions failed, trying without versions...");
                 if uv_available {
                     let mut uv_cmd = self.get_uv_executable(repo_name);
-                    uv_cmd.extend(["pip".into(), "install".into(), "--force-reinstall".into()]);
+                    uv_cmd.extend(["pip".into(), "install".into(), "--extra-index-url".into(), "https://pypi.ngc.nvidia.com".into(), "--force-reinstall".into()]);
                     if let Some(index) = plan.torch_index_url.as_ref() {
                         uv_cmd.extend(["--index-url".into(), index.clone()]);
                     }
                     for p in &plan.torch_packages { 
                         uv_cmd.push(p.name.clone()); // Только имя без версии
                     }
-                    run_tool_with_env_silent(&self._env_manager, &uv_cmd, Some("Installing PyTorch packages without versions (uv)"), repo_path)?;
+                    run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing PyTorch packages without versions (uv)"), repo_path)?;
                 } else {
                     let mut pip_cmd = self.get_pip_executable(repo_name);
                     pip_cmd.push("install".into());
@@ -894,7 +884,7 @@ impl RepositoryInstaller {
                     for p in &plan.torch_packages { 
                         pip_cmd.push(p.name.clone()); // Только имя без версии
                     }
-                    run_tool_with_env_silent(&self._env_manager, &pip_cmd, Some("Installing PyTorch packages without versions"), repo_path)?;
+                    run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing PyTorch packages without versions"), repo_path)?;
                 }
             }
         }
@@ -983,22 +973,59 @@ impl RepositoryInstaller {
             "pip_install" | "regular" | "regular_only" => {
                 // Prefer uv if available
                 let uv_available = self.install_uv_in_venv(repo_name).unwrap_or(false);
-                let mut cmd = if uv_available { self.get_uv_executable(repo_name) } else { self.get_pip_executable(repo_name) };
-                if uv_available { cmd.extend(["pip".into(), "install".into()]); } else { cmd.push("install".into()); }
-                // Map packages: on NVIDIA заменить onnxruntime -> onnxruntime-gpu, и если нужно — включить --pre
-                let mut mapped: Vec<String> = Vec::new();
+                
+                // Separate torch and regular packages
+                let mut torch_packages: Vec<String> = Vec::new();
+                let mut regular_packages: Vec<String> = Vec::new();
+                
                 if let Some(pkgs) = step.get("packages").and_then(|p| p.as_array()) {
                     for p in pkgs {
                         if let Some(s) = p.as_str() {
-                            mapped.push(self.apply_onnx_gpu_detection(s));
+                            let mapped = self.apply_onnx_gpu_detection(s);
+                            // Only torch, torchvision, torchaudio are considered torch packages
+                            let is_torch_package = mapped == "torch" || mapped.starts_with("torch==") || mapped.starts_with("torch>=") || mapped.starts_with("torch<=") || mapped.starts_with("torch<") || mapped.starts_with("torch>") ||
+                                                   mapped.starts_with("torchvision") || mapped.starts_with("torchaudio");
+                            
+                            if is_torch_package {
+                                torch_packages.push(mapped);
+                            } else {
+                                regular_packages.push(mapped);
+                            }
                         }
                     }
                 }
-                let needs_pre = self.needs_onnx_nightly() && mapped.iter().any(|m| m.starts_with("onnxruntime-gpu"));
-                if needs_pre { cmd.push("--pre".into()); }
-                for m in mapped { cmd.push(m); }
-                self.add_install_flags_and_urls(repo_name, &mut cmd, step)?;
-                run_tool_with_env_silent(&self._env_manager, &cmd, Some("Installing packages"), repo_path)?;
+                
+                // Install regular packages first (without torch index)
+                if !regular_packages.is_empty() {
+                    let mut cmd = if uv_available { self.get_uv_executable(repo_name) } else { self.get_pip_executable(repo_name) };
+                    if uv_available { cmd.extend(["pip".into(), "install".into()]); } else { cmd.push("install".into()); }
+                    
+                    let needs_pre = self.needs_onnx_nightly() && regular_packages.iter().any(|m| m.starts_with("onnxruntime-gpu"));
+                    if needs_pre { cmd.push("--pre".into()); }
+                    
+                    // No extra index URL needed for regular packages
+                    
+                    for p in regular_packages { cmd.push(p); }
+                    run_tool_with_env(&self._env_manager, &cmd, Some("Installing regular packages"), repo_path)?;
+                }
+                
+                // Install torch packages separately with torch index
+                if !torch_packages.is_empty() {
+                    let mut cmd = if uv_available { self.get_uv_executable(repo_name) } else { self.get_pip_executable(repo_name) };
+                    if uv_available { cmd.extend(["pip".into(), "install".into()]); } else { cmd.push("install".into()); }
+                    
+                    // Add torch index URL
+                    if let Some(idx) = step.get("torch_index_url").and_then(|s| s.as_str()) {
+                        cmd.extend(["--index-url".into(), idx.into()]);
+                    } else if let Some(idx) = self.get_default_torch_index_url_opt() {
+                        cmd.extend(["--index-url".into(), idx]);
+                    }
+                    
+                    // No extra index URL needed for torch packages
+                    
+                    for p in torch_packages { cmd.push(p); }
+                    run_tool_with_env(&self._env_manager, &cmd, Some("Installing torch packages"), repo_path)?;
+                }
             }
             "torch" => {
                 let mut pip_cmd = self.get_pip_executable(repo_name);
@@ -1010,7 +1037,7 @@ impl RepositoryInstaller {
                 if let Some(pkgs) = step.get("packages").and_then(|p| p.as_array()) {
                     for p in pkgs { if let Some(s) = p.as_str() { pip_cmd.push(s.to_string()); } }
                 }
-                run_tool_with_env_silent(&self._env_manager, &pip_cmd, Some("Installing PyTorch packages"), repo_path)?;
+                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing PyTorch packages"), repo_path)?;
             }
             "onnxruntime" => {
                 let mut pip_cmd = self.get_pip_executable(repo_name);
@@ -1020,7 +1047,7 @@ impl RepositoryInstaller {
                 } else {
                     pip_cmd.push(self.apply_onnx_gpu_detection("onnxruntime"));
                 }
-                run_tool_with_env_silent(&self._env_manager, &pip_cmd, Some("Installing ONNX packages"), repo_path)?;
+                run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing ONNX packages"), repo_path)?;
             }
             "insightface" => {
                 self.handle_insightface_package(repo_name, repo_path)?;
@@ -1036,22 +1063,6 @@ impl RepositoryInstaller {
                 }
             }
             _ => { debug!("Unknown step type in server plan: {}", step_type); }
-        }
-        Ok(())
-    }
-
-    fn add_install_flags_and_urls(&self, _repo_name: &str, cmd: &mut Vec<String>, step: &serde_json::Value) -> Result<()> {
-        if let Some(flags) = step.get("install_flags").and_then(|s| s.as_array()) {
-            for f in flags { if let Some(s) = f.as_str() { cmd.push(s.to_string()); } }
-        }
-        // Torch index if any torch packages appear
-        let has_torch = cmd.iter().any(|a| a.starts_with("torch"));
-        if has_torch && !cmd.iter().any(|a| a == "--index-url") {
-            if let Some(idx) = step.get("torch_index_url").and_then(|s| s.as_str()) {
-                cmd.extend(["--index-url".into(), idx.into()]);
-            } else if let Some(idx) = self.get_default_torch_index_url_opt() {
-                cmd.extend(["--index-url".into(), idx]);
-            }
         }
         Ok(())
     }
@@ -1095,7 +1106,9 @@ impl RepositoryInstaller {
     fn apply_onnx_gpu_detection(&self, base: &str) -> String {
         let cfg = self._config_manager.get_config();
         let up = cfg.gpu_config.as_ref().map(|g| g.name.to_uppercase()).unwrap_or_default();
-        if base.starts_with("onnxruntime") {
+        
+        // Only replace if it's exactly "onnxruntime" or "onnxruntime==version" or "onnxruntime>=version"
+        if base == "onnxruntime" || base.starts_with("onnxruntime==") || base.starts_with("onnxruntime>=") || base.starts_with("onnxruntime<=") || base.starts_with("onnxruntime>") || base.starts_with("onnxruntime<") {
             if up.contains("NVIDIA") { return base.replace("onnxruntime", "onnxruntime-gpu"); }
             if (up.contains("AMD") || up.contains("INTEL")) && cfg!(windows) { return base.replace("onnxruntime", "onnxruntime-directml"); }
         }
@@ -1214,6 +1227,9 @@ impl RepositoryInstaller {
 
     fn generate_startup_script(&self, repo_path: &Path, repo_info: &RepositoryInfo) -> Result<bool> {
         let repo_name = repo_path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+        info!("Starting generate_startup_script for repo: {}", repo_name);
+        println!("[PortableSource] Creating startup script for: {}", repo_name);
+        
         let mut main_file = repo_info.main_file.clone();
         if main_file.is_none() { main_file = self.main_file_finder.find_main_file(&repo_name, repo_path, repo_info.url.as_deref()); }
         
@@ -1284,6 +1300,8 @@ impl RepositoryInstaller {
         };
         let mut f = fs::File::create(&bat_file)?;
         f.write_all(content.as_bytes())?;
+        info!("Successfully created startup script: {:?}", bat_file);
+
         Ok(true)
     }
 
@@ -1568,7 +1586,7 @@ impl RepositoryInstaller {
             let wheel = "https://huggingface.co/hanamizuki-ai/pypi-wheels/resolve/main/insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl";
             if uv_available {
                 let mut uv_cmd = self.get_uv_executable(repo_name);
-                uv_cmd.extend(["pip".into(), "install".into(), "-U".into(), wheel.into(), "numpy==1.26.4".into()]);
+                uv_cmd.extend(["pip".into(), "install".into(), "--extra-index-url".into(), "https://pypi.ngc.nvidia.com".into(), "-U".into(), wheel.into(), "numpy==1.26.4".into()]);
                 run_tool_with_env_silent(&self._env_manager, &uv_cmd, Some("Installing insightface + numpy (uv)"), repo_path)
             } else {
                 let mut pip_cmd = self.get_pip_executable(repo_name);
@@ -1580,7 +1598,7 @@ impl RepositoryInstaller {
             // Ставим одновременно insightface и совместимый numpy
             if uv_available {
                 let mut uv_cmd = self.get_uv_executable(repo_name);
-                uv_cmd.extend(["pip".into(), "install".into(), "-U".into(), "insightface".into(), "numpy==1.26.4".into()]);
+                uv_cmd.extend(["pip".into(), "install".into(), "--extra-index-url".into(), "https://pypi.ngc.nvidia.com".into(), "-U".into(), "insightface".into(), "numpy==1.26.4".into()]);
                 run_tool_with_env_silent(&self._env_manager, &uv_cmd, Some("Installing insightface + numpy (uv)"), repo_path)
             } else {
                 let mut pip_cmd = self.get_pip_executable(repo_name);
@@ -1596,7 +1614,7 @@ impl RepositoryInstaller {
         
         if uv_available {
             let mut uv_cmd = self.get_uv_executable(repo_name);
-            uv_cmd.extend(["pip".into(), "install".into(), ".".into()]);
+            uv_cmd.extend(["pip".into(), "install".into(), "--extra-index-url".into(), "https://pypi.ngc.nvidia.com".into(), ".".into()]);
             run_tool_with_env_silent(&self._env_manager, &uv_cmd, Some("Installing repository as package (uv)"), Some(repo_path))
 
         } else {
@@ -1692,16 +1710,12 @@ fn run_with_progress_typed(mut cmd: Command, label: Option<&str>, command_type: 
         let reader = BufReader::new(out);
         for line in reader.lines().flatten() { 
             debug!("{}", line);
-            // Also print stdout to console for better visibility
-            println!("{} {}", stdout_prefix, line);
         }
     }
     
     if let Some(err) = child.stderr.take() {
         let reader = BufReader::new(err);
         for line in reader.lines().flatten() {
-            // Print stderr to console immediately for real-time feedback
-            eprintln!("{} {}", stderr_prefix, line);
             debug!("stderr: {}", line);
             stderr_lines.push(line);
         }

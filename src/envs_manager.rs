@@ -427,6 +427,12 @@ impl PortableEnvironmentManager {
             let current = env_vars.get("PATH").cloned().unwrap_or_default();
             env_vars.insert("PATH".to_string(), format!("{}{}{}", tool_paths.join(sep), sep, current));
         }
+
+        // Add PyPI extra index for NVIDIA packages
+        env_vars.insert("PIP_EXTRA_INDEX_URL".to_string(), "https://pypi.ngc.nvidia.com".to_string());
+        env_vars.insert("UV_EXTRA_INDEX_URL".to_string(), "https://pypi.ngc.nvidia.com".to_string());
+        env_vars.insert("PIP_TRUSTED_HOST".to_string(), "pypi.ngc.nvidia.com".to_string());
+        
         env_vars
     }
 
