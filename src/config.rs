@@ -2,10 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{PathBuf};
 use crate::{Result, PortableSourceError};
-use crate::gpu::GpuDetector;
-use log::{info, warn, error};
+use crate::gpu::{GpuDetector, GpuInfo};
+use log::{info, warn};
 
 // Constants
 pub const SERVER_DOMAIN: &str = "server.portables.dev";
@@ -82,93 +82,14 @@ impl ToolLinks {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CudaPaths {
-    pub base_path: PathBuf,
-    pub cuda_bin: PathBuf,
-    pub cuda_lib: PathBuf,
-    pub cuda_include: PathBuf,
-    pub cuda_nvml: PathBuf,
-    pub cuda_nvvm: PathBuf,
-    pub cuda_lib_64: PathBuf,
-    pub cuda_nvml_include: PathBuf,
-    pub cuda_nvml_bin: PathBuf,
-    pub cuda_nvml_lib: PathBuf,
-    pub cuda_nvvm_include: PathBuf,
-    pub cuda_nvvm_bin: PathBuf,
-    pub cuda_nvvm_lib: PathBuf,
-}
 
-impl CudaPaths {
-    pub fn new<P: AsRef<Path>>(base_path: P) -> Self {
-        let base = base_path.as_ref().to_path_buf();
-        
-        let cuda_bin = base.join("bin");
-        let cuda_lib = base.join("lib");
-        let cuda_include = base.join("include");
-        let cuda_nvml = base.join("nvml");
-        let cuda_nvvm = base.join("nvvm");
-        
-        let cuda_lib_64 = cuda_lib.join("x64");
-        
-        let cuda_nvml_include = cuda_nvml.join("include");
-        let cuda_nvml_bin = cuda_nvml.join("bin");
-        let cuda_nvml_lib = cuda_nvml.join("lib");
-        
-        let cuda_nvvm_include = cuda_nvvm.join("include");
-        let cuda_nvvm_bin = cuda_nvvm.join("bin");
-        let cuda_nvvm_lib = cuda_nvvm.join("lib");
-        
-        Self {
-            base_path: base,
-            cuda_bin,
-            cuda_lib,
-            cuda_include,
-            cuda_nvml,
-            cuda_nvvm,
-            cuda_lib_64,
-            cuda_nvml_include,
-            cuda_nvml_bin,
-            cuda_nvml_lib,
-            cuda_nvvm_include,
-            cuda_nvvm_bin,
-            cuda_nvvm_lib,
-        }
-    }
-}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GpuConfig {
-    pub name: String,
-    pub generation: GpuGeneration,
-    pub cuda_version: Option<CudaVersion>,
-    pub cuda_paths: Option<CudaPaths>,
-    pub compute_capability: String,
-    pub memory_gb: u32,
-    pub recommended_backend: String,
-    pub supports_tensorrt: bool,
-}
-
-impl Default for GpuConfig {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            generation: GpuGeneration::Unknown,
-            cuda_version: None,
-            cuda_paths: None,
-            compute_capability: String::new(),
-            memory_gb: 0,
-            recommended_backend: "cpu".to_string(),
-            supports_tensorrt: false,
-        }
-    }
-}
+// GpuConfig removed - all GPU parameters are now computed dynamically
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortableSourceConfig {
     pub version: String,
     pub install_path: PathBuf,
-    pub gpu_config: Option<GpuConfig>,
     pub environment_vars: Option<HashMap<String, String>>,
     pub environment_setup_completed: bool,
 }
@@ -178,7 +99,6 @@ impl Default for PortableSourceConfig {
         Self {
             version: VERSION.to_string(),
             install_path: PathBuf::new(),
-            gpu_config: None,
             environment_vars: None,
             environment_setup_completed: false,
         }
@@ -194,6 +114,98 @@ pub struct ConfigManager {
 }
 
 impl ConfigManager {
+    /// Dynamically detect if CUDA is available
+    pub fn has_cuda(&self) -> bool {
+        let install_path = &self.config.install_path;
+        let cuda_path = install_path.join("ps_env").join("CUDA");
+        cuda_path.exists()
+    }
+    
+    /// Dynamically get CUDA version if available
+    pub fn get_cuda_version(&self) -> Option<CudaVersion> {
+        if !self.has_cuda() {
+            return None;
+        }
+        
+        // Try to detect CUDA version from installation
+        #[cfg(unix)]
+        {
+            if let Some(version) = detect_cuda_version_from_nvcc() {
+                return Some(version);
+            }
+            if let Some(version) = detect_cuda_version_from_filesystem() {
+                return Some(version);
+            }
+        }
+        
+        // Default to most common version
+        Some(CudaVersion::Cuda124)
+    }
+    
+    /// Dynamically detect GPU generation
+    pub fn detect_current_gpu_generation(&self) -> GpuGeneration {
+        if let Some(gpu_info) = self.detect_gpu() {
+            self.detect_gpu_generation(&gpu_info.name)
+        } else {
+            GpuGeneration::Unknown
+        }
+    }
+    
+    /// Get recommended backend based on available hardware
+    pub fn get_recommended_backend(&self) -> String {
+        if self.has_cuda() {
+            let generation = self.detect_current_gpu_generation();
+            match generation {
+                GpuGeneration::Ampere | GpuGeneration::AdaLovelace | GpuGeneration::Blackwell => {
+                    "cuda,tensorrt".to_string()
+                }
+                GpuGeneration::Turing => "cuda".to_string(),
+                _ => "cpu".to_string(),
+            }
+        } else {
+            "cpu".to_string()
+        }
+    }
+    
+    /// Check if TensorRT is supported
+    pub fn supports_tensorrt(&self) -> bool {
+        if !self.has_cuda() {
+            return false;
+        }
+        
+        let generation = self.detect_current_gpu_generation();
+        matches!(generation, GpuGeneration::Ampere | GpuGeneration::AdaLovelace | GpuGeneration::Blackwell)
+    }
+    
+    /// Get CUDA base path dynamically
+    pub fn get_cuda_base_path(&self) -> Option<PathBuf> {
+        if self.has_cuda() {
+            Some(self.config.install_path.join("ps_env").join("CUDA"))
+        } else {
+            None
+        }
+    }
+    
+    /// Get CUDA bin path dynamically
+    pub fn get_cuda_bin(&self) -> Option<PathBuf> {
+        self.get_cuda_base_path().map(|base| base.join("bin"))
+    }
+    
+    /// Get CUDA lib path dynamically
+    pub fn get_cuda_lib(&self) -> Option<PathBuf> {
+        self.get_cuda_base_path().map(|base| base.join("lib"))
+    }
+    
+    /// Get CUDA lib64 path dynamically
+    pub fn get_cuda_lib_64(&self) -> Option<PathBuf> {
+        self.get_cuda_base_path().map(|base| base.join("lib").join("x64"))
+    }
+    
+    /// Get CUDA include path dynamically
+    pub fn get_cuda_include(&self) -> Option<PathBuf> {
+        self.get_cuda_base_path().map(|base| base.join("include"))
+    }
+
     pub fn new(config_path: Option<PathBuf>) -> Result<Self> {
         let default_path = || {
             // Prefer install path from registry if present
@@ -298,81 +310,24 @@ impl ConfigManager {
         self.cuda_mapping.get(generation).cloned()
     }
     
-    pub fn configure_gpu(&mut self, gpu_name: &str, memory_gb: u32) -> Result<GpuConfig> {
-         let generation = self.detect_gpu_generation(gpu_name);
-         let cuda_version = self.get_recommended_cuda_version(&generation);
-         
-         let compute_capability = self.get_compute_capability(&generation);
-         
-         let gpu_name_upper = gpu_name.to_uppercase();
-         let (recommended_backend, supports_tensorrt) = if gpu_name_upper.contains("NVIDIA") || 
-             gpu_name_upper.contains("GEFORCE") || gpu_name_upper.contains("QUADRO") || 
-             gpu_name_upper.contains("TESLA") || gpu_name_upper.contains("RTX") || 
-             gpu_name_upper.contains("GTX") {
-             
-             if generation != GpuGeneration::Unknown {
-                 if let Some(ref cuda_ver) = cuda_version {
-                     let supports_trt = matches!(cuda_ver, CudaVersion::Cuda124 | CudaVersion::Cuda128) &&
-                         matches!(generation, GpuGeneration::Turing | GpuGeneration::Ampere | 
-                                 GpuGeneration::AdaLovelace | GpuGeneration::Blackwell);
-                     
-                     if supports_trt {
-                         ("cuda,tensorrt".to_string(), true)
-                     } else {
-                         ("cuda".to_string(), false)
-                     }
-                 } else {
-                     ("cpu".to_string(), false)
-                 }
-             } else {
-                 ("cpu".to_string(), false)
-             }
-         } else if gpu_name_upper.contains("AMD") || gpu_name_upper.contains("RADEON") || gpu_name_upper.contains("RX ") {
-             ("dml".to_string(), false)
-         } else if gpu_name_upper.contains("INTEL") || gpu_name_upper.contains("UHD") || 
-                   gpu_name_upper.contains("IRIS") || gpu_name_upper.contains("ARC") {
-             ("openvino".to_string(), false)
-         } else {
-             ("cpu".to_string(), false)
-         };
-         
-         let cuda_paths = if cuda_version.is_some() && !self.config.install_path.as_os_str().is_empty() {
-             let cuda_base_path = self.config.install_path
-                 .join("ps_env")
-                 .join("CUDA");
-             Some(CudaPaths::new(cuda_base_path))
-         } else {
-             None
-         };
-         
-         let gpu_config = GpuConfig {
-             name: gpu_name.to_string(),
-             generation,
-             cuda_version,
-             cuda_paths,
-             compute_capability,
-             memory_gb,
-             recommended_backend,
-             supports_tensorrt,
-         };
-         
-         self.config.gpu_config = Some(gpu_config.clone());
-         Ok(gpu_config)
-     }
-     
-     pub fn configure_gpu_from_detection(&mut self) -> Result<GpuConfig> {
-         let gpu_detector = GpuDetector::new();
-         match gpu_detector.get_best_gpu()? {
-             Some(primary_gpu) => {
-                 let memory_gb = primary_gpu.memory_mb / 1024;
-                 self.configure_gpu(&primary_gpu.name, memory_gb)
-             }
-             None => {
-                 warn!("No GPU detected, using CPU configuration");
-                 self.configure_gpu("Unknown GPU", 0)
-             }
-         }
-     }
+    pub fn get_gpu_name(&self) -> String {
+        if let Some(gpu_info) = self.detect_gpu() {
+            gpu_info.name
+        } else {
+            "Unknown GPU".to_string()
+        }
+    }
+    
+    pub fn detect_gpu(&self) -> Option<GpuInfo> {
+        let detector = GpuDetector::new();
+        if let Ok(gpu_infos) = detector.detect_gpu_wmi() {
+            gpu_infos.into_iter().next()
+        } else {
+            None
+        }
+    }
+    
+
 
     /// Populate config based on existing ps_env content and nvidia-smi CUDA version
     pub fn hydrate_from_existing_env(&mut self) -> Result<()> {
@@ -380,42 +335,7 @@ impl ConfigManager {
         let ps_env = self.config.install_path.join("ps_env");
         if !ps_env.exists() { return Ok(()); }
 
-        // If CUDA folder exists, configure CUDA paths
-        let cuda_dir = ps_env.join("CUDA");
-        if cuda_dir.exists() {
-            self.configure_cuda_paths();
-        }
-
-        // Ensure GPU config exists or fix placeholder values
-        let needs_gpu_fill = match &self.config.gpu_config {
-            None => true,
-            Some(g) => g.name.is_empty() || g.name == "Unknown GPU" || g.memory_gb == 0,
-        };
-        if needs_gpu_fill {
-            let gpu_detector = GpuDetector::new();
-            if let Some(best) = gpu_detector.get_best_gpu().ok().flatten() {
-                let _ = self.configure_gpu(&best.name, best.memory_mb / 1024);
-            } else {
-                let _ = self.configure_gpu("Unknown GPU", 0);
-            }
-        }
-
-        // Linux-only: попытка определить системную версию CUDA (Windows использует портативную CUDA)
-        #[cfg(unix)]
-        {
-            let cuda_from_nvcc = detect_cuda_version_from_nvcc();
-            let cuda_from_fs = detect_cuda_version_from_filesystem();
-            if let Some(cuda_ver) = cuda_from_nvcc.or(cuda_from_fs) {
-                if let Some(ref mut gpu_cfg) = self.config.gpu_config {
-                    gpu_cfg.cuda_version = Some(cuda_ver);
-                } else {
-                    let mut gpu_cfg = GpuConfig::default();
-                    gpu_cfg.cuda_version = Some(cuda_ver);
-                    self.config.gpu_config = Some(gpu_cfg);
-                }
-                // На Linux не настраиваем CUDA_PATH — используем системную CUDA как есть
-            }
-        }
+        // CUDA paths are now computed dynamically when needed
 
         // Mark environment as setup if core tools exist
         let python_exe = if cfg!(windows) { ps_env.join("python").join("python.exe") } else { ps_env.join("python").join("bin").join("python") };
@@ -458,28 +378,13 @@ impl ConfigManager {
         env_vars
     }
     
-    pub fn configure_cuda_paths(&mut self) {
-         if self.config.install_path.as_os_str().is_empty() {
-             error!("Installation path not set, cannot configure CUDA paths");
-             return;
-         }
-         
-         if let Some(ref mut gpu_config) = self.config.gpu_config {
-             if gpu_config.cuda_version.is_some() {
-                 let cuda_base_path = self.config.install_path
-                     .join("ps_env")
-                     .join("CUDA");
-                 gpu_config.cuda_paths = Some(CudaPaths::new(cuda_base_path));
-             } else {
-                 warn!("No CUDA version configured, skipping CUDA paths setup");
-             }
-         }
-     }
-     
+
      pub fn get_cuda_download_link(&self, cuda_version: Option<&CudaVersion>) -> Option<String> {
-         let version = cuda_version.or_else(|| {
-             self.config.gpu_config.as_ref()?.cuda_version.as_ref()
-         })?;
+         let version = if let Some(v) = cuda_version {
+             v.clone()
+         } else {
+             self.get_cuda_version()?
+         };
          
          Some(version.get_download_url().to_string())
      }
@@ -490,31 +395,25 @@ impl ConfigManager {
      }
      
      pub fn get_config_summary(&self) -> String {
-         let (gpu_name, gpu_generation, cuda_version, cuda_paths_configured, 
-              compute_capability, memory_gb, backend, tensorrt_support) = 
-             if let Some(ref gpu_config) = self.config.gpu_config {
-                 (
-                     gpu_config.name.clone(),
-                     format!("{:?}", gpu_config.generation),
-                     gpu_config.cuda_version.as_ref().map(|v| format!("{:?}", v)).unwrap_or_else(|| "None".to_string()),
-                     if gpu_config.cuda_paths.is_some() { "Yes" } else { "No" },
-                     gpu_config.compute_capability.clone(),
-                     gpu_config.memory_gb,
-                     gpu_config.recommended_backend.clone(),
-                     gpu_config.supports_tensorrt
-                 )
-             } else {
-                 (
-                     "Not configured".to_string(),
-                     "Unknown".to_string(),
-                     "None".to_string(),
-                     "No",
-                     "Unknown".to_string(),
-                     0,
-                     "cpu".to_string(),
-                     false
-                 )
-             };
+         // Get GPU info dynamically
+         let gpu_detector = crate::gpu::GpuDetector::new();
+         let (gpu_name, memory_gb) = if let Ok(Some(gpu_info)) = gpu_detector.get_best_gpu() {
+             (gpu_info.name, gpu_info.memory_mb / 1024)
+         } else {
+             ("Unknown GPU".to_string(), 0)
+         };
+         
+         let gpu_generation = self.detect_current_gpu_generation();
+         let cuda_version = self.get_cuda_version();
+         let backend = self.get_recommended_backend();
+         let tensorrt_support = self.supports_tensorrt();
+         let compute_capability = self.get_compute_capability(&gpu_generation);
+         
+         let (gpu_generation_str, cuda_version_str, cuda_paths_configured) = (
+             format!("{:?}", gpu_generation),
+             cuda_version.as_ref().map(|v| format!("{:?}", v)).unwrap_or_else(|| "None".to_string()),
+             if cuda_version.is_some() { "Yes" } else { "No" }
+         );
          
          let env_vars_count = self.config.environment_vars.as_ref().map(|vars| vars.len()).unwrap_or(0);
          let setup_status = if self.config.environment_setup_completed {
@@ -538,7 +437,7 @@ impl ConfigManager {
                 TensorRT Support: {}\n\n\
               Install Path: {}\n\n\
               Environment Variables: {} configured",
-             setup_status, gpu_name, gpu_generation, cuda_version, cuda_paths_configured,
+             setup_status, gpu_name, gpu_generation_str, cuda_version_str, cuda_paths_configured,
              compute_capability, memory_gb, backend, tensorrt_support,
              self.config.install_path.display(), env_vars_count
          )

@@ -996,10 +996,12 @@ pub fn show_system_info_detailed(install_path: &Path, config_manager: &ConfigMan
     log::info!("    * {}{}envs", install_path.display(), slash);
 
     // GPU information
-    if let Some(gpu) = &config_manager.get_config().gpu_config {
-        log::info!("  - GPU: {}", gpu.name);
-        log::info!("  - GPU type: {:?}", gpu.generation);
-        if let Some(cuda) = &gpu.cuda_version { log::info!("  - CUDA version: {:?}", cuda); }
+    if config_manager.has_cuda() {
+        log::info!("  - GPU: {}", config_manager.get_gpu_name());
+        log::info!("  - GPU type: {:?}", config_manager.detect_current_gpu_generation());
+        if let Some(cuda) = config_manager.get_cuda_version() {
+            log::info!("  - CUDA version: {:?}", cuda);
+        }
     } else {
         log::info!("  - GPU: Not configured");
     }
@@ -1162,12 +1164,7 @@ impl PortableSourceApp {
         env_mgr.setup_environment().await?;
 
         if let Some(cfg) = self.config_manager.as_mut() {
-            let gpu_detector = GpuDetector::new();
-            if let Some(gpu) = gpu_detector.get_best_gpu()? {
-                let gpu_cfg = gpu_detector.create_gpu_config(&gpu, cfg);
-                cfg.get_config_mut().gpu_config = Some(gpu_cfg);
-                cfg.save_config()?;
-            }
+            // GPU detection is now handled dynamically
             cfg.get_config_mut().environment_setup_completed = true;
             cfg.save_config()?;
         }

@@ -402,23 +402,26 @@ impl PortableEnvironmentManager {
         }
 
         // CUDA PATH vars
-        if let Some(gpu) = &self.config_manager.get_config().gpu_config {
-            if let Some(paths) = &gpu.cuda_paths {
-                let base = &paths.base_path;
-                let bin = &paths.cuda_bin;
-                let lib = &paths.cuda_lib;
-                let lib64 = &paths.cuda_lib_64;
-                if Path::new(&bin).exists() { tool_paths.push(bin.to_string_lossy().to_string()); }
-                if Path::new(&lib64).exists() { tool_paths.push(lib64.to_string_lossy().to_string()); }
-                else if Path::new(&lib).exists() { tool_paths.push(lib.to_string_lossy().to_string()); }
+        if self.config_manager.has_cuda() {
+            if let Some(base) = self.config_manager.get_cuda_base_path() {
+                if let Some(bin) = self.config_manager.get_cuda_bin() {
+                    if bin.exists() { tool_paths.push(bin.to_string_lossy().to_string()); }
+                    env_vars.insert("CUDA_BIN_PATH".to_string(), bin.to_string_lossy().to_string());
+                }
+                if let Some(lib64) = self.config_manager.get_cuda_lib_64() {
+                    if lib64.exists() { 
+                        tool_paths.push(lib64.to_string_lossy().to_string()); 
+                        env_vars.insert("CUDA_LIB_PATH".to_string(), lib64.to_string_lossy().to_string());
+                    } else if let Some(lib) = self.config_manager.get_cuda_lib() {
+                        if lib.exists() { 
+                            tool_paths.push(lib.to_string_lossy().to_string()); 
+                            env_vars.insert("CUDA_LIB_PATH".to_string(), lib.to_string_lossy().to_string());
+                        }
+                    }
+                }
                 env_vars.insert("CUDA_PATH".to_string(), base.to_string_lossy().to_string());
                 env_vars.insert("CUDA_HOME".to_string(), base.to_string_lossy().to_string());
                 env_vars.insert("CUDA_ROOT".to_string(), base.to_string_lossy().to_string());
-                env_vars.insert("CUDA_BIN_PATH".to_string(), bin.to_string_lossy().to_string());
-                env_vars.insert(
-                    "CUDA_LIB_PATH".to_string(),
-                    if Path::new(&lib64).exists() { lib64.to_string_lossy().to_string() } else { lib.to_string_lossy().to_string() }
-                );
             }
         }
 
@@ -483,8 +486,8 @@ impl PortableEnvironmentManager {
         ];
         // Определяем ожидание CUDA (по конфигу) и наличие портативной CUDA
         let mut expect_cuda = false;
-        if let Some(gpu) = &self.config_manager.get_config().gpu_config {
-            if gpu.recommended_backend.contains("cuda") { expect_cuda = true; }
+        if self.config_manager.get_recommended_backend().contains("cuda") { 
+            expect_cuda = true; 
         }
         let nvcc_path = self.ps_env_path.join("CUDA").join("bin").join(if cfg!(windows) { "nvcc.exe" } else { "nvcc" });
         if nvcc_path.exists() {
@@ -540,8 +543,8 @@ impl PortableEnvironmentManager {
         }
 
         // Configure GPU inside manager
-        let _ = cfgm.configure_gpu_from_detection();
-        let cfg_now = cfgm.get_config().clone();
+        // GPU detection is now handled dynamically
+        // let cfg_now = cfgm.get_config().clone();
 
         // Prepare progress tracking
         let print_lock = Arc::new(Mutex::new(()));
@@ -550,10 +553,10 @@ impl PortableEnvironmentManager {
 
         // Determine total steps before starting any tasks
         let mut cuda_plan: Option<(String, String)> = None; // (download_link, expected_folder)
-        if let Some(gpu) = &cfg_now.gpu_config {
-            if let Some(cuda_ver) = &gpu.cuda_version {
-                if gpu.recommended_backend.contains("cuda") {
-                    if let Some(link) = self.config_manager.get_cuda_download_link(Some(cuda_ver)) {
+        if self.config_manager.has_cuda() {
+            if let Some(cuda_ver) = self.config_manager.get_cuda_version() {
+                if self.config_manager.get_recommended_backend().contains("cuda") {
+                    if let Some(link) = self.config_manager.get_cuda_download_link(Some(&cuda_ver)) {
                         // count CUDA steps only if not installed
                         if !self.is_cuda_installed() {
                             total_steps += 2; // CUDA download + extract
@@ -687,8 +690,7 @@ impl PortableEnvironmentManager {
         // Install Git LFS (always run to ensure it's initialized)
         self.install_git_lfs().await?;
 
-        // Configure CUDA paths if present
-        if let Some(gpu) = &cfg_now.gpu_config { if gpu.cuda_version.is_some() && gpu.recommended_backend.contains("cuda") { cfgm.configure_cuda_paths(); } }
+        // CUDA paths are now computed dynamically when needed
 
         // Verify tools
         if !self.verify_environment_tools()? { return Err(PortableSourceError::environment("Environment tools verification failed")); }
@@ -712,8 +714,8 @@ impl PortableEnvironmentManager {
             cfgm.set_install_path(self.install_path.clone())?;
         }
 
-        let _ = cfgm.configure_gpu_from_detection();
-        let cfg_now = cfgm.get_config().clone();
+        // GPU detection is now handled dynamically
+        // let cfg_now = cfgm.get_config().clone();
 
         let completed = Arc::new(AtomicUsize::new(0));
         let cb_arc: Arc<dyn Fn(String, usize, usize) + Send + Sync> = Arc::new(progress_cb);
@@ -721,10 +723,10 @@ impl PortableEnvironmentManager {
 
         // CUDA plan detection same as in setup_environment
         let mut cuda_plan: Option<(String, String)> = None; // (download_link, expected_folder)
-        if let Some(gpu) = &cfg_now.gpu_config {
-            if let Some(cuda_ver) = &gpu.cuda_version {
-                if gpu.recommended_backend.contains("cuda") {
-                    if let Some(link) = self.config_manager.get_cuda_download_link(Some(cuda_ver)) {
+        if self.config_manager.has_cuda() {
+            if let Some(cuda_ver) = self.config_manager.get_cuda_version() {
+                if self.config_manager.get_recommended_backend().contains("cuda") {
+                    if let Some(link) = self.config_manager.get_cuda_download_link(Some(&cuda_ver)) {
                         if !self.is_cuda_installed() { total_steps += 2; }
                         let version_debug = format!("{:?}", cuda_ver).to_lowercase();
                         let cleaned = version_debug.replace("cuda", "").replace(['_', '"'], "");
@@ -827,7 +829,7 @@ impl PortableEnvironmentManager {
             if let Err(err) = res { return Err(err); }
         }
 
-        if let Some(gpu) = &cfg_now.gpu_config { if gpu.cuda_version.is_some() && gpu.recommended_backend.contains("cuda") { cfgm.configure_cuda_paths(); } }
+        // CUDA paths are now computed dynamically when needed
         if !self.verify_environment_tools()? { return Err(PortableSourceError::environment("Environment tools verification failed")); }
         cfgm.mark_environment_setup_completed(true)?;
         Ok(())
@@ -894,10 +896,9 @@ impl PortableEnvironmentManager {
     async fn install_ffmpeg(&self) -> Result<()> { self.install_portable_tool("ffmpeg") }
     
     async fn install_cuda(&self) -> Result<()> {
-        let cfg = self.config_manager.get_config();
-        if let Some(gpu) = &cfg.gpu_config {
-            if let Some(cuda_ver) = &gpu.cuda_version {
-                if !gpu.recommended_backend.contains("cuda") { return Ok(()); }
+        if self.config_manager.has_cuda() {
+            if let Some(cuda_ver) = self.config_manager.get_cuda_version() {
+                if !self.config_manager.get_recommended_backend().contains("cuda") { return Ok(()); }
 
                 let cuda_dir = self.ps_env_path.join("CUDA");
                 if cuda_dir.join("bin").exists() { return Ok(()); }
@@ -905,7 +906,7 @@ impl PortableEnvironmentManager {
                 // Ссылка на архив
                 let link = self
                     .config_manager
-                    .get_cuda_download_link(Some(cuda_ver))
+                    .get_cuda_download_link(Some(&cuda_ver))
                     .ok_or_else(|| PortableSourceError::environment("CUDA download link not available"))?;
 
                 // Вычисляем версию в имени папки: CUDA_118.tar.zst -> cuda_118
@@ -960,8 +961,7 @@ impl PortableEnvironmentManager {
                 if !cuda_dir.join("bin").exists() {
                     return Err(PortableSourceError::environment("CUDA installation failed: bin not found"));
                 }
-                let mut cfgm = self.config_manager.clone();
-                cfgm.configure_cuda_paths();
+                // CUDA paths are now computed dynamically when needed
                 log::info!("Successfully processed CUDA");
             }
         }
@@ -1086,18 +1086,18 @@ impl PortableEnvironmentManager {
 
     /// Suggest CUDA installation if misconfigured
     fn check_and_suggest_cuda_installation(&self) {
-        if let Some(gpu) = &self.config_manager.get_config().gpu_config {
-            if let Some(_cv) = &gpu.cuda_version {
-                if let Some(paths) = &gpu.cuda_paths {
-                    let base = &paths.base_path;
-                    let bin = &paths.cuda_bin;
-                    if !Path::new(&base).exists() {
+        if self.config_manager.has_cuda() {
+            if let Some(_cv) = self.config_manager.get_cuda_version() {
+                if let Some(base) = self.config_manager.get_cuda_base_path() {
+                    if !base.exists() {
                         log::warn!("CUDA is configured but not installed at {}", base.display());
-                    } else if !Path::new(&bin).exists() {
-                        log::warn!("CUDA installation incomplete: bin not found at {}", bin.display());
+                    } else {
+                        if let Some(bin) = self.config_manager.get_cuda_bin() {
+                            if !bin.exists() {
+                                log::warn!("CUDA installation incomplete: bin not found at {}", bin.display());
+                            }
+                        }
                     }
-                } else {
-                    log::warn!("CUDA version is set but paths are not configured");
                 }
             }
         }

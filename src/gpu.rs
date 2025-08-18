@@ -1,7 +1,6 @@
 //! GPU detection and management
 
 use crate::{Result, PortableSourceError};
-use crate::config::{GpuConfig, GpuGeneration};
 use std::process::Command;
 #[cfg(windows)]
 use serde::Deserialize;
@@ -218,45 +217,7 @@ impl GpuDetector {
     pub fn has_nvidia_gpu(&self) -> bool {
         self.detect_nvidia_gpu().unwrap_or(None).is_some()
     }
-    
-    /// Create GPU configuration from detected GPU
-    pub fn create_gpu_config(&self, gpu_info: &GpuInfo, config_manager: &crate::config::ConfigManager) -> GpuConfig {
-        let generation = config_manager.detect_gpu_generation(&gpu_info.name);
-        let cuda_version = config_manager.get_recommended_cuda_version(&generation);
-        
-        let compute_capability = self.get_compute_capability(&generation);
-        let memory_gb = gpu_info.memory_mb / 1024;
-        
-        let recommended_backend = match gpu_info.gpu_type {
-            GpuType::Nvidia if generation != GpuGeneration::Unknown => "cuda".to_string(),
-            _ => "cpu".to_string(),
-        };
-        
-        let supports_tensorrt = matches!(gpu_info.gpu_type, GpuType::Nvidia) 
-            && !matches!(generation, GpuGeneration::Unknown);
-        
-        GpuConfig {
-            name: gpu_info.name.clone(),
-            generation,
-            cuda_version,
-            cuda_paths: None, // Will be set when CUDA is installed
-            compute_capability,
-            memory_gb,
-            recommended_backend,
-            supports_tensorrt,
-        }
-    }
-    
-    fn get_compute_capability(&self, generation: &GpuGeneration) -> String {
-        match generation {
-            GpuGeneration::Pascal => "6.1".to_string(),
-            GpuGeneration::Turing => "7.5".to_string(),
-            GpuGeneration::Ampere => "8.6".to_string(),
-            GpuGeneration::AdaLovelace => "8.9".to_string(),
-            GpuGeneration::Blackwell => "9.0".to_string(),
-            GpuGeneration::Unknown => "0.0".to_string(),
-        }
-    }
+
 }
 
 // removed raw COM helpers; using wmi crate instead

@@ -180,16 +180,19 @@ async fn run(cli: Cli) -> Result<()> {
                 let cv = match detect_cuda_version_from_system() {
                     Some(_) => None,
                     None => {
-                        let cv_opt = config_manager
-                            .get_config()
-                            .gpu_config
-                            .as_ref()
-                            .and_then(|g| g.cuda_version.as_ref());
-                        cv_opt.map(|v| match v {
-                            portablesource_rs::config::CudaVersion::Cuda128 => portablesource_rs::config::CudaVersionLinux::Cuda128,
-                            portablesource_rs::config::CudaVersion::Cuda124 => portablesource_rs::config::CudaVersionLinux::Cuda124,
-                            portablesource_rs::config::CudaVersion::Cuda118 => portablesource_rs::config::CudaVersionLinux::Cuda118,
-                        })
+                        if config_manager.has_cuda() {
+                            if let Some(cuda_version) = config_manager.get_cuda_version() {
+                                Some(match cuda_version {
+                                    portablesource_rs::config::CudaVersion::Cuda128 => portablesource_rs::config::CudaVersionLinux::Cuda128,
+                                    portablesource_rs::config::CudaVersion::Cuda124 => portablesource_rs::config::CudaVersionLinux::Cuda124,
+                                    portablesource_rs::config::CudaVersion::Cuda118 => portablesource_rs::config::CudaVersionLinux::Cuda118,
+                                })
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
                     }
                 };
                 setup_micromamba_base_env(&install_path, cv)?;
@@ -289,27 +292,28 @@ async fn setup_environment(install_path: &PathBuf, config_manager: &mut ConfigMa
         let cv = match detect_cuda_version_from_system() {
             Some(_) => None,
             None => {
-                let cv_opt = config_manager
-                    .get_config()
-                    .gpu_config
-                    .as_ref()
-                    .and_then(|g| g.cuda_version.as_ref());
-                cv_opt.map(|v| match v {
-                    portablesource_rs::config::CudaVersion::Cuda128 => portablesource_rs::config::CudaVersionLinux::Cuda128,
-                    portablesource_rs::config::CudaVersion::Cuda124 => portablesource_rs::config::CudaVersionLinux::Cuda124,
-                    portablesource_rs::config::CudaVersion::Cuda118 => portablesource_rs::config::CudaVersionLinux::Cuda118,
-                })
+                if config_manager.has_cuda() {
+                    if let Some(cuda_version) = config_manager.get_cuda_version() {
+                        Some(match cuda_version {
+                            portablesource_rs::config::CudaVersion::Cuda128 => portablesource_rs::config::CudaVersionLinux::Cuda128,
+                            portablesource_rs::config::CudaVersion::Cuda124 => portablesource_rs::config::CudaVersionLinux::Cuda124,
+                            portablesource_rs::config::CudaVersion::Cuda118 => portablesource_rs::config::CudaVersionLinux::Cuda118,
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             }
         };
         setup_micromamba_base_env(install_path, cv)?;
     }
     
-    // Detect and configure GPU
+    // GPU detection is now handled dynamically by ConfigManager
     let gpu_detector = GpuDetector::new();
     if let Some(gpu_info) = gpu_detector.get_best_gpu()? {
         info!("Detected GPU: {}", gpu_info.name);
-        let gpu_config = gpu_detector.create_gpu_config(&gpu_info, config_manager);
-        config_manager.get_config_mut().gpu_config = Some(gpu_config);
     } else {
         warn!("No GPU detected, using CPU backend");
     }
@@ -484,13 +488,8 @@ fn ensure_config_initialized(config_manager: &mut ConfigManager) -> Result<()> {
     if config_manager.get_config().environment_vars.is_none() {
         let _ = config_manager.configure_environment_vars();
     }
-    // Ensure GPU config
-    let gpu_missing = config_manager.get_config().gpu_config.is_none()
-        || config_manager.get_config().gpu_config.as_ref().map(|g| g.name.is_empty() || g.name == "Unknown GPU" || g.memory_gb == 0).unwrap_or(true);
-    if gpu_missing {
-        let _ = config_manager.configure_gpu_from_detection();
-        config_manager.configure_cuda_paths();
-    }
+    // GPU detection is now handled dynamically by ConfigManager
+    // No need to store GPU config as it's computed on-demand
     Ok(())
 }
 

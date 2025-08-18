@@ -1061,10 +1061,11 @@ impl RepositoryInstaller {
     }
 
     fn get_default_torch_index_url(&self) -> String {
-        let cfg = self._config_manager.get_config();
-        if let Some(gpu) = &cfg.gpu_config {
-            let name_up = gpu.name.to_uppercase();
-            let is_blackwell = name_up.contains("RTX 50") || format!("{:?}", gpu.generation).to_lowercase().contains("blackwell");
+        if self._config_manager.has_cuda() {
+            let gpu_name = self._config_manager.get_gpu_name();
+            let gpu_generation = self._config_manager.detect_current_gpu_generation();
+            let name_up = gpu_name.to_uppercase();
+            let is_blackwell = name_up.contains("RTX 50") || format!("{:?}", gpu_generation).to_lowercase().contains("blackwell");
             if is_blackwell { return "https://download.pytorch.org/whl/nightly/cu128".into(); }
         }
         #[cfg(unix)]
@@ -1081,20 +1082,21 @@ impl RepositoryInstaller {
         }
         #[cfg(windows)]
         {
-            if let Some(gpu) = &cfg.gpu_config { if let Some(cuda) = &gpu.cuda_version {
-                return match cuda {
-                    crate::config::CudaVersion::Cuda128 => "https://download.pytorch.org/whl/nightly/cu128".into(),
-                    crate::config::CudaVersion::Cuda124 => "https://download.pytorch.org/whl/cu124".into(),
-                    crate::config::CudaVersion::Cuda118 => "https://download.pytorch.org/whl/cu118".into(),
-                };
-            }}
+            if self._config_manager.has_cuda() {
+                if let Some(cuda_version) = self._config_manager.get_cuda_version() {
+                    return match cuda_version {
+                        crate::config::CudaVersion::Cuda128 => "https://download.pytorch.org/whl/nightly/cu128".into(),
+                        crate::config::CudaVersion::Cuda124 => "https://download.pytorch.org/whl/cu124".into(),
+                        crate::config::CudaVersion::Cuda118 => "https://download.pytorch.org/whl/cu118".into(),
+                    };
+                }
+            }
         }
         "https://download.pytorch.org/whl/cpu".into()
     }
 
     fn apply_onnx_gpu_detection(&self, base: &str) -> String {
-        let cfg = self._config_manager.get_config();
-        let up = cfg.gpu_config.as_ref().map(|g| g.name.to_uppercase()).unwrap_or_default();
+        let up = self._config_manager.get_gpu_name().to_uppercase();
         if base.starts_with("onnxruntime") {
             if up.contains("NVIDIA") { return base.replace("onnxruntime", "onnxruntime-gpu"); }
             if (up.contains("AMD") || up.contains("INTEL")) && cfg!(windows) { return base.replace("onnxruntime", "onnxruntime-directml"); }
@@ -1103,11 +1105,12 @@ impl RepositoryInstaller {
     }
 
     fn needs_onnx_nightly(&self) -> bool {
-        let cfg = self._config_manager.get_config();
         // Blackwell GPUs (RTX 50xx)
-        if let Some(gpu) = &cfg.gpu_config {
-            let gen = format!("{:?}", gpu.generation).to_lowercase();
-            let name_up = gpu.name.to_uppercase();
+        if self._config_manager.has_cuda() {
+            let gpu_generation = self._config_manager.detect_current_gpu_generation();
+            let gpu_name = self._config_manager.get_gpu_name();
+            let gen = format!("{:?}", gpu_generation).to_lowercase();
+            let name_up = gpu_name.to_uppercase();
             let is_nvidia = name_up.contains("NVIDIA") || name_up.contains("RTX") || name_up.contains("GEFORCE");
             if is_nvidia && (gen.contains("blackwell") || name_up.contains("RTX 50")) {
                 return true;
@@ -1127,10 +1130,11 @@ impl RepositoryInstaller {
 
     // Выбор конкретного пакета ORT для установки с учётом поколения GPU
     fn get_onnx_package_spec(&self) -> String {
-        let cfg = self._config_manager.get_config();
-        if let Some(gpu) = &cfg.gpu_config {
-            let gen = format!("{:?}", gpu.generation).to_lowercase();
-            let name_up = gpu.name.to_uppercase();
+        if self._config_manager.has_cuda() {
+            let gpu_generation = self._config_manager.detect_current_gpu_generation();
+            let gpu_name = self._config_manager.get_gpu_name();
+            let gen = format!("{:?}", gpu_generation).to_lowercase();
+            let name_up = gpu_name.to_uppercase();
             let is_nvidia = name_up.contains("NVIDIA") || name_up.contains("RTX") || name_up.contains("GEFORCE");
             let is_blackwell = gen.contains("blackwell") || name_up.contains("RTX 50");
             if is_nvidia && is_blackwell {
@@ -1209,7 +1213,7 @@ impl RepositoryInstaller {
         }
         
         Ok((false, None))
-     }
+    }
 
 
     fn generate_startup_script(&self, repo_path: &Path, repo_info: &RepositoryInfo) -> Result<bool> {
@@ -1234,11 +1238,11 @@ impl RepositoryInstaller {
         let program_args = repo_info.program_args.clone().unwrap_or_default();
 
         // CUDA PATH section if configured
-        let cuda_section = if let Some(gpu) = &cfg.gpu_config { if let Some(_paths) = &gpu.cuda_paths {
+        let cuda_section = if self._config_manager.has_cuda() {
             format!(
                 "set cuda_bin=%env_path%\\CUDA\\bin\nset cuda_lib=%env_path%\\CUDA\\lib\nset cuda_lib_64=%env_path%\\CUDA\\lib\\x64\nset cuda_nvml_bin=%env_path%\\CUDA\\nvml\\bin\nset cuda_nvml_lib=%env_path%\\CUDA\\nvml\\lib\nset cuda_nvvm_bin=%env_path%\\CUDA\\nvvm\\bin\nset cuda_nvvm_lib=%env_path%\\CUDA\\nvvm\\lib\n\nset PATH=%cuda_bin%;%PATH%\nset PATH=%cuda_lib%;%PATH%\nset PATH=%cuda_lib_64%;%PATH%\nset PATH=%cuda_nvml_bin%;%PATH%\nset PATH=%cuda_nvml_lib%;%PATH%\nset PATH=%cuda_nvvm_bin%;%PATH%\nset PATH=%cuda_nvvm_lib%;%PATH%\n"
             )
-        } else { "REM No CUDA paths configured".into() } } else { "REM No CUDA paths configured".into() };
+        } else { "REM No CUDA paths configured".into() };
         
         // Generate base script content without execution command
         let base_content = format!("@echo off\n").to_string() + &format!(
@@ -1314,18 +1318,18 @@ impl RepositoryInstaller {
 
         // CUDA PATH exports if configured (optional)
         let mut cuda_exports = String::new();
-        if let Some(gpu) = &cfg.gpu_config { if let Some(paths) = &gpu.cuda_paths {
-            let base = paths.base_path.to_string_lossy();
-            let bin = paths.cuda_bin.to_string_lossy();
-            let lib = paths.cuda_lib.to_string_lossy();
-            let lib64 = paths.cuda_lib_64.to_string_lossy();
+        if self._config_manager.has_cuda() {
+            let base = self._config_manager.get_cuda_base_path().to_string_lossy();
+            let bin = self._config_manager.get_cuda_bin().to_string_lossy();
+            let lib = self._config_manager.get_cuda_lib().to_string_lossy();
+            let lib64 = self._config_manager.get_cuda_lib_64().to_string_lossy();
             cuda_exports.push_str(&format!("export CUDA_PATH=\"{}\"\n", base));
             cuda_exports.push_str(&format!("export CUDA_HOME=\"{}\"\n", base));
             cuda_exports.push_str(&format!("export CUDA_ROOT=\"{}\"\n", base));
             cuda_exports.push_str(&format!("export PATH=\"{}:$PATH\"\n", bin));
             // Use default expansion for unset variable due to 'set -u'
             cuda_exports.push_str(&format!("export LD_LIBRARY_PATH=\"{}:{}:${{LD_LIBRARY_PATH:-}}\"\n", lib, lib64));
-        }}
+        }
 
         // Generate base script content without execution command
         let base_content = format!("#!/usr/bin/env bash\nset -Eeuo pipefail\n\nINSTALL=\"{}\"
@@ -1517,10 +1521,11 @@ impl<'a> RequirementsAnalyzer<'a> {
     }
 
     fn get_default_torch_index_url(&self) -> String {
-        let cfg = self.config_manager.get_config();
-        if let Some(gpu) = &cfg.gpu_config {
-            let name_up = gpu.name.to_uppercase();
-            let is_blackwell = name_up.contains("RTX 50") || format!("{:?}", gpu.generation).to_lowercase().contains("blackwell");
+        if self.config_manager.has_cuda() {
+            let gpu_name = self.config_manager.get_gpu_name();
+            let gpu_generation = self.config_manager.detect_current_gpu_generation();
+            let name_up = gpu_name.to_uppercase();
+            let is_blackwell = name_up.contains("RTX 50") || format!("{:?}", gpu_generation).to_lowercase().contains("blackwell");
             if is_blackwell { return "https://download.pytorch.org/whl/nightly/cu128".into(); }
         }
         #[cfg(unix)]
@@ -1537,21 +1542,23 @@ impl<'a> RequirementsAnalyzer<'a> {
         }
         #[cfg(windows)]
         {
-            if let Some(gpu) = &cfg.gpu_config { if let Some(cuda) = &gpu.cuda_version {
-                return match cuda {
-                    crate::config::CudaVersion::Cuda128 => "https://download.pytorch.org/whl/nightly/cu128".into(),
-                    crate::config::CudaVersion::Cuda124 => "https://download.pytorch.org/whl/cu124".into(),
-                    crate::config::CudaVersion::Cuda118 => "https://download.pytorch.org/whl/cu118".into(),
-                };
-            }}
+            if self.config_manager.has_cuda() {
+                if let Some(cuda_version) = self.config_manager.get_cuda_version() {
+                    return match cuda_version {
+                        crate::config::CudaVersion::Cuda128 => "https://download.pytorch.org/whl/nightly/cu128".into(),
+                        crate::config::CudaVersion::Cuda124 => "https://download.pytorch.org/whl/cu124".into(),
+                        crate::config::CudaVersion::Cuda118 => "https://download.pytorch.org/whl/cu118".into(),
+                    };
+                }
+            }
         }
         "https://download.pytorch.org/whl/cpu".into()
     }
 
     fn get_onnx_package_name(&self) -> String {
-        let cfg = self.config_manager.get_config();
-        if let Some(gpu) = &cfg.gpu_config {
-            let up = gpu.name.to_uppercase();
+        if self.config_manager.has_cuda() {
+            let gpu_name = self.config_manager.get_gpu_name();
+            let up = gpu_name.to_uppercase();
             if up.contains("NVIDIA") { return "onnxruntime-gpu".into(); }
             if (up.contains("AMD") || up.contains("INTEL")) && cfg!(windows) { return "onnxruntime-directml".into(); }
         }
