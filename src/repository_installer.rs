@@ -1398,10 +1398,14 @@ impl RepositoryInstaller {
         // CUDA PATH exports if configured (optional)
         let mut cuda_exports = String::new();
         if self._config_manager.has_cuda() {
-            let base = self._config_manager.get_cuda_base_path().to_string_lossy();
-            let bin = self._config_manager.get_cuda_bin().to_string_lossy();
-            let lib = self._config_manager.get_cuda_lib().to_string_lossy();
-            let lib64 = self._config_manager.get_cuda_lib_64().to_string_lossy();
+            let base_path = self._config_manager.get_cuda_base_path().unwrap_or_default();
+            let bin_path = self._config_manager.get_cuda_bin().unwrap_or_default();
+            let lib_path = self._config_manager.get_cuda_lib().unwrap_or_default();
+            let lib64_path = self._config_manager.get_cuda_lib_64().unwrap_or_default();
+            let base = base_path.to_string_lossy();
+            let bin = bin_path.to_string_lossy();
+            let lib = lib_path.to_string_lossy();
+            let lib64 = lib64_path.to_string_lossy();
             cuda_exports.push_str(&format!("export CUDA_PATH=\"{}\"\n", base));
             cuda_exports.push_str(&format!("export CUDA_HOME=\"{}\"\n", base));
             cuda_exports.push_str(&format!("export CUDA_ROOT=\"{}\"\n", base));

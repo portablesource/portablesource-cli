@@ -754,7 +754,6 @@ pub fn show_version() {
 
 #[cfg(unix)]
 pub fn prepare_linux_system() -> Result<()> {
-    use std::process::Command;
     // Ожидается запуск от root для установки пакетов; если не root — пробуем sudo -n
     let is_root = unsafe { libc::geteuid() } == 0;
     let use_sudo = !is_root && which::which("sudo").is_ok();
@@ -880,7 +879,7 @@ fn install_linux_packages(pm: LinuxPackageManager, missing: &Vec<(String, String
     use std::process::Command;
     if missing.is_empty() { return Ok(()); }
     let pkgs: Vec<String> = missing.iter().map(|(_, p)| p.clone()).collect();
-    let sudo = |cmd: &str| if use_sudo { Some("sudo") } else { None };
+    let sudo = |_cmd: &str| if use_sudo { Some("sudo") } else { None };
     let sudo_args: [&str; 1] = ["-n"]; // non-interactive
     match pm {
         LinuxPackageManager::Apt => {
@@ -1152,7 +1151,7 @@ impl PortableSourceApp {
 
     fn get_installation_path_interactive(&self) -> Result<PathBuf> {
         if let Some(path) = load_install_path_from_registry()? { return Ok(path); }
-
+        #[cfg(windows)]
         use std::io::{self, Write};
         println!("\n============================================================");
         println!("PORTABLESOURCE INSTALLATION PATH SETUP");
@@ -1353,7 +1352,7 @@ pub async fn run_repository(repo: &str, install_path: &PathBuf, additional_args:
     
     // Prepare arguments
     #[cfg(unix)]
-    let mut args = additional_args.to_vec();
+    let args = additional_args.to_vec();
     #[cfg(windows)]
     let args = additional_args.to_vec();
     
