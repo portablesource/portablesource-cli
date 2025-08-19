@@ -213,6 +213,52 @@ pub fn create_directory_structure(install_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Определяет, является ли это первой установкой (отсутствуют директории среды)
+pub fn is_first_installation(install_path: &Path) -> bool {
+    let ps_env = install_path.join("ps_env");
+    let repos = install_path.join("repos");
+    let envs = install_path.join("envs");
+    
+    // Первая установка, если нет ни одной из ключевых директорий
+    !ps_env.exists() && !repos.exists() && !envs.exists()
+}
+
+/// Копирует текущий exe файл в путь установки
+pub fn copy_executable_to_install_path(install_path: &Path) -> Result<()> {
+    let current_exe = std::env::current_exe()
+        .map_err(|e| PortableSourceError::installation(
+            format!("Failed to get current executable path: {}", e)
+        ))?;
+    
+    let exe_name = current_exe.file_name()
+        .ok_or_else(|| PortableSourceError::installation(
+            "Failed to get executable name".to_string()
+        ))?;
+    
+    let target_exe = install_path.join(exe_name);
+    
+    // Не копируем, если уже находимся в целевой директории
+    if current_exe == target_exe {
+        log::info!("Executable already in target location: {:?}", target_exe);
+        return Ok(());
+    }
+    
+    // Создаем директорию установки если её нет
+    std::fs::create_dir_all(install_path)
+        .map_err(|e| PortableSourceError::installation(
+            format!("Failed to create install directory {:?}: {}", install_path, e)
+        ))?;
+    
+    // Копируем exe файл
+    std::fs::copy(&current_exe, &target_exe)
+        .map_err(|e| PortableSourceError::installation(
+            format!("Failed to copy executable from {:?} to {:?}: {}", current_exe, target_exe, e)
+        ))?;
+    
+    log::info!("Executable copied to: {:?}", target_exe);
+    Ok(())
+}
+
 // ===== Linux helpers for install path and micromamba setup =====
 
 #[cfg(unix)]
@@ -1166,7 +1212,7 @@ impl PortableSourceApp {
         if let Some(cfg) = self.config_manager.as_mut() {
             // GPU detection is now handled dynamically
             cfg.get_config_mut().environment_setup_completed = true;
-            cfg.save_config()?;
+            // Конфигурация больше не сохраняется на диск - только сессионные настройки
         }
         Ok(())
     }

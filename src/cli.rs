@@ -25,19 +25,20 @@ pub enum Commands {
     /// Setup environment (Portable)
     SetupEnv,
     
-    /// Register installation path in registry
-    #[cfg(windows)]
+    /// Register installation path in registry (Unix only)
+    #[cfg(unix)]
     SetupReg,
     
-    /// Unregister installation path from registry
-    #[cfg(windows)]
+    /// Unregister installation path from registry (Unix only)
+    #[cfg(unix)]
     Unregister,
     
     /// Uninstall PortableSource completely (Linux only)
     #[cfg(unix)]
     Uninstall,
     
-    /// Change installation path
+    /// Change installation path (Unix only)
+    #[cfg(unix)]
     ChangePath,
     
     /// Install repository (alias: ir)

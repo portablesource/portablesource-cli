@@ -5,11 +5,16 @@ use portablesource_rs::{
     utils,
     envs_manager::PortableEnvironmentManager,
     repository_installer::RepositoryInstaller,
+    PortableSourceError,
     Result,
 };
 use log::{info, error, warn, LevelFilter};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 // use std::io; // not used
+
+// Глобальная переменная для хранения install_path в текущей сессии
+static SESSION_INSTALL_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 #[tokio::main]
 async fn main() {
@@ -47,90 +52,128 @@ async fn run(cli: Cli) -> Result<()> {
     // Handle install path from CLI, registry, config, or default
     // Skip interactive prompt for commands that don't need install_path
     #[cfg(windows)]
-    let needs_install_path = matches!(cli.command, Some(Commands::SetupEnv) | Some(Commands::InstallRepo { .. }) | Some(Commands::UpdateRepo { .. }) | Some(Commands::DeleteRepo { .. }) | Some(Commands::ListRepos) | Some(Commands::ChangePath) | Some(Commands::CheckEnv));
+    let needs_install_path = matches!(cli.command, Some(Commands::SetupEnv) | Some(Commands::InstallRepo { .. }) | Some(Commands::UpdateRepo { .. }) | Some(Commands::DeleteRepo { .. }) | Some(Commands::ListRepos) | Some(Commands::CheckEnv));
     #[cfg(unix)]
     let needs_install_path = matches!(cli.command, Some(Commands::SetupEnv) | Some(Commands::InstallRepo { .. }) | Some(Commands::UpdateRepo { .. }) | Some(Commands::DeleteRepo { .. }) | Some(Commands::ListRepos) | Some(Commands::ChangePath) | Some(Commands::CheckEnv) | Some(Commands::Uninstall));
     #[cfg(all(not(windows), not(unix)))]
-    let needs_install_path = matches!(cli.command, Some(Commands::SetupEnv) | Some(Commands::InstallRepo { .. }) | Some(Commands::UpdateRepo { .. }) | Some(Commands::DeleteRepo { .. }) | Some(Commands::ListRepos) | Some(Commands::ChangePath) | Some(Commands::CheckEnv));
+    let needs_install_path = matches!(cli.command, Some(Commands::SetupEnv) | Some(Commands::InstallRepo { .. }) | Some(Commands::UpdateRepo { .. }) | Some(Commands::DeleteRepo { .. }) | Some(Commands::ListRepos) | Some(Commands::CheckEnv));
 
-    let install_path = if !needs_install_path {
-        // Use existing config or silent defaults without prompting
-        if let Some(path) = utils::load_install_path_from_registry()? {
-            utils::validate_and_create_path(&path)?
-        } else if !config_manager.get_config().install_path.as_os_str().is_empty() {
-            let existing = config_manager.get_config().install_path.clone();
-            utils::validate_and_create_path(&existing)?
-        } else {
-            // Silent default without prompt
-            #[cfg(windows)]
-            {
-                let default_path = std::env::current_dir()?.join("portablesource");
-                utils::validate_and_create_path(&default_path)?
-            }
-            #[cfg(unix)]
-            {
-                let default_path = utils::default_install_path_linux();
-                utils::validate_and_create_path(&default_path)?
-            }
-        }
+    let install_path = if let Some(cached_path) = SESSION_INSTALL_PATH.get() {
+        // Используем сохраненный путь из текущей сессии
+        cached_path.clone()
     } else if let Some(path) = cli.install_path {
         let validated_path = utils::validate_and_create_path(&path)?;
         config_manager.set_install_path(validated_path.clone())?;
-        // Persist for subsequent commands
-        let _ = utils::save_install_path_to_registry(&validated_path);
-        validated_path
-    } else if let Some(path) = utils::load_install_path_from_registry()? {
-        let validated_path = utils::validate_and_create_path(&path)?;
-        config_manager.set_install_path(validated_path.clone())?;
-        validated_path
-    } else if !config_manager.get_config().install_path.as_os_str().is_empty() {
-        // For setup-env command on Linux, always show interactive prompt to allow path customization
+        
+        // Сохраняем путь в сессии
+        let _ = SESSION_INSTALL_PATH.set(validated_path.clone());
+        
+        // Портативная логика только для Windows
+        #[cfg(windows)]
+        {
+            // Просто запоминаем путь установки для текущей сессии
+            // Копирование exe произойдет после команды setup-env
+        }
+        
+        // Для Linux сохраняем в реестр как раньше
         #[cfg(unix)]
-        if matches!(cli.command, Some(Commands::SetupEnv)) {
-            let current_path = config_manager.get_config().install_path.clone();
-            println!("\nCurrent installation path: {}", current_path.display());
-            let chosen = utils::prompt_install_path_linux(&current_path)?;
-            let _ = utils::save_install_path_to_registry(&chosen);
-            config_manager.set_install_path(chosen.clone())?;
-            chosen
-        } else {
-            let existing = config_manager.get_config().install_path.clone();
-            let validated_path = utils::validate_and_create_path(&existing)?;
-            // Normalize in config in case of differences
-            config_manager.set_install_path(validated_path.clone())?;
-            validated_path
-        }
-        #[cfg(windows)]
         {
-            let existing = config_manager.get_config().install_path.clone();
-            let validated_path = utils::validate_and_create_path(&existing)?;
-            // Normalize in config in case of differences
-            config_manager.set_install_path(validated_path.clone())?;
-            validated_path
-        }
-    } else {
-        // Default path with interactive prompt on Linux
-        #[cfg(windows)]
-        {
-            let default_path = std::env::current_dir()?.join("portablesource");
-            let validated_path = utils::validate_and_create_path(&default_path)?;
-            config_manager.set_install_path(validated_path.clone())?;
             let _ = utils::save_install_path_to_registry(&validated_path);
-            validated_path
         }
+        // Для Windows больше не используем реестр - только портативный режим
+        
+        validated_path
+    } else {
+        // Портативная логика только для Windows
+        #[cfg(windows)]
+        {
+            // Путь не указан - определяем автоматически
+            let current_dir = std::env::current_exe()?
+                .parent()
+                .ok_or_else(|| PortableSourceError::installation("Cannot determine current directory".to_string()))?
+                .to_path_buf();
+            
+            // Проверяем, находимся ли мы уже в установленной директории
+            if !utils::is_first_installation(&current_dir) {
+                // Мы в установленной директории - используем её
+                // Сохраняем путь в сессии
+                let _ = SESSION_INSTALL_PATH.set(current_dir.clone());
+                current_dir
+            } else {
+                // Первый запуск - нужно выбрать путь установки
+                if !needs_install_path {
+                    // Для команд, не требующих установки, используем текущую директорию
+                    // Сохраняем путь в сессии
+                    let _ = SESSION_INSTALL_PATH.set(current_dir.clone());
+                    current_dir
+                } else {
+                    // Для команд установки показываем интерактивный выбор
+                    let default_path = std::env::current_dir()?.join("portablesource");
+                    println!("Choose installation path (default: {})", default_path.display());
+                    print!("Enter path or press Enter: ");
+                    use std::io::{self, Write};
+                    io::stdout().flush().ok();
+                    let mut input = String::new();
+                    io::stdin().read_line(&mut input).ok();
+                    let input = input.trim();
+                    
+                    let chosen_path = if input.is_empty() {
+                        default_path
+                    } else {
+                        PathBuf::from(input)
+                    };
+                    
+                    let validated_path = utils::validate_and_create_path(&chosen_path)?;
+                    utils::copy_executable_to_install_path(&validated_path)?;
+                    // Сохраняем путь в сессии
+                    let _ = SESSION_INSTALL_PATH.set(validated_path.clone());
+                    validated_path
+                }
+            }
+        }
+        
+        // Для Linux оставляем старую логику
         #[cfg(unix)]
         {
-            // For setup-env command, always show interactive prompt on first run
-            if matches!(cli.command, Some(Commands::SetupEnv)) {
-                let default_path = utils::default_install_path_linux();
-                let chosen = utils::prompt_install_path_linux(&default_path)?;
-                // Persist for subsequent commands on Linux too (user scope)
-                let _ = utils::save_install_path_to_registry(&chosen);
-                config_manager.set_install_path(chosen.clone())?;
-                chosen
+            if !needs_install_path {
+                // Use existing config or silent defaults without prompting
+                if let Some(path) = utils::load_install_path_from_registry()? {
+                    utils::validate_and_create_path(&path)?
+                } else if !config_manager.get_config().install_path.as_os_str().is_empty() {
+                    let existing = config_manager.get_config().install_path.clone();
+                    utils::validate_and_create_path(&existing)?
+                } else {
+                    let default_path = utils::default_install_path_linux();
+                    utils::validate_and_create_path(&default_path)?
+                }
+            } else if let Some(path) = utils::load_install_path_from_registry()? {
+                let validated_path = utils::validate_and_create_path(&path)?;
+                config_manager.set_install_path(validated_path.clone())?;
+                validated_path
+            } else if !config_manager.get_config().install_path.as_os_str().is_empty() {
+                let existing = config_manager.get_config().install_path.clone();
+                if matches!(cli.command, Some(Commands::SetupEnv)) {
+                    println!("\nCurrent installation path: {}", existing.display());
+                    let chosen = utils::prompt_install_path_linux(&existing)?;
+                    let _ = utils::save_install_path_to_registry(&chosen);
+                    config_manager.set_install_path(chosen.clone())?;
+                    chosen
+                } else {
+                    let validated_path = utils::validate_and_create_path(&existing)?;
+                    config_manager.set_install_path(validated_path.clone())?;
+                    validated_path
+                }
             } else {
-                let default_path = utils::default_install_path_linux();
-                utils::validate_and_create_path(&default_path)?
+                if matches!(cli.command, Some(Commands::SetupEnv)) {
+                    let default_path = utils::default_install_path_linux();
+                    let chosen = utils::prompt_install_path_linux(&default_path)?;
+                    let _ = utils::save_install_path_to_registry(&chosen);
+                    config_manager.set_install_path(chosen.clone())?;
+                    chosen
+                } else {
+                    let default_path = utils::default_install_path_linux();
+                    utils::validate_and_create_path(&default_path)?
+                }
             }
         }
     };
@@ -139,7 +182,7 @@ async fn run(cli: Cli) -> Result<()> {
     // (для Linux не требуем root и не используем /etc для persist)
     let _ = config_manager.set_install_path(install_path.clone());
     config_manager.set_config_path_to_install_dir();
-    let _ = config_manager.save_config();
+    // Конфигурация больше не сохраняется на диск - только сессионные настройки
     info!("Using install path: {:?}", install_path);
     #[cfg(not(windows))]
     {
@@ -205,13 +248,13 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Commands::SetupEnv) => {
             setup_environment(&install_path, &mut config_manager).await
         }
-        #[cfg(windows)]
+        #[cfg(unix)]
         Some(Commands::SetupReg) => {
             utils::save_install_path_to_registry(&install_path)?;
             println!("Installation path registered successfully");
             Ok(())
         }
-        #[cfg(windows)]
+        #[cfg(unix)]
         Some(Commands::Unregister) => {
             utils::delete_install_path_from_registry()?;
             println!("Installation path unregistered successfully");
@@ -221,6 +264,7 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Commands::Uninstall) => {
             utils::uninstall_portablesource(&install_path).await
         }
+        #[cfg(unix)]
         Some(Commands::ChangePath) => {
             change_installation_path(&mut config_manager).await
         }
@@ -270,8 +314,6 @@ async fn run(cli: Cli) -> Result<()> {
 }
 
 async fn setup_environment(install_path: &PathBuf, config_manager: &mut ConfigManager) -> Result<()> {
-    info!("Setting up PortableSource environment...");
-    
     // Create directory structure
     utils::create_directory_structure(install_path)?;
     
@@ -323,12 +365,15 @@ async fn setup_environment(install_path: &PathBuf, config_manager: &mut ConfigMa
     // Не сохраняем здесь повторно: итоговый save будет ниже, после GPU-конфига
     
     // Сохранение конфигурации ровно один раз после всех шагов
-    config_manager.save_config()?;
+    // Конфигурация больше не сохраняется на диск - только сессионные настройки
+
+    // Executable was already copied during initial setup
 
     println!("Environment setup completed successfully!");
     Ok(())
 }
 
+#[cfg(unix)]
 async fn change_installation_path(config_manager: &mut ConfigManager) -> Result<()> {
     println!("Enter new installation path:");
     let mut input = String::new();
@@ -337,7 +382,11 @@ async fn change_installation_path(config_manager: &mut ConfigManager) -> Result<
     
     let validated_path = utils::validate_and_create_path(&path)?;
     config_manager.set_install_path(validated_path.clone())?;
-    utils::save_install_path_to_registry(&validated_path)?;
+    // Для Windows больше не используем реестр - только сессионные настройки
+    #[cfg(unix)]
+    {
+        utils::save_install_path_to_registry(&validated_path)?;
+    }
     
     println!("Installation path changed to: {:?}", validated_path);
     Ok(())
@@ -476,12 +525,22 @@ async fn show_system_info(config_manager: &mut ConfigManager) -> Result<()> {
 fn ensure_config_initialized(config_manager: &mut ConfigManager) -> Result<()> {
     // Ensure install path set (already set in run(), but double-check)
     if config_manager.get_config().install_path.as_os_str().is_empty() {
-        if let Some(reg_path) = utils::load_install_path_from_registry()? {
-            config_manager.set_install_path(reg_path)?;
-        } else {
+        #[cfg(windows)]
+        {
+            // Для Windows используем только текущую директорию - без реестра
             let default_path = std::env::current_dir()?.join("portablesource");
             let validated = utils::validate_and_create_path(&default_path)?;
             config_manager.set_install_path(validated)?;
+        }
+        #[cfg(unix)]
+        {
+            if let Some(reg_path) = utils::load_install_path_from_registry()? {
+                config_manager.set_install_path(reg_path)?;
+            } else {
+                let default_path = std::env::current_dir()?.join("portablesource");
+                let validated = utils::validate_and_create_path(&default_path)?;
+                config_manager.set_install_path(validated)?;
+            }
         }
     }
     // Ensure environment vars in config

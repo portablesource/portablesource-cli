@@ -260,20 +260,19 @@ impl RepositoryInstaller {
 
         println!("[PortableSource] Installing dependencies...");
         // Persist config once at start of dependency installation
-        let _ = self._config_manager.save_config();
+        // Конфигурация больше не сохраняется на диск - только сессионные настройки
         self.install_dependencies(&repo_path).await?;
 
         #[cfg(windows)]
         {
             // println!("[PortableSource] Generating start script...");
-            // Final save after script generation
-            let _ = self._config_manager.save_config();
+            // Конфигурация больше не сохраняется на диск - только сессионные настройки
             self.generate_startup_script(&repo_path, &repo_info)?;
         }
         #[cfg(unix)]
         {
             // println!("[PortableSource] Generating start script (.sh)...");
-            let _ = self._config_manager.save_config();
+            // Конфигурация больше не сохраняется на диск - только сессионные настройки
             self.generate_startup_script_unix(&repo_path, &repo_info)?;
             println!("[PortableSource] Start script generated: {:?}", repo_path.join(format!("start_{}.sh", name.to_lowercase())));
         }
@@ -735,9 +734,7 @@ impl RepositoryInstaller {
     }
 
     fn create_venv_environment(&self, repo_name: &str) -> Result<()> {
-        let cfg = self._config_manager.get_config();
-        if cfg.install_path.as_os_str().is_empty() { return Err(PortableSourceError::installation("Install path not configured")); }
-        let install_path = cfg.install_path.clone();
+        let install_path = self.install_path.clone();
         let envs_path = install_path.join("envs");
         let venv_path = envs_path.join(repo_name);
         if venv_path.exists() { fs::remove_dir_all(&venv_path)?; }
@@ -1316,9 +1313,7 @@ impl RepositoryInstaller {
             (false, None)
         };
 
-        let cfg = self._config_manager.get_config();
-        if cfg.install_path.as_os_str().is_empty() { return Err(PortableSourceError::installation("Install path not configured")); }
-        let install_path = &cfg.install_path;
+        let install_path = &self.install_path;
 
         let bat_file = repo_path.join(format!("start_{}.bat", repo_name));
         let program_args = repo_info.program_args.clone().unwrap_or_default();
@@ -1396,8 +1391,7 @@ impl RepositoryInstaller {
         };
 
         let cfg = self._config_manager.get_config();
-        if cfg.install_path.as_os_str().is_empty() { return Err(PortableSourceError::installation("Install path not configured")); }
-        let install_path = &cfg.install_path;
+        let install_path = &self.install_path;
 
         let sh_file = repo_path.join(format!("start_{}.sh", repo_name));
         let program_args = repo_info.program_args.clone().unwrap_or_default();

@@ -114,32 +114,25 @@ pub struct ConfigManager {
 }
 
 impl ConfigManager {
-    /// Dynamically detect if CUDA is available
+    /// Dynamically detect if CUDA should be installed based on GPU
     pub fn has_cuda(&self) -> bool {
-        let install_path = &self.config.install_path;
-        let cuda_path = install_path.join("ps_env").join("CUDA");
-        cuda_path.exists()
+        // Check if we have an NVIDIA GPU that supports CUDA
+        if let Some(gpu_info) = self.detect_gpu() {
+            let gpu_name_upper = gpu_info.name.to_uppercase();
+            return gpu_name_upper.contains("NVIDIA") || gpu_name_upper.contains("GEFORCE") || gpu_name_upper.contains("RTX");
+        }
+        false
     }
     
-    /// Dynamically get CUDA version if available
+    /// Dynamically get CUDA version based on GPU generation
     pub fn get_cuda_version(&self) -> Option<CudaVersion> {
         if !self.has_cuda() {
             return None;
         }
         
-        // Try to detect CUDA version from installation
-        #[cfg(unix)]
-        {
-            if let Some(version) = detect_cuda_version_from_nvcc() {
-                return Some(version);
-            }
-            if let Some(version) = detect_cuda_version_from_filesystem() {
-                return Some(version);
-            }
-        }
-        
-        // Default to most common version
-        Some(CudaVersion::Cuda124)
+        // Get CUDA version based on GPU generation
+        let generation = self.detect_current_gpu_generation();
+        self.get_recommended_cuda_version(&generation)
     }
     
     /// Dynamically detect GPU generation
@@ -154,14 +147,7 @@ impl ConfigManager {
     /// Get recommended backend based on available hardware
     pub fn get_recommended_backend(&self) -> String {
         if self.has_cuda() {
-            let generation = self.detect_current_gpu_generation();
-            match generation {
-                GpuGeneration::Ampere | GpuGeneration::AdaLovelace | GpuGeneration::Blackwell => {
-                    "cuda,tensorrt".to_string()
-                }
-                GpuGeneration::Turing => "cuda".to_string(),
-                _ => "cpu".to_string(),
-            }
+            "cuda".to_string()
         } else {
             "cpu".to_string()
         }
@@ -290,7 +276,8 @@ impl ConfigManager {
                 .map_err(|e| PortableSourceError::installation(format!("Failed to create install path: {}", e)))?;
         }
         self.config.install_path = path;
-        self.save_config()
+        // Configuration is no longer saved to disk - settings are session-only
+        Ok(())
     }
     
     pub fn detect_gpu_generation(&self, gpu_name: &str) -> GpuGeneration {
@@ -320,8 +307,8 @@ impl ConfigManager {
     
     pub fn detect_gpu(&self) -> Option<GpuInfo> {
         let detector = GpuDetector::new();
-        if let Ok(gpu_infos) = detector.detect_gpu_wmi() {
-            gpu_infos.into_iter().next()
+        if let Ok(gpu_info) = detector.get_best_gpu() {
+            gpu_info
         } else {
             None
         }
@@ -460,7 +447,8 @@ impl ConfigManager {
     
     pub fn mark_environment_setup_completed(&mut self, completed: bool) -> Result<()> {
         self.config.environment_setup_completed = completed;
-        self.save_config()
+        // Configuration is no longer saved to disk - settings are session-only
+        Ok(())
     }
     
     pub fn save_config(&self) -> Result<()> {
