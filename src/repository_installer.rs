@@ -1313,8 +1313,6 @@ impl RepositoryInstaller {
             (false, None)
         };
 
-        let install_path = &self.install_path;
-
         let bat_file = repo_path.join(format!("start_{}.bat", repo_name));
         let program_args = repo_info.program_args.clone().unwrap_or_default();
 
@@ -1327,9 +1325,8 @@ impl RepositoryInstaller {
         
         // Generate base script content without execution command
         let base_content = format!("@echo off\n").to_string() + &format!(
-            "echo Launch {}...\n\nsubst X: {}\nX:\n\nset env_path=X:\\ps_env\nset envs_path=X:\\envs\nset repos_path=X:\\repos\nset ffmpeg_path=%env_path%\\ffmpeg\nset python_path=%envs_path%\\{}\nset python_exe=%python_path%\\python.exe\nset repo_path=%repos_path%\\{}\n\nset tmp_path=X:\\tmp\nset USERPROFILE=%tmp_path%\nset TEMP=%tmp_path%\\Temp\nset TMP=%tmp_path%\\Temp\nset APPDATA=%tmp_path%\\AppData\\Roaming\nset LOCALAPPDATA=%tmp_path%\\AppData\\Local\nset HF_HOME=%repo_path%\\huggingface_home\nset XDG_CACHE_HOME=%tmp_path%\nset HF_DATASETS_CACHE=%HF_HOME%\\datasets\n\nset PYTHONIOENCODING=utf-8\nset PYTHONUNBUFFERED=1\nset PYTHONDONTWRITEBYTECODE=1\n\nREM === CUDA PATHS ===\n{}\nset PATH=%python_path%;%PATH%\nset PATH=%python_path%\\Scripts;%PATH%\nset PATH=%ffmpeg_path%;%PATH%\n\ncd /d \"%repo_path%\"\n",
+            "echo Launch {}...\n\nset \"ROOT_PATH=%~dp0\\..\\..\"\nsubst X: %ROOT_PATH%\nX:\n\nset env_path=X:\\ps_env\nset envs_path=X:\\envs\nset repos_path=X:\\repos\nset ffmpeg_path=%env_path%\\ffmpeg\nset python_path=%envs_path%\\{}\nset python_exe=%python_path%\\python.exe\nset repo_path=%repos_path%\\{}\n\nset tmp_path=X:\\tmp\nset USERPROFILE=%tmp_path%\nset TEMP=%tmp_path%\\Temp\nset TMP=%tmp_path%\\Temp\nset APPDATA=%tmp_path%\\AppData\\Roaming\nset LOCALAPPDATA=%tmp_path%\\AppData\\Local\nset HF_HOME=%repo_path%\\huggingface_home\nset XDG_CACHE_HOME=%tmp_path%\nset HF_DATASETS_CACHE=%HF_HOME%\\datasets\n\nset PYTHONIOENCODING=utf-8\nset PYTHONUNBUFFERED=1\nset PYTHONDONTWRITEBYTECODE=1\n\nREM === CUDA PATHS ===\n{}\nset PATH=%python_path%;%PATH%\nset PATH=%python_path%\\Scripts;%PATH%\nset PATH=%ffmpeg_path%;%PATH%\n\ncd /d \"%repo_path%\"\n",
             repo_name,
-            install_path.display(),
             repo_name,
             repo_name,
             cuda_section,
