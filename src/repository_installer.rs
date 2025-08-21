@@ -798,7 +798,7 @@ impl RepositoryInstaller {
             }
             let res = if uv_available {
                 let mut uv_cmd = self.get_uv_executable(repo_name);
-                uv_cmd.extend(["pip".into(), "install".into(), "--extra-index-url".into(), "https://pypi.ngc.nvidia.com".into(), "-r".into(), tmp.to_string_lossy().to_string()]);
+                uv_cmd.extend(["pip".into(), "install".into(), "-r".into(), tmp.to_string_lossy().to_string()]);
                 info!("UV Command: {:?}", uv_cmd);
                 run_tool_with_env(&self._env_manager, &uv_cmd, Some("Installing regular packages with uv"), repo_path)
             } else {
@@ -822,7 +822,7 @@ impl RepositoryInstaller {
             let use_nightly = self.needs_onnx_nightly();
             if uv_available {
                 let mut uv_cmd = self.get_uv_executable(repo_name);
-                uv_cmd.extend(["pip".into(), "install".into(), "--extra-index-url".into(), "https://pypi.ngc.nvidia.com".into()]);
+                uv_cmd.extend(["pip".into(), "install".into()]);
                 if use_nightly { uv_cmd.push("--pre".into()); }
                 uv_cmd.push(spec);
                 run_tool_with_env_silent(&self._env_manager, &uv_cmd, Some("Installing ONNX package (uv)"), repo_path)?;
@@ -1040,6 +1040,11 @@ impl RepositoryInstaller {
                 
                 // Separate torch and regular packages
                 let mut torch_packages: Vec<String> = Vec::new();
+                let mut onnx_packages: Vec<String> = Vec::new();
+                let mut insightface_packages: Vec<String> = Vec::new();
+                let mut triton_packages: Vec<String> = Vec::new();
+                let mut numpy_packages: Vec<String> = Vec::new();
+                let mut tensorflow_packages: Vec<String> = Vec::new();
                 let mut regular_packages: Vec<String> = Vec::new();
                 
                 if let Some(pkgs) = step.get("packages").and_then(|p| p.as_array()) {
@@ -1049,12 +1054,32 @@ impl RepositoryInstaller {
                             // Check if this is a torch-related package
                             let package_name = mapped.split(|c| "=><!".contains(c)).next().unwrap_or("").to_lowercase();
                             let is_torch_package = ["torch", "torchvision", "torchaudio", "torchtext", "torchdata"].contains(&package_name.as_str());
-                            
+                            let is_onnx_package = ["onnxruntime", "onnxruntime-gpu", "onnxruntime-directml"].contains(&package_name.as_str());
+                            let is_insightface_packages= ["insightface"].contains(&package_name.as_str());
+                            let is_triton_packages = ["triton"].contains(&package_name.as_str());
+                            let is_numpy_package = ["numpy"].contains(&package_name.as_str());
+                            let is_tensorflow_packages = ["tensorflow"].contains(&package_name.as_str());
                             // info!("Package: {} -> mapped: {} -> name: {} -> is_torch: {}", s, mapped, package_name, is_torch_package);
                             
                             if is_torch_package {
                                 torch_packages.push(mapped);
-                            } else {
+                            }
+                            else if is_onnx_package {
+                                onnx_packages.push(mapped);
+                            }
+                            else if is_insightface_packages {
+                                insightface_packages.push(mapped);
+                            }
+                            else if is_triton_packages {
+                                triton_packages.push(mapped);
+                            }
+                            else if is_numpy_package {
+                                numpy_packages.push(mapped);
+                            }
+                            else if is_tensorflow_packages {
+                                tensorflow_packages.push(mapped);
+                            }
+                            else {
                                 regular_packages.push(mapped);
                             }
                         }
@@ -1062,7 +1087,7 @@ impl RepositoryInstaller {
                 }
                 
                 // info!("Torch packages: {:?}", torch_packages);
-                // info!("Regular packages: {:?}", regular_packages);
+                info!("Regular packages: {:?}", regular_packages);
                 
                 // Install regular packages first (without torch index)
                 if !regular_packages.is_empty() {
@@ -1095,6 +1120,36 @@ impl RepositoryInstaller {
                     for p in torch_packages { cmd.push(p); }
                     run_tool_with_env(&self._env_manager, &cmd, None, repo_path)?;
                 }
+                if !onnx_packages.is_empty() {
+                    let mut cmd = if uv_available { self.get_uv_executable(repo_name) } else { self.get_pip_executable(repo_name) };
+                    if uv_available { cmd.extend(["pip".into(), "install".into()]); } else { cmd.push("install".into()); }
+                    for p in onnx_packages { cmd.push(p); }
+                    run_tool_with_env(&self._env_manager, &cmd, None, repo_path)?;
+                }
+                if !triton_packages.is_empty() {
+                    let mut cmd = if uv_available { self.get_uv_executable(repo_name) } else { self.get_pip_executable(repo_name) };
+                    if uv_available { cmd.extend(["pip".into(), "install".into()]); } else { cmd.push("install".into()); }
+                    #[cfg(windows)]
+                    cmd.push("triton-windows".into());
+                    #[cfg(unix)]
+                    cmd.push("triton".into());
+                    run_tool_with_env(&self._env_manager, &cmd, None, repo_path)?;
+                }
+                if !tensorflow_packages.is_empty() {
+                    let mut cmd = if uv_available { self.get_uv_executable(repo_name) } else { self.get_pip_executable(repo_name) };
+                    if uv_available { cmd.extend(["pip".into(), "install".into()]); } else { cmd.push("install".into()); }
+                    cmd.push("tensorflow".into());
+                }
+                if !insightface_packages.is_empty() {
+                    let mut cmd = if uv_available { self.get_uv_executable(repo_name) } else { self.get_pip_executable(repo_name) };
+                    if uv_available { cmd.extend(["pip".into(), "install".into()]); } else { cmd.push("install".into()); }
+                    #[cfg(windows)]
+                    let wheels = ["https://huggingface.co/hanamizuki-ai/pypi-wheels/resolve/main/insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl",
+                                                    "numpy==1.26.4"];
+                    #[cfg(unix)]
+                    let wheels = ["insightface", "numpy==1.26.4"];
+                    cmd.extend(wheels.iter().map(|s| s.to_string()));
+                }
             }
             "torch" => {
                 let mut pip_cmd = self.get_pip_executable(repo_name);
@@ -1118,10 +1173,6 @@ impl RepositoryInstaller {
                 }
                 run_tool_with_env(&self._env_manager, &pip_cmd, Some("Installing ONNX packages"), repo_path)?;
             }
-            "insightface" => {
-                self.handle_insightface_package(repo_name, repo_path)?;
-
-            }
             "triton" => {
                 if let Some(pkgs) = step.get("packages").and_then(|p| p.as_array()) {
                     for p in pkgs { if let Some(s) = p.as_str() {
@@ -1130,6 +1181,10 @@ impl RepositoryInstaller {
                         run_tool_with_env_silent(&self._env_manager, &pip_cmd, Some("Installing Triton package"), repo_path)?;
                     }}
                 }
+            }
+            "insightface" => {
+                self.handle_insightface_package(repo_name, repo_path)?;
+
             }
             _ => { debug!("Unknown step type in server plan: {}", step_type); }
         }
@@ -1523,7 +1578,11 @@ fi
 // ===== Requirements analysis (Rust port of Python logic) =====
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum PackageType { Regular, Torch, Onnxruntime, Insightface, Triton }
+enum PackageType { Regular, 
+    Torch, 
+    Onnxruntime, 
+    Insightface, 
+    Triton }
 
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
@@ -1658,7 +1717,7 @@ impl RepositoryInstaller {
             let wheel = "https://huggingface.co/hanamizuki-ai/pypi-wheels/resolve/main/insightface/insightface-0.7.3-cp311-cp311-win_amd64.whl";
             if uv_available {
                 let mut uv_cmd = self.get_uv_executable(repo_name);
-                uv_cmd.extend(["pip".into(), "install".into(), "--extra-index-url".into(), "https://pypi.ngc.nvidia.com".into(), "-U".into(), wheel.into(), "numpy==1.26.4".into()]);
+                uv_cmd.extend(["pip".into(), "install".into(), "-U".into(), wheel.into(), "numpy==1.26.4".into()]);
                 run_tool_with_env_silent(&self._env_manager, &uv_cmd, Some("Installing insightface + numpy (uv)"), repo_path)
             } else {
                 let mut pip_cmd = self.get_pip_executable(repo_name);
@@ -1670,7 +1729,7 @@ impl RepositoryInstaller {
             // Ставим одновременно insightface и совместимый numpy
             if uv_available {
                 let mut uv_cmd = self.get_uv_executable(repo_name);
-                uv_cmd.extend(["pip".into(), "install".into(), "--extra-index-url".into(), "https://pypi.ngc.nvidia.com".into(), "-U".into(), "insightface".into(), "numpy==1.26.4".into()]);
+                uv_cmd.extend(["pip".into(), "install".into(), "-U".into(), "insightface".into(), "numpy==1.26.4".into()]);
                 run_tool_with_env_silent(&self._env_manager, &uv_cmd, Some("Installing insightface + numpy (uv)"), repo_path)
             } else {
                 let mut pip_cmd = self.get_pip_executable(repo_name);
@@ -1686,7 +1745,7 @@ impl RepositoryInstaller {
         
         if uv_available {
             let mut uv_cmd = self.get_uv_executable(repo_name);
-            uv_cmd.extend(["pip".into(), "install".into(), "--extra-index-url".into(), "https://pypi.ngc.nvidia.com".into(), ".".into()]);
+            uv_cmd.extend(["pip".into(), "install".into(), ".".into()]);
             run_tool_with_env_silent(&self._env_manager, &uv_cmd, Some("Installing repository as package (uv)"), Some(repo_path))
 
         } else {
