@@ -481,6 +481,116 @@ impl<'a> PipManager<'a> {
             let _ = std::fs::remove_file(&tmp);
         }
 
+        // Install ONNX with GPU detection after base requirements
+        let onnx_spec = self.get_onnx_package_spec();
+        let mut onnx_cmd = if uv_available {
+            let mut cmd = self.get_uv_executable(repo_name);
+            cmd.extend(["pip".into(), "install".into()]);
+            cmd
+        } else {
+            let mut cmd = self.get_pip_executable(repo_name);
+            cmd.push("install".into());
+            cmd
+        };
+        
+        // Check if we need --pre flag for nightly builds (Blackwell GPUs)
+        if self.needs_onnx_nightly() {
+            onnx_cmd.push("--pre".into());
+        }
+        
+        onnx_cmd.extend(["--index-strategy".into(), "unsafe-best-match".into()]);
+        onnx_cmd.push(onnx_spec);
+        
+        if let Err(_) = self.command_runner.run_silent(&onnx_cmd, Some("Installing ONNX with GPU support"), repo_path) {
+            // Fallback without --pre if it fails
+            if self.needs_onnx_nightly() {
+                let mut fallback_cmd = if uv_available {
+                    let mut cmd = self.get_uv_executable(repo_name);
+                    cmd.extend(["pip".into(), "install".into()]);
+                    cmd
+                } else {
+                    let mut cmd = self.get_pip_executable(repo_name);
+                    cmd.push("install".into());
+                    cmd
+                };
+                fallback_cmd.extend(["--index-strategy".into(), "unsafe-best-match".into()]);
+                fallback_cmd.push(self.get_onnx_package_spec());
+                let _ = self.command_runner.run_silent(&fallback_cmd, Some("Installing ONNX (fallback)"), repo_path);
+            }
+        }
+
+        // Check if torch is installed and reinstall with CUDA index if needed
+        let mut check_cmd = self.get_pip_executable(repo_name);
+        check_cmd.extend(["show".into(), "torch".into()]);
+        
+        let cfg = self.config_manager.get_config();
+        let venv_path = cfg.install_path.join("envs").join(repo_name);
+        
+        if let Ok(output) = std::process::Command::new(&check_cmd[0])
+            .args(&check_cmd[1..])
+            .env("VIRTUAL_ENV", venv_path)
+            .output() {
+            if output.status.success() {
+                let mut reinstall_cmd = if uv_available {
+                    let mut cmd = self.get_uv_executable(repo_name);
+                    cmd.extend(["pip".into(), "install".into()]);
+                    cmd
+                } else {
+                    let mut cmd = self.get_pip_executable(repo_name);
+                    cmd.push("install".into());
+                    cmd
+                };
+                
+                reinstall_cmd.extend([
+                    "--force-reinstall".into(), 
+                    "--index-url".into(), 
+                    self.get_default_torch_index_url(),
+                    "torch".into(), 
+                    "torchvision".into(), 
+                    "torchaudio".into()
+                ]);
+                
+                if let Err(_) = self.command_runner.run_silent(&reinstall_cmd, Some("Reinstalling torch with CUDA"), repo_path) {
+                    // Fallback to pip if uv fails
+                    if uv_available {
+                        let mut pip_cmd = self.get_pip_executable(repo_name);
+                        pip_cmd.extend([
+                            "install".into(), 
+                            "--force-reinstall".into(), 
+                            "--index-url".into(), 
+                            self.get_default_torch_index_url(),
+                            "torch".into(), 
+                            "torchvision".into(), 
+                            "torchaudio".into()
+                        ]);
+                        let _ = self.command_runner.run_silent(&pip_cmd, Some("Reinstalling torch with CUDA (pip)"), repo_path);
+                    }
+                }
+            }
+        }
+
+        // Install Triton with platform-specific package names
+        let mut triton_cmd = if uv_available {
+            let mut cmd = self.get_uv_executable(repo_name);
+            cmd.extend(["pip".into(), "install".into()]);
+            cmd
+        } else {
+            let mut cmd = self.get_pip_executable(repo_name);
+            cmd.push("install".into());
+            cmd
+        };
+        
+        // Use platform-specific triton package names
+        #[cfg(windows)]
+        triton_cmd.push("triton-windows".into());
+        #[cfg(not(windows))]
+        triton_cmd.push("triton".into());
+        
+        let _ = self.command_runner.run_silent(&triton_cmd, Some("Installing Triton"), repo_path);
+
+        // Install InsightFace at the very end, after torch reinstallation
+        self.handle_insightface_package(repo_name, repo_path)?;
+
         Ok(())
     }
 
@@ -615,71 +725,9 @@ impl<'a> PipManager<'a> {
     pub fn execute_server_installation_plan(&self, repo_name: &str, plan: &JsonValue, repo_path: Option<&Path>) -> Result<bool> {
         let steps = plan.get("steps").and_then(|s| s.as_array()).cloned().unwrap_or_default();
         
-        // First pass: install all packages except insightface
+        // Process all installation steps
         for step in &steps {
-            let step_type = step.get("type").and_then(|s| s.as_str()).unwrap_or("");
-            if step_type != "insightface" {
-                self.process_server_step(repo_name, step, repo_path)?;
-            }
-        }
-        
-        // Check if torch is installed and reinstall with CUDA index if needed
-        let mut check_cmd = self.get_pip_executable(repo_name);
-        check_cmd.extend(["show".into(), "torch".into()]);
-        
-        let cfg = self.config_manager.get_config();
-        let venv_path = cfg.install_path.join("envs").join(repo_name);
-        
-        if let Ok(output) = std::process::Command::new(&check_cmd[0])
-            .args(&check_cmd[1..])
-            .env("VIRTUAL_ENV", venv_path)
-            .output() {
-            if output.status.success() {
-                let uv_available = self.install_uv_in_venv(repo_name).unwrap_or(false);
-                let mut reinstall_cmd = if uv_available {
-                    let mut cmd = self.get_uv_executable(repo_name);
-                    cmd.extend(["pip".into(), "install".into()]);
-                    cmd
-                } else {
-                    let mut cmd = self.get_pip_executable(repo_name);
-                    cmd.push("install".into());
-                    cmd
-                };
-                
-                reinstall_cmd.extend([
-                    "--force-reinstall".into(), 
-                    "--index-url".into(), 
-                    self.get_default_torch_index_url(),
-                    "torch".into(), 
-                    "torchvision".into(), 
-                    "torchaudio".into()
-                ]);
-                
-                if let Err(_) = self.command_runner.run_silent(&reinstall_cmd, Some("Reinstalling torch with CUDA"), repo_path) {
-                    // Fallback to pip if uv fails
-                    if uv_available {
-                        let mut pip_cmd = self.get_pip_executable(repo_name);
-                        pip_cmd.extend([
-                            "install".into(), 
-                            "--force-reinstall".into(), 
-                            "--index-url".into(), 
-                            self.get_default_torch_index_url(),
-                            "torch".into(), 
-                            "torchvision".into(), 
-                            "torchaudio".into()
-                        ]);
-                        self.command_runner.run_silent(&pip_cmd, Some("Reinstalling torch with CUDA (pip)"), repo_path)?;
-                    }
-                }
-            }
-        }
-        
-        // Second pass: install insightface at the very end
-        for step in &steps {
-            let step_type = step.get("type").and_then(|s| s.as_str()).unwrap_or("");
-            if step_type == "insightface" {
-                self.handle_insightface_package(repo_name, repo_path)?;
-            }
+            self.process_server_step(repo_name, step, repo_path)?;
         }
         
         Ok(true)
@@ -700,19 +748,9 @@ impl<'a> PipManager<'a> {
                 }
             }
             "pip_install" | "regular" | "regular_only" => {
-                self.handle_pip_install_step(repo_name, step, repo_path)?;
-            }
-            "torch" => {
-                self.handle_torch_step(repo_name, step, repo_path)?;
-            }
-            "onnxruntime" => {
-                self.handle_onnx_step(repo_name, step, repo_path)?;
-            }
-            "triton" => {
-                self.handle_triton_step(repo_name, step, repo_path)?;
-            }
-            "insightface" => {
-                self.handle_insightface_package(repo_name, repo_path)?;
+                // For server plans, we let install_requirements_with_uv_or_pip handle everything
+                // Just log that this step type is handled by requirements installation
+                debug!("Step type {} will be handled by requirements installation", step_type);
             }
             _ => {
                 debug!("Unknown step type in server plan: {}", step_type);
