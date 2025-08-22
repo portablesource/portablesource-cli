@@ -466,19 +466,54 @@ impl<'a> PipManager<'a> {
             requirements.to_path_buf()
         };
 
+        // Filter out packages that we install separately from requirements
+        let filtered_req = if repo_path.is_some() {
+            let filtered_path = tmp.parent().unwrap().join("requirements_filtered.txt");
+            let content = std::fs::read_to_string(&tmp)?;
+            let filtered_content = content
+                .lines()
+                .filter(|line| {
+                    let line_lower = line.trim().to_lowercase();
+                    // Skip empty lines and comments
+                    if line_lower.is_empty() || line_lower.starts_with('#') {
+                        return true;
+                    }
+                    // Filter out packages we install separately
+                    !line_lower.starts_with("insightface") && 
+                    !line_lower.contains("insightface") &&
+                    !line_lower.starts_with("onnxruntime") && 
+                    !line_lower.contains("onnxruntime") &&
+                    !line_lower.starts_with("torch") && 
+                    !line_lower.contains("torch") &&
+                    !line_lower.starts_with("triton") && 
+                    !line_lower.contains("triton")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            std::fs::write(&filtered_path, filtered_content)?;
+            filtered_path
+        } else {
+            tmp.clone()
+        };
+
         if uv_available {
             let mut uv_cmd = self.get_uv_executable(repo_name);
-            uv_cmd.extend(["pip".into(), "install".into(), "-r".into(), tmp.to_string_lossy().to_string()]);
+            uv_cmd.extend(["pip".into(), "install".into(), "-r".into(), filtered_req.to_string_lossy().to_string()]);
             self.command_runner.run(&uv_cmd, Some("Installing requirements (uv)"), repo_path)?;
         } else {
             let mut pip_cmd = self.get_pip_executable(repo_name);
-            pip_cmd.extend(["install".into(), "-r".into(), tmp.to_string_lossy().to_string()]);
+            pip_cmd.extend(["install".into(), "-r".into(), filtered_req.to_string_lossy().to_string()]);
             self.command_runner.run(&pip_cmd, Some("Installing requirements (pip)"), repo_path)?;
         }
 
-        // Clean up temporary file if created
-        if repo_path.is_some() && tmp.file_name() == Some(std::ffi::OsStr::new("requirements_tmp.txt")) {
-            let _ = std::fs::remove_file(&tmp);
+        // Clean up temporary files if created
+        if repo_path.is_some() {
+            if tmp.file_name() == Some(std::ffi::OsStr::new("requirements_tmp.txt")) {
+                let _ = std::fs::remove_file(&tmp);
+            }
+            if filtered_req.file_name() == Some(std::ffi::OsStr::new("requirements_filtered.txt")) {
+                let _ = std::fs::remove_file(&filtered_req);
+            }
         }
 
         // Install ONNX with GPU detection after base requirements
@@ -501,7 +536,7 @@ impl<'a> PipManager<'a> {
         onnx_cmd.extend(["--index-strategy".into(), "unsafe-best-match".into()]);
         onnx_cmd.push(onnx_spec);
         
-        if let Err(_) = self.command_runner.run_silent(&onnx_cmd, Some("Installing ONNX with GPU support"), repo_path) {
+        if let Err(_) = self.command_runner.run(&onnx_cmd, Some("Installing ONNX with GPU support"), repo_path) {
             // Fallback without --pre if it fails
             if self.needs_onnx_nightly() {
                 let mut fallback_cmd = if uv_available {
@@ -515,7 +550,7 @@ impl<'a> PipManager<'a> {
                 };
                 fallback_cmd.extend(["--index-strategy".into(), "unsafe-best-match".into()]);
                 fallback_cmd.push(self.get_onnx_package_spec());
-                let _ = self.command_runner.run_silent(&fallback_cmd, Some("Installing ONNX (fallback)"), repo_path);
+                let _ = self.command_runner.run(&fallback_cmd, Some("Installing ONNX (fallback)"), repo_path);
             }
         }
 
@@ -586,10 +621,21 @@ impl<'a> PipManager<'a> {
         #[cfg(not(windows))]
         triton_cmd.push("triton".into());
         
-        let _ = self.command_runner.run_silent(&triton_cmd, Some("Installing Triton"), repo_path);
+        let _ = self.command_runner.run(&triton_cmd, Some("Installing Triton"), repo_path);
 
-        // Install InsightFace at the very end, after torch reinstallation
-        self.handle_insightface_package(repo_name, repo_path)?;
+        // Check if InsightFace was in the original requirements
+        let needs_insightface = std::fs::read_to_string(&tmp)?
+            .lines()
+            .any(|line| {
+                let line_lower = line.trim().to_lowercase();
+                line_lower.starts_with("insightface") || 
+                line_lower.contains("insightface")
+            });
+
+        // Install InsightFace only if it was requested in requirements
+        if needs_insightface {
+            self.handle_insightface_package(repo_name, repo_path)?;
+        }
 
         Ok(())
     }
@@ -926,76 +972,8 @@ impl<'a> PipManager<'a> {
         Ok(())
     }
 
-    /// Handle torch-specific installation step
-    fn handle_torch_step(&self, repo_name: &str, step: &JsonValue, repo_path: Option<&Path>) -> Result<()> {
-        let mut pip_cmd = self.get_pip_executable(repo_name);
-        pip_cmd.extend(["install".into(), "--force-reinstall".into()]);
-        
-        // Add torch index URL
-        if let Some(idx) = step.get("torch_index_url").and_then(|s| s.as_str()) {
-            pip_cmd.extend(["--index-url".into(), idx.into()]);
-        } else if let Some(idx) = self.get_default_torch_index_url_opt() { 
-            pip_cmd.extend(["--index-url".into(), idx]); 
-        }
-        
-        if let Some(pkgs) = step.get("packages").and_then(|p| p.as_array()) {
-            for p in pkgs { 
-                if let Some(s) = p.as_str() { 
-                    pip_cmd.push(s.to_string()); 
-                } 
-            }
-        }
-        
-        self.command_runner.run(&pip_cmd, Some("Installing PyTorch packages"), repo_path)
-    }
-
-    /// Handle onnxruntime-specific installation step
-    fn handle_onnx_step(&self, repo_name: &str, step: &JsonValue, repo_path: Option<&Path>) -> Result<()> {
-        let mut pip_cmd = self.get_pip_executable(repo_name);
-        pip_cmd.push("install".into());
-        
-        if let Some(pkgs) = step.get("packages").and_then(|p| p.as_array()) {
-            for p in pkgs { 
-                if let Some(s) = p.as_str() { 
-                    pip_cmd.push(self.apply_onnx_gpu_detection(s)); 
-                } 
-            }
-        } else {
-            pip_cmd.push(self.apply_onnx_gpu_detection("onnxruntime"));
-        }
-        
-        self.command_runner.run(&pip_cmd, Some("Installing ONNX packages"), repo_path)
-    }
-
-    /// Handle triton-specific installation step
-    fn handle_triton_step(&self, repo_name: &str, step: &JsonValue, repo_path: Option<&Path>) -> Result<()> {
-        if let Some(pkgs) = step.get("packages").and_then(|p| p.as_array()) {
-            for p in pkgs { 
-                if let Some(s) = p.as_str() {
-                    let mut pip_cmd = self.get_pip_executable(repo_name);
-                    pip_cmd.extend(["install".into(), s.to_string()]);
-                    self.command_runner.run_silent(&pip_cmd, Some("Installing Triton package"), repo_path)?;
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// Handle insightface package installation with Windows wheel support
     pub fn handle_insightface_package(&self, repo_name: &str, repo_path: Option<&Path>) -> Result<()> {
-        // Check if insightface is already installed
-        let python_exe = self.get_python_in_env(repo_name);
-        let check_cmd = vec![
-            python_exe.to_string_lossy().to_string(), 
-            "-c".to_string(), 
-            "import insightface; print('installed')".to_string()
-        ];
-        
-        if self.command_runner.run_silent(&check_cmd, None, repo_path).is_ok() {
-            info!("Insightface already installed, skipping");
-            return Ok(());
-        }
-        
         #[cfg(windows)]
         {
             let uv_available = self.install_uv_in_venv(repo_name).unwrap_or(false);
@@ -1007,20 +985,22 @@ impl<'a> PipManager<'a> {
                 uv_cmd.extend([
                     "pip".into(), 
                     "install".into(), 
+                    "--force-reinstall".into(),
                     "-U".into(),
                     wheel.into(),
                     "numpy==1.26.4".into()
                 ]);
-                self.command_runner.run_silent(&uv_cmd, Some("Installing insightface + numpy (uv)"), repo_path)
+                self.command_runner.run(&uv_cmd, Some("Installing insightface + numpy (uv)"), repo_path)
             } else {
                 let mut pip_cmd = self.get_pip_executable(repo_name);
                 pip_cmd.extend([
                     "install".into(), 
+                    "--force-reinstall".into(),
                     "-U".into(),
                     wheel.into(),
                     "numpy==1.26.4".into()
                 ]);
-                self.command_runner.run_silent(&pip_cmd, Some("Installing insightface + numpy (pip)"), repo_path)
+                self.command_runner.run(&pip_cmd, Some("Installing insightface + numpy (pip)"), repo_path)
             }
         }
         
@@ -1033,20 +1013,22 @@ impl<'a> PipManager<'a> {
                 uv_cmd.extend([
                     "pip".into(), 
                     "install".into(), 
+                    "--force-reinstall".into(),
                     "-U".into(), 
                     "insightface".into(), 
                     "numpy==1.26.4".into()
                 ]);
-                self.command_runner.run_silent(&uv_cmd, Some("Installing insightface + numpy (uv)"), repo_path)
+                self.command_runner.run(&uv_cmd, Some("Installing insightface + numpy (uv)"), repo_path)
             } else {
                 let mut pip_cmd = self.get_pip_executable(repo_name);
                 pip_cmd.extend([
                     "install".into(), 
+                    "--force-reinstall".into(),
                     "-U".into(), 
                     "insightface".into(), 
                     "numpy==1.26.4".into()
                 ]);
-                self.command_runner.run_silent(&pip_cmd, Some("Installing insightface + numpy (pip)"), repo_path)
+                self.command_runner.run(&pip_cmd, Some("Installing insightface + numpy (pip)"), repo_path)
             }
         }
     }
