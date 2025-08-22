@@ -8,6 +8,7 @@ pub mod config;
 pub mod gpu;
 pub mod utils;
 pub mod envs_manager;
+pub mod installer;
 pub mod repository_installer;
 pub mod error;
 
