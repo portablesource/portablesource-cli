@@ -474,9 +474,10 @@ pub fn setup_micromamba_base_env(install_path: &Path, cuda_version: Option<crate
             // Fallback: try install TensorRT via pip from NVIDIA PyPI if conda TRT missing
             let py = base_prefix.join("bin").join("python");
             if py.exists() {
-                let pip_status = std::process::Command::new(&py)
-                    .args(["-m","pip","install","--extra-index-url","https://pypi.nvidia.com","nvidia-tensorrt"])
-                    .status()
+                let mut cmd = std::process::Command::new(&py);
+                cmd.args(["-m","pip","install","--extra-index-url","https://pypi.nvidia.com","nvidia-tensorrt"]);
+                
+                let pip_status = cmd.status()
                     .map_err(|e| PortableSourceError::environment(format!("pip fallback failed: {}", e)))?;
                 if !pip_status.success() {
                     return Err(PortableSourceError::environment("CUDA runtime verification failed: libcudart not found"));
@@ -528,9 +529,19 @@ pub fn check_msvc_build_tools_installed() -> bool {
     }
     
     // Also check if cl.exe is in PATH or registry Instances
-    Command::new("cl")
-        .arg("/?")
-        .output()
+    let mut cmd = Command::new("cl");
+    cmd.arg("/?")
+       .stdout(std::process::Stdio::null())
+       .stderr(std::process::Stdio::null());
+    
+    // Hide console window on Windows
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    
+    cmd.output()
         .map(|output| output.status.success())
         .unwrap_or(false)
         || check_msvc_registry()

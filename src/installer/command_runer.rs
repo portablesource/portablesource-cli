@@ -7,6 +7,9 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 // Enum для типизации команд. Он может остаться здесь.
 #[derive(Clone, Copy, Debug)]
 pub enum CommandType {
@@ -68,6 +71,11 @@ impl<'a> CommandRunner<'a> {
         }
         let envs = self.env_manager.setup_environment_for_subprocess();
         cmd.envs(envs);
+        
+        // Hide console window on Windows
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        
         cmd
     }
     

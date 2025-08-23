@@ -446,6 +446,14 @@ impl PortableEnvironmentManager {
             let mut cmd = Command::new("cmd");
             cmd.arg("/C").arg(joined);
             if let Some(dir) = cwd { cmd.current_dir(dir); }
+            
+            // Hide console window on Windows
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            }
+            
             cmd.envs(&envs).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
         } else {
             let mut cmd = Command::new(&command[0]);
@@ -876,9 +884,17 @@ impl PortableEnvironmentManager {
         
         // Configure Git to use OpenSSL backend to prevent SSL/TLS issues
         if let Some(git_exe) = self.get_git_executable() {
-            let output = Command::new(git_exe)
-                .args(["config", "--global", "http.sslBackend", "openssl"])
-                .output();
+            let mut cmd = Command::new(git_exe);
+            cmd.args(["config", "--global", "http.sslBackend", "openssl"]);
+            
+            // Hide console window on Windows
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            }
+            
+            let output = cmd.output();
             
             match output {
                 Ok(result) if result.status.success() => {
@@ -1141,9 +1157,17 @@ impl PortableEnvironmentManager {
         // Check if git is available first
         if let Some(git_exe) = self.get_git_executable() {
             // Simply run 'git lfs install' command
-            let output = Command::new(git_exe)
-                .args(["lfs", "install"])
-                .output()
+            let mut cmd = Command::new(git_exe);
+            cmd.args(["lfs", "install"]);
+            
+            // Hide console window on Windows
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            }
+            
+            let output = cmd.output()
                 .map_err(|e| PortableSourceError::environment(format!("Failed to run git lfs install: {}", e)))?;
             
             if output.status.success() {

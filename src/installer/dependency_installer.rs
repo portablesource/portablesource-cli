@@ -127,25 +127,53 @@ impl<'a> DependencyInstaller<'a> {
             #[cfg(not(unix))]
             let py_bin = mamba_py; // unreachable, just to satisfy type
             
-            let status = std::process::Command::new(&py_bin)
-                .args(["-m", "venv", venv_path.to_string_lossy().as_ref()])
-                .status()
-                .map_err(|e| PortableSourceError::environment(format!("Failed to create venv: {}", e)))?;
+            let status = {
+                let mut cmd = std::process::Command::new(&py_bin);
+                cmd.args(["-m", "venv", venv_path.to_string_lossy().as_ref()]);
+                
+                // Hide console window on Windows
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+                }
+                
+                cmd.status()
+                    .map_err(|e| PortableSourceError::environment(format!("Failed to create venv: {}", e)))?
+            };
             if !status.success() {
                 return Err(PortableSourceError::environment("python -m venv failed"));
             }
             
             // Ensure pip is present in the new venv
             let venv_py = venv_path.join("bin").join("python");
-            let pip_ok = std::process::Command::new(&venv_py)
-                .args(["-m", "pip", "--version"]) 
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
+            let pip_ok = {
+                let mut cmd = std::process::Command::new(&venv_py);
+                cmd.args(["-m", "pip", "--version"]);
+                
+                // Hide console window on Windows
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+                }
+                
+                cmd.status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            };
             if !pip_ok {
-                let _ = std::process::Command::new(&venv_py)
-                    .args(["-m", "ensurepip", "-U"]) 
-                    .status();
+                let mut cmd = std::process::Command::new(&venv_py);
+                cmd.args(["-m", "ensurepip", "-U"]);
+                
+                // Hide console window on Windows
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+                }
+                
+                let _ = cmd.status();
             }
         }
         Ok(())
