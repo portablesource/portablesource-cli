@@ -9,6 +9,7 @@ use log::{info, debug};
 use std::path::{Path, PathBuf};
 use std::fs;
 use std::io::Write;
+use std::collections::HashSet;
 use serde_json::Value as JsonValue;
 use toml::Value as TomlValue;
 
@@ -253,17 +254,29 @@ impl<'a> PipManager<'a> {
             return Ok(true);
         }
         
-        // Install uv via pip
+        // Install uv via pip with visible output
         let mut pip_cmd = self.get_pip_executable(repo_name);
         pip_cmd.extend(["install".into(), "uv".into()]);
-        let _ = self.command_runner.run_silent(&pip_cmd, Some("Installing uv"), None);
+        
+        if let Err(e) = self.command_runner.run(&pip_cmd, Some("Installing uv"), None) {
+            debug!("Failed to install uv: {}", e);
+            return Ok(false);
+        }
         
         // Verify installation
-        Ok(self.command_runner.run_silent(
+        let uv_works = self.command_runner.run_silent(
             &vec![uv_cmd[0].clone(), uv_cmd[1].clone(), uv_cmd[2].clone(), "--version".into()], 
             None, 
             None
-        ).is_ok())
+        ).is_ok();
+        
+        if uv_works {
+            info!("UV installed successfully in {}", repo_name);
+        } else {
+            debug!("UV installation verification failed for {}", repo_name);
+        }
+        
+        Ok(uv_works)
     }
 
     /// Find requirements files in repository, checking specific files first, then using glob patterns
@@ -794,9 +807,10 @@ impl<'a> PipManager<'a> {
                 }
             }
             "pip_install" | "regular" | "regular_only" => {
-                // For server plans, we let install_requirements_with_uv_or_pip handle everything
-                // Just log that this step type is handled by requirements installation
-                debug!("Step type {} will be handled by requirements installation", step_type);
+                // Handle pip installation steps with package analysis and UV installation
+                info!("Processing {} step with {} packages", step_type, 
+                     step.get("packages").and_then(|p| p.as_array()).map(|a| a.len()).unwrap_or(0));
+                self.handle_pip_install_step(repo_name, step, repo_path)?;
             }
             _ => {
                 debug!("Unknown step type in server plan: {}", step_type);
@@ -905,10 +919,35 @@ impl<'a> PipManager<'a> {
                 .unwrap_or_else(|| self.get_default_torch_index_url());
             
             cmd.extend(["--index-url".into(), torch_index]);
-            cmd.extend(["--index-strategy".into(), "unsafe-best-match".into()]);
+            
+            // Complete torch package trio - ensure torch, torchvision, torchaudio are all present
+            let torch_names: std::collections::HashSet<String> = plan.torch_packages.iter().map(|p| p.name.clone()).collect();
+            let mut final_packages = plan.torch_packages.clone();
+            
+            // Add missing torch packages to complete the trio
+            if torch_names.contains("torch") {
+                if !torch_names.contains("torchvision") {
+                    final_packages.push(PackageInfo {
+                        name: "torchvision".to_string(),
+                        version: None,
+                        extras: None,
+                        package_type: PackageType::Torch,
+                        original_line: "torchvision".to_string(),
+                    });
+                }
+                if !torch_names.contains("torchaudio") {
+                    final_packages.push(PackageInfo {
+                        name: "torchaudio".to_string(),
+                        version: None,
+                        extras: None,
+                        package_type: PackageType::Torch,
+                        original_line: "torchaudio".to_string(),
+                    });
+                }
+            }
             
             // Add torch package specs with versions
-            for pkg in &plan.torch_packages {
+            for pkg in &final_packages {
                 cmd.push(pkg.to_string());
             }
             
@@ -931,8 +970,6 @@ impl<'a> PipManager<'a> {
             if self.needs_onnx_nightly() {
                 cmd.push("--pre".into());
             }
-            
-            cmd.extend(["--index-strategy".into(), "unsafe-best-match".into()]);
             
             // Apply GPU detection to onnx packages and add to command
             for pkg in &plan.onnx_packages {
