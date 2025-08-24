@@ -32,10 +32,17 @@ impl GpuDetector {
     
     /// Detect NVIDIA GPU using nvidia-smi
     pub fn detect_nvidia_gpu(&self) -> Result<Option<GpuInfo>> {
-        let output = Command::new("nvidia-smi")
-            .args(&["--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits"])
-            .output();
-            
+        let mut cmd = Command::new("nvidia-smi");
+        cmd.args(&["--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits"]);
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+
+        let output = cmd.output();
+
         match output {
             Ok(output) if output.status.success() => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -102,9 +109,13 @@ impl GpuDetector {
             }
 
             // Fallback: WMIC CLI
-            let output = Command::new("wmic")
-                .args(&["path", "win32_VideoController", "get", "name,AdapterRAM,DriverVersion", "/format:csv"])
-                .output();
+            let mut cmd = Command::new("wmic");
+            cmd.args(&["path", "win32_VideoController", "get", "name,AdapterRAM,DriverVersion", "/format:csv"]);
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x08000000);
+            }
+            let output = cmd.output();
             match output {
                 Ok(output) if output.status.success() => {
                     let stdout = String::from_utf8_lossy(&output.stdout);

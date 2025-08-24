@@ -441,26 +441,31 @@ impl PortableEnvironmentManager {
 
     fn run_in_activated_environment(&self, command: &[String], cwd: Option<&Path>) -> io::Result<std::process::Output> {
         let envs = self.setup_environment_for_subprocess();
-        if cfg!(windows) {
-            let joined = command.iter().map(|a| if a.contains(' ') { format!("\"{}\"", a) } else { a.clone() }).collect::<Vec<_>>().join(" ");
-            let mut cmd = Command::new("cmd");
-            cmd.arg("/C").arg(joined);
-            if let Some(dir) = cwd { cmd.current_dir(dir); }
-            
-            // Hide console window on Windows
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-            }
-            
-            cmd.envs(&envs).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
-        } else {
-            let mut cmd = Command::new(&command[0]);
-            cmd.args(&command[1..]);
-            if let Some(dir) = cwd { cmd.current_dir(dir); }
-            cmd.envs(&envs).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+    
+        // Универсальная логика для всех ОС
+        if command.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Command cannot be empty"));
         }
+
+        let mut cmd = Command::new(&command[0]); // 1. Запускаем саму программу напрямую (например, "git.exe")
+        cmd.args(&command[1..]);                 // 2. Передаем ей аргументы
+
+        if let Some(dir) = cwd { 
+            cmd.current_dir(dir); 
+        }
+    
+        // Применяем флаг скрытия окна ТОЛЬКО на Windows
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // 3. Прячем окно для "git.exe", а не для "cmd.exe"
+        }
+    
+        // Остальная часть функции без изменений
+        cmd.envs(&envs)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
     }
 
     fn extract_version_from_output(&self, tool_name: &str, output: &str) -> String {

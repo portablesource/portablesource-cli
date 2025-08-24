@@ -946,9 +946,15 @@ pub fn get_system_info() -> Result<String> {
     let py_ok = which::which("python3").is_ok() || which::which("python").is_ok();
     let pip_ok = which::which("pip3").is_ok() || {
         let py = if which::which("python3").is_ok() { "python3" } else { "python" };
-        std::process::Command::new(py)
-            .args(["-m", "pip", "--version"])
-            .status()
+        let mut cmd = std::process::Command::new(py);
+        cmd.args(["-m", "pip", "--version"]);
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        
+        cmd.status()
             .map(|s| s.success())
             .unwrap_or(false)
     };
@@ -975,6 +981,13 @@ pub fn execute_command(command: &str, args: &[&str], working_dir: Option<&Path>)
         cmd.current_dir(dir);
     }
     
+    // ИСПРАВЛЕНО ЗДЕСЬ
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
     let output = cmd.output()
         .map_err(|e| PortableSourceError::command(
             format!("Failed to execute command '{}': {}", command, e)
