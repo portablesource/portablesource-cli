@@ -1,8 +1,7 @@
 //! Dependency installer module for managing Python environments and package installations.
 
-use crate::installer::{CommandRunner, GitManager, PipManager, ServerClient};
-use crate::envs_manager::PortableEnvironmentManager;
-use crate::config::ConfigManager;
+use crate::installer::{PipManager, ServerClient};
+
 use crate::PortableSourceError;
 use crate::Result;
 use log::{info, warn};
@@ -11,31 +10,19 @@ use std::fs;
 use serde_json::Value as JsonValue;
 
 pub struct DependencyInstaller<'a> {
-    command_runner: &'a CommandRunner<'a>,
-    git_manager: &'a GitManager<'a>,
     pip_manager: &'a PipManager<'a>,
-    env_manager: &'a PortableEnvironmentManager,
-    config_manager: &'a ConfigManager,
     server_client: &'a ServerClient,
     install_path: PathBuf,
 }
 
 impl<'a> DependencyInstaller<'a> {
     pub fn new(
-        command_runner: &'a CommandRunner,
-        git_manager: &'a GitManager,
         pip_manager: &'a PipManager,
-        env_manager: &'a PortableEnvironmentManager,
-        config_manager: &'a ConfigManager,
         server_client: &'a ServerClient,
         install_path: PathBuf,
     ) -> Self {
         Self {
-            command_runner,
-            git_manager,
             pip_manager,
-            env_manager,
-            config_manager,
             server_client,
             install_path,
         }

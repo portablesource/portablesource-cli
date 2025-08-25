@@ -1,7 +1,6 @@
 //! Pip manager for handling Python package installations with pip/uv support.
 
 use crate::installer::command_runer::CommandRunner;
-use crate::envs_manager::PortableEnvironmentManager;
 use crate::config::ConfigManager;
 use crate::PortableSourceError;
 use crate::Result;
@@ -9,7 +8,6 @@ use log::{info, debug};
 use std::path::{Path, PathBuf};
 use std::fs;
 use std::io::Write;
-use std::collections::HashSet;
 use serde_json::Value as JsonValue;
 use toml::Value as TomlValue;
 
@@ -26,9 +24,7 @@ enum PackageType {
 struct PackageInfo {
     name: String,
     version: Option<String>,
-    extras: Option<Vec<String>>,
     package_type: PackageType,
-    original_line: String,
 }
 
 impl ToString for PackageInfo {
@@ -61,18 +57,6 @@ impl<'a> RequirementsAnalyzer<'a> {
         Self { config_manager }
     }
 
-    fn analyze_requirements(&self, requirements_path: &Path) -> Vec<PackageInfo> {
-        let mut packages = Vec::new();
-        if let Ok(content) = fs::read_to_string(requirements_path) {
-            for line in content.lines() {
-                if let Some(pkg) = self.parse_requirement_line(line) {
-                    packages.push(pkg);
-                }
-            }
-        }
-        packages
-    }
-
     fn parse_requirement_line(&self, line_in: &str) -> Option<PackageInfo> {
         let line = line_in.split('#').next().unwrap_or("").trim().to_string();
         if line.is_empty() || line.starts_with('-') || line.contains("--index-url") || line.contains("--extra-index-url") {
@@ -87,11 +71,10 @@ impl<'a> RequirementsAnalyzer<'a> {
             (line.clone(), None)
         };
         
-        let (name, extras_opt) = if let Some(start) = name_part.find('[') {
-            let end = name_part.find(']').unwrap_or(name_part.len());
-            (name_part[..start].to_string(), Some(name_part[start+1..end].split(',').map(|s| s.to_string()).collect()))
+        let name = if let Some(start) = name_part.find('[') {
+            name_part[..start].to_string()
         } else {
-            (name_part, None)
+            name_part
         };
         
         let lname = name.to_lowercase();
@@ -110,9 +93,7 @@ impl<'a> RequirementsAnalyzer<'a> {
         Some(PackageInfo {
             name: lname,
             version,
-            extras: extras_opt,
             package_type,
-            original_line: line_in.to_string(),
         })
     }
 
@@ -191,19 +172,16 @@ impl<'a> RequirementsAnalyzer<'a> {
 
 pub struct PipManager<'a> {
     command_runner: &'a CommandRunner<'a>,
-    env_manager: &'a PortableEnvironmentManager,
     config_manager: &'a ConfigManager,
 }
 
 impl<'a> PipManager<'a> {
     pub fn new(
         command_runner: &'a CommandRunner,
-        env_manager: &'a PortableEnvironmentManager,
         config_manager: &'a ConfigManager,
     ) -> Self {
         Self {
             command_runner,
-            env_manager,
             config_manager,
         }
     }
@@ -930,18 +908,14 @@ impl<'a> PipManager<'a> {
                     final_packages.push(PackageInfo {
                         name: "torchvision".to_string(),
                         version: None,
-                        extras: None,
                         package_type: PackageType::Torch,
-                        original_line: "torchvision".to_string(),
                     });
                 }
                 if !torch_names.contains("torchaudio") {
                     final_packages.push(PackageInfo {
                         name: "torchaudio".to_string(),
                         version: None,
-                        extras: None,
                         package_type: PackageType::Torch,
-                        original_line: "torchaudio".to_string(),
                     });
                 }
             }

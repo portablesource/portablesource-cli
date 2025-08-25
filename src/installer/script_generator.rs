@@ -77,44 +77,88 @@ impl<'a> ScriptGenerator<'a> {
         };
         
         // Generate base script content without execution command
-        let base_content = format!("@echo off\n") + &format!(
-            "echo Launch {}...\n\nREM Check if X: drive exists and unmount it\nif exist X:\\ (\n    echo Unmounting existing X: drive...\n    subst X: /D >nul 2>&1\n)\n\nset \"ROOT_PATH=%~dp0\\..\\..\"\nsubst X: %ROOT_PATH%\nX:\n\nset env_path=X:\\ps_env\nset envs_path=X:\\envs\nset repos_path=X:\\repos\nset ffmpeg_path=%env_path%\\ffmpeg\nset git_path=%env_path%\\git\\bin\nset python_path=%envs_path%\\{}\nset python_exe=%python_path%\\python.exe\nset repo_path=%repos_path%\\{}\n\nset tmp_path=X:\\tmp\nset USERPROFILE=%tmp_path%\nset TEMP=%tmp_path%\\Temp\nset TMP=%tmp_path%\\Temp\nset APPDATA=%tmp_path%\\AppData\\Roaming\nset LOCALAPPDATA=%tmp_path%\\AppData\\Local\nset HF_HOME=%repo_path%\\huggingface_home\nset XDG_CACHE_HOME=%tmp_path%\nset HF_DATASETS_CACHE=%HF_HOME%\\datasets\n\nset PYTHONIOENCODING=utf-8\nset PYTHONUNBUFFERED=1\nset PYTHONDONTWRITEBYTECODE=1\n\nREM === CUDA PATHS ===\n{}\nset PATH=%python_path%;%PATH%\nset PATH=%python_path%\\Scripts;%PATH%\nset PATH=%git_path%;%PATH%\nset PATH=%ffmpeg_path%;%PATH%\n\ncd /d \"%repo_path%\"\n",
-            repo_name,
-            repo_name,
-            repo_name,
-            cuda_section,
-        );
+        let use_virtual_drive = self.needs_virtual_drive(&self.install_path);
+        
+        let base_content = if use_virtual_drive {
+            // Use virtual drive for complex paths
+            format!("@echo off\n") + &format!(
+                "echo Launch {}...\n\nREM Check if X: drive exists and unmount it\nif exist X:\\ (\n    echo Unmounting existing X: drive...\n    subst X: /D >nul 2>&1\n)\n\nset \"ROOT_PATH=%~dp0\\..\\..\\\"\nsubst X: \"%ROOT_PATH%\"\nX:\n\nset base_path=X:\nset env_path=%base_path%\\ps_env\nset envs_path=%base_path%\\envs\nset repos_path=%base_path%\\repos\nset ffmpeg_path=%env_path%\\ffmpeg\nset git_path=%env_path%\\git\\bin\nset python_path=%envs_path%\\{}\nset python_exe=%python_path%\\python.exe\nset repo_path=%repos_path%\\{}\n\nset tmp_path=%base_path%\\tmp\nset USERPROFILE=%tmp_path%\nset TEMP=%tmp_path%\\Temp\nset TMP=%tmp_path%\\Temp\nset APPDATA=%tmp_path%\\AppData\\Roaming\nset LOCALAPPDATA=%tmp_path%\\AppData\\Local\nset HF_HOME=%repo_path%\\huggingface_home\nset XDG_CACHE_HOME=%tmp_path%\nset HF_DATASETS_CACHE=%HF_HOME%\\datasets\n\nset PYTHONIOENCODING=utf-8\nset PYTHONUNBUFFERED=1\nset PYTHONDONTWRITEBYTECODE=1\n\nREM === CUDA PATHS ===\n{}\nset PATH=%python_path%;%PATH%\nset PATH=%python_path%\\Scripts;%PATH%\nset PATH=%git_path%;%PATH%\nset PATH=%ffmpeg_path%;%PATH%\n\ncd /d \"%repo_path%\"\n",
+                repo_name,
+                repo_name,
+                repo_name,
+                cuda_section,
+            )
+        } else {
+            // Use direct paths for simple paths
+            let install_path_str = self.install_path.to_string_lossy().replace('\\', "\\\\");
+            format!("@echo off\n") + &format!(
+                "echo Launch {}...\n\nset base_path={}\nset env_path=%base_path%\\ps_env\nset envs_path=%base_path%\\envs\nset repos_path=%base_path%\\repos\nset ffmpeg_path=%env_path%\\ffmpeg\nset git_path=%env_path%\\git\\bin\nset python_path=%envs_path%\\{}\nset python_exe=%python_path%\\python.exe\nset repo_path=%repos_path%\\{}\n\nset tmp_path=%base_path%\\tmp\nset USERPROFILE=%tmp_path%\nset TEMP=%tmp_path%\\Temp\nset TMP=%tmp_path%\\Temp\nset APPDATA=%tmp_path%\\AppData\\Roaming\nset LOCALAPPDATA=%tmp_path%\\AppData\\Local\nset HF_HOME=%repo_path%\\huggingface_home\nset XDG_CACHE_HOME=%tmp_path%\nset HF_DATASETS_CACHE=%HF_HOME%\\datasets\n\nset PYTHONIOENCODING=utf-8\nset PYTHONUNBUFFERED=1\nset PYTHONDONTWRITEBYTECODE=1\n\nREM === CUDA PATHS ===\n{}\nset PATH=%python_path%;%PATH%\nset PATH=%python_path%\\Scripts;%PATH%\nset PATH=%git_path%;%PATH%\nset PATH=%ffmpeg_path%;%PATH%\n\ncd /d \"%repo_path%\"\n",
+                repo_name,
+                install_path_str,
+                repo_name,
+                repo_name,
+                cuda_section,
+            )
+        };
         
         // Determine execution command based on available options
         let content = if let Some(main_file_path) = main_file {
             // Case 1: main_file found - use it
-            base_content + &format!(
-                "\"%python_exe%\" {} {}\nset EXIT_CODE=%ERRORLEVEL%\n\necho Cleaning up...\nsubst X: /D\n\nif %EXIT_CODE% neq 0 (\n    echo.\n    echo Program finished with error (code: %EXIT_CODE%)\n) else (\n    echo.\n    echo Program finished successfully\n)\n\npause\n",
-                main_file_path,
-                program_args,
-            )
+            if use_virtual_drive {
+                base_content + &format!(
+                    "\"%python_exe%\" {} {}\nset EXIT_CODE=%ERRORLEVEL%\n\necho Cleaning up...\nsubst X: /D\n\nif %EXIT_CODE% neq 0 (\n    echo.\n    echo Program finished with error (code: %EXIT_CODE%)\n) else (\n    echo.\n    echo Program finished successfully\n)\n\npause\n",
+                    main_file_path,
+                    program_args,
+                )
+            } else {
+                base_content + &format!(
+                    "\"%python_exe%\" {} {}\nset EXIT_CODE=%ERRORLEVEL%\n\nif %EXIT_CODE% neq 0 (\n    echo.\n    echo Program finished with error (code: %EXIT_CODE%)\n) else (\n    echo.\n    echo Program finished successfully\n)\n\npause\n",
+                    main_file_path,
+                    program_args,
+                )
+            }
         } else if has_pyproject_scripts {
             // Case 2: no main_file but pyproject.toml has scripts
             if let Some(module_path) = script_module {
                 info!("No main file found, using pyproject.toml script: {}", module_path);
-                base_content + &format!(
-                    "\"%python_exe%\" -m {} {}\nset EXIT_CODE=%ERRORLEVEL%\n\necho Cleaning up...\nsubst X: /D\n\nif %EXIT_CODE% neq 0 (\n    echo.\n    echo Program finished with error (code: %EXIT_CODE%)\n) else (\n    echo.\n    echo Program finished successfully\n)\n\npause\n",
-                    module_path,
-                    program_args,
-                )
+                if use_virtual_drive {
+                    base_content + &format!(
+                        "\"%python_exe%\" -m {} {}\nset EXIT_CODE=%ERRORLEVEL%\n\necho Cleaning up...\nsubst X: /D\n\nif %EXIT_CODE% neq 0 (\n    echo.\n    echo Program finished with error (code: %EXIT_CODE%)\n) else (\n    echo.\n    echo Program finished successfully\n)\n\npause\n",
+                        module_path,
+                        program_args,
+                    )
+                } else {
+                    base_content + &format!(
+                        "\"%python_exe%\" -m {} {}\nset EXIT_CODE=%ERRORLEVEL%\n\nif %EXIT_CODE% neq 0 (\n    echo.\n    echo Program finished with error (code: %EXIT_CODE%)\n) else (\n    echo.\n    echo Program finished successfully\n)\n\npause\n",
+                        module_path,
+                        program_args,
+                    )
+                }
             } else {
                 // Fallback case - should not happen but handle gracefully
                 warn!("No main file or valid pyproject script found, generating interactive shell");
-                base_content + &format!(
-                    "\"%python_exe%\"\nset EXIT_CODE=%ERRORLEVEL%\n\necho Cleaning up...\nsubst X: /D\n\nif %EXIT_CODE% neq 0 (\n    echo.\n    echo Program finished with error (code: %EXIT_CODE%)\n) else (\n    echo.\n    echo Program finished successfully\n)\n\npause\n"
-                )
+                if use_virtual_drive {
+                    base_content + &format!(
+                        "\"%python_exe%\"\nset EXIT_CODE=%ERRORLEVEL%\n\necho Cleaning up...\nsubst X: /D\n\nif %EXIT_CODE% neq 0 (\n    echo.\n    echo Program finished with error (code: %EXIT_CODE%)\n) else (\n    echo.\n    echo Program finished successfully\n)\n\npause\n"
+                    )
+                } else {
+                    base_content + &format!(
+                        "\"%python_exe%\"\nset EXIT_CODE=%ERRORLEVEL%\n\nif %EXIT_CODE% neq 0 (\n    echo.\n    echo Program finished with error (code: %EXIT_CODE%)\n) else (\n    echo.\n    echo Program finished successfully\n)\n\npause\n"
+                    )
+                }
             }
         } else {
             // Case 3: no main_file and no pyproject.toml - just python shell
             warn!("No main file or pyproject.toml scripts found, generating interactive Python shell");
-            base_content + &format!(
-                "\"%python_exe%\"\nset EXIT_CODE=%ERRORLEVEL%\n\necho Cleaning up...\nsubst X: /D\n\nif %EXIT_CODE% neq 0 (\n    echo.\n    echo Program finished with error (code: %EXIT_CODE%)\n) else (\n    echo.\n    echo Program finished successfully\n)\n\npause\n"
-            )
+            if use_virtual_drive {
+                base_content + &format!(
+                    "\"%python_exe%\"\nset EXIT_CODE=%ERRORLEVEL%\n\necho Cleaning up...\nsubst X: /D\n\nif %EXIT_CODE% neq 0 (\n    echo.\n    echo Program finished with error (code: %EXIT_CODE%)\n) else (\n    echo.\n    echo Program finished successfully\n)\n\npause\n"
+                )
+            } else {
+                base_content + &format!(
+                    "\"%python_exe%\"\nset EXIT_CODE=%ERRORLEVEL%\n\nif %EXIT_CODE% neq 0 (\n    echo.\n    echo Program finished with error (code: %EXIT_CODE%)\n) else (\n    echo.\n    echo Program finished successfully\n)\n\npause\n"
+                )
+            }
         };
         
         let mut f = fs::File::create(&bat_file)?;
@@ -222,5 +266,27 @@ impl<'a> ScriptGenerator<'a> {
     /// Check for pyproject.toml scripts
     fn check_scripts_in_pyproject(&self, repo_path: &Path) -> Result<(bool, Option<String>)> {
         self.pip_manager.check_scripts_in_pyproject(repo_path)
+    }
+    
+    /// Check if virtual drive is needed based on path characteristics
+    fn needs_virtual_drive(&self, base_path: &Path) -> bool {
+        let path_str = base_path.to_string_lossy();
+        
+        // Check path length > 150 characters
+        if path_str.len() > 150 {
+            return true;
+        }
+        
+        // Check for spaces in path
+        if path_str.contains(' ') {
+            return true;
+        }
+        
+        // Check for non-ASCII characters (includes Russian text)
+        if !path_str.is_ascii() {
+            return true;
+        }
+        
+        false
     }
 }

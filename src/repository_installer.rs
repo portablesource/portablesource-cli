@@ -88,13 +88,9 @@ impl RepositoryInstaller {
         git_manager.update_repository(&repo_path)?;
 
         // Create components for dependency installation
-        let pip_manager = PipManager::new(&command_runner, &self.env_manager, &self.config_manager);
+        let pip_manager = PipManager::new(&command_runner, &self.config_manager);
         let dependency_installer = DependencyInstaller::new(
-            &command_runner,
-            &git_manager,
             &pip_manager,
-            &self.env_manager,
-            &self.config_manager,
             &self.server_client,
             self.install_path.clone(),
         );
@@ -226,7 +222,7 @@ impl RepositoryInstaller {
         // Create modular components for this operation
         let command_runner = CommandRunner::new(&self.env_manager);
         let git_manager = GitManager::new(&command_runner, &self.env_manager);
-        let pip_manager = PipManager::new(&command_runner, &self.env_manager, &self.config_manager);
+        let pip_manager = PipManager::new(&command_runner, &self.config_manager);
         
         // Clone or update using GitManager
         let repo_info = GitRepositoryInfo { 
@@ -242,11 +238,7 @@ impl RepositoryInstaller {
 
         // Install dependencies using DependencyInstaller
         let dependency_installer = DependencyInstaller::new(
-            &command_runner,
-            &git_manager,
             &pip_manager,
-            &self.env_manager,
-            &self.config_manager,
             &self.server_client,
             self.install_path.clone(),
         );
@@ -269,9 +261,6 @@ impl RepositoryInstaller {
         // Send stats (non-fatal)
         let _ = self.server_client.send_download_stats(&repo_name);
 
-        // Special setup hooks
-        self.apply_special_setup(&repo_name, &repo_path)?;
-
         info!("Repository '{}' installed successfully", repo_name);
         Ok(())
     }
@@ -291,7 +280,7 @@ impl RepositoryInstaller {
         // Create modular components for this operation
         let command_runner = CommandRunner::new(&self.env_manager);
         let git_manager = GitManager::new(&command_runner, &self.env_manager);
-        let pip_manager = PipManager::new(&command_runner, &self.env_manager, &self.config_manager);
+        let pip_manager = PipManager::new(&command_runner, &self.config_manager);
         
         // Convert to GitRepositoryInfo
         let git_repo_info = GitRepositoryInfo {
@@ -303,11 +292,7 @@ impl RepositoryInstaller {
 
         println!("[PortableSource] Installing dependencies...");
         let dependency_installer = DependencyInstaller::new(
-            &command_runner,
-            &git_manager,
             &pip_manager,
-            &self.env_manager,
-            &self.config_manager,
             &self.server_client,
             self.install_path.clone(),
         );
@@ -328,9 +313,6 @@ impl RepositoryInstaller {
         script_generator.generate_startup_script(&repo_path, &script_repo_info)?;
 
         let _ = self.server_client.send_download_stats(&name);
-
-        // Special setup hooks
-        self.apply_special_setup(&name, &repo_path)?;
         Ok(())
     }
     
@@ -390,29 +372,6 @@ impl RepositoryInstaller {
     fn write_link_file(&self, repo_path: &Path, repo_url: &str) -> Result<()> {
         let link_file = repo_path.join("link.txt");
         fs::write(&link_file, repo_url)?;
-        Ok(())
-    }
-
-    fn apply_special_setup(&self, repo_name: &str, repo_path: &Path) -> Result<()> {
-        // Special setup hooks for specific repositories
-        let repo_name_lower = repo_name.to_lowercase();
-        
-        if repo_name_lower.contains("stable-diffusion") {
-            info!("Applying Stable Diffusion specific setup");
-            // Create models directory structure
-            let models_dir = repo_path.join("models");
-            let _ = fs::create_dir_all(&models_dir.join("Stable-diffusion"));
-            let _ = fs::create_dir_all(&models_dir.join("VAE"));
-            let _ = fs::create_dir_all(&models_dir.join("Lora"));
-        }
-        
-        if repo_name_lower.contains("comfyui") {
-            info!("Applying ComfyUI specific setup");
-            let _ = fs::create_dir_all(&repo_path.join("models").join("checkpoints"));
-            let _ = fs::create_dir_all(&repo_path.join("custom_nodes"));
-            let _ = fs::create_dir_all(&repo_path.join("output"));
-        }
-        
         Ok(())
     }
 }
